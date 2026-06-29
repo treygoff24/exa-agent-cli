@@ -1,0 +1,16 @@
+# Rust build artifacts (the binary + OUT_DIR-generated registry land here — docs/v2)
+/target/
+**/*.rs.bk
+
+# Cargo.lock IS committed (plan: CI uses --locked) — do not ignore it.
+
+# OS / editor noise
+.DS_Store
+*.swp
+*~
+
+# Local agent tooling state, not project content
+/.delegate/
+# Project-local Claude scaffolding is currently empty; if you later add
+# committable project agents/skills, un-ignore the specific path below.
+/.claude/

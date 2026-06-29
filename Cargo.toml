@@ -42,6 +42,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 toml = "0.8"
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
+sha2 = "0.10"
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -135,6 +135,46 @@ fn parse_robot_docs_commands() {
 }
 
 #[test]
+fn schema_commands_work_offline() {
+    let show = run_ok_json(&["schema", "show", "search", "--compact"]);
+    assert_eq!(show["schema"], "exa.cli.schema_show.v1");
+    assert_eq!(show["ok"], true);
+    assert_eq!(show["operation"]["command"], "search");
+
+    let export = run_ok_json(&["schema", "export", "--api", "openapi", "--compact"]);
+    assert_eq!(export["schema"], "exa.cli.schema_export.v1");
+    assert_eq!(export["target"], "openapi");
+    assert!(!export["operations"].as_array().unwrap().is_empty());
+
+    let validate = run_ok_json(&["schema", "validate-input", "search", "--compact"]);
+    assert_eq!(validate["schema"], "exa.cli.schema_validate_input.v1");
+    assert_eq!(validate["valid"], true);
+
+    let refresh = run_ok_json(&["schema", "refresh", "--check", "--compact"]);
+    assert_eq!(refresh["schema"], "exa.cli.schema_refresh.v1");
+    assert_eq!(refresh["status"], "current");
+}
+
+#[test]
+fn robot_docs_commands_work_offline() {
+    for (args, section) in [
+        (vec!["robot-docs", "guide", "--compact"], "guide"),
+        (vec!["robot-docs", "commands", "--compact"], "commands"),
+        (vec!["robot-docs", "errors", "--compact"], "errors"),
+        (
+            vec!["robot-docs", "examples", "--task", "search", "--compact"],
+            "examples",
+        ),
+        (vec!["robot-docs", "prompts", "--compact"], "prompts"),
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(json["schema"], "exa.cli.robot_docs.v1");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["section"], section);
+    }
+}
+
+#[test]
 fn parse_config_commands() {
     assert_path(&["config", "list"], "config list");
     assert_path(&["config", "get", "base-url"], "config get");
@@ -212,11 +252,14 @@ fn raw_dry_run_includes_query_preview() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(json["schema"], "exa.cli.request_preview.v1");
-    assert_eq!(json["request"]["method"], "GET");
-    assert_eq!(json["request"]["path"], "/v0/websets");
+    assert_eq!(json["schema"], "exa.cli.response.v1");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "raw");
+    assert!(json["dataHash"].as_str().unwrap().starts_with("sha256:"));
+    assert_eq!(json["data"]["request"]["method"], "GET");
+    assert_eq!(json["data"]["request"]["path"], "/v0/websets");
     assert_eq!(
-        json["request"]["query"],
+        json["data"]["request"]["query"],
         serde_json::json!([
             { "name": "status", "value": "running" },
             { "name": "limit", "value": "10" }
@@ -238,11 +281,25 @@ fn raw_dry_run_redacts_secret_query_values() {
         "--compact",
     ]);
     assert_eq!(
-        json["request"]["query"],
+        json["data"]["request"]["query"],
         serde_json::json!([
             { "name": "api_key", "value": "<redacted>" },
             { "name": "status", "value": "running" }
         ])
+    );
+
+    let json = run_ok_json(&[
+        "raw",
+        "GET",
+        "/v0/websets",
+        "--query",
+        "q=11111111-2222-3333-4444-555555555555",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["query"],
+        serde_json::json!([{ "name": "q", "value": "<redacted>" }])
     );
 }
 
@@ -515,7 +572,10 @@ fn search_dry_run_merges_body_and_set_with_redaction() {
         "--dry-run",
         "--compact",
     ]);
-    let body = &json["request"]["body"];
+    assert_eq!(json["schema"], "exa.cli.response.v1");
+    assert_eq!(json["command"], "search");
+    assert!(json["dataHash"].as_str().unwrap().starts_with("sha256:"));
+    let body = &json["data"]["request"]["body"];
     assert_eq!(body["query"], "named query");
     assert_eq!(body["numResults"], 10);
     assert_eq!(body["contents"]["summary"]["query"], "body summary");
@@ -536,10 +596,159 @@ fn raw_dry_run_reads_body_and_set_then_redacts() {
         "--dry-run",
         "--compact",
     ]);
-    let body = &json["request"]["body"];
+    let body = &json["data"]["request"]["body"];
     assert_eq!(body["query"], "keep");
     assert_eq!(body["password"], "<redacted>");
     assert_eq!(body["token"], "<redacted>");
+}
+
+#[test]
+fn raw_refuses_user_authorization_header_before_auth() {
+    let output = run(&[
+        "--header",
+        "Authorization: Bearer user-supplied-secret",
+        "raw",
+        "GET",
+        "/search",
+        "--compact",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["schema"], "exa.cli.error.v1");
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!all.contains("user-supplied-secret"));
+}
+
+#[test]
+fn raw_dry_run_refuses_user_authorization_header() {
+    let output = run(&[
+        "--header",
+        "Authorization: Bearer user-supplied-secret",
+        "raw",
+        "GET",
+        "/search",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert_eq!(stderr["operation"]["method"], "GET");
+    assert_eq!(stderr["operation"]["path"], "/search");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!all.contains("user-supplied-secret"));
+}
+
+#[test]
+fn raw_live_without_credential_is_not_authenticated() {
+    let dir = temp_path("raw-no-credential");
+    let missing_credentials = dir.join("missing-credentials.json");
+    let output = run_with_env(
+        &[
+            "--correlation-id",
+            "corr-raw-no-credential",
+            "raw",
+            "GET",
+            "/search",
+            "--compact",
+        ],
+        &[(
+            "EXA_AGENT_CREDENTIALS",
+            missing_credentials.to_str().unwrap(),
+        )],
+    );
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["schema"], "exa.cli.error.v1");
+    assert_eq!(stderr["error"]["code"], "not_authenticated");
+    assert_eq!(stderr["operation"]["method"], "GET");
+    assert_eq!(stderr["operation"]["path"], "/search");
+    assert_eq!(stderr["request"]["correlationId"], "corr-raw-no-credential");
+    assert!(stderr["request"]["requestId"]
+        .as_str()
+        .unwrap()
+        .starts_with("req_local_"));
+    assert!(stderr["error"]["details"]["checked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str().unwrap_or("").contains("credentials")));
+}
+
+#[test]
+fn raw_error_context_redacts_secret_shaped_path() {
+    let dir = temp_path("raw-redact-path");
+    let missing_credentials = dir.join("missing-credentials.json");
+    let output = run_with_env(
+        &[
+            "--correlation-id",
+            "11111111-2222-3333-4444-555555555555",
+            "raw",
+            "GET",
+            "/search/11111111-2222-3333-4444-555555555555",
+            "--compact",
+        ],
+        &[(
+            "EXA_AGENT_CREDENTIALS",
+            missing_credentials.to_str().unwrap(),
+        )],
+    );
+    assert!(!output.status.success());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["operation"]["path"], "/search/<redacted>");
+    assert_eq!(stderr["request"]["correlationId"], "<redacted>");
+    let all = String::from_utf8_lossy(&output.stderr);
+    assert!(!all.contains("11111111-2222-3333-4444-555555555555"));
+}
+
+#[test]
+fn raw_malformed_inputs_do_not_echo_secret_values() {
+    let output = run(&[
+        "--header",
+        "X-Trace 11111111-2222-3333-4444-555555555555",
+        "raw",
+        "GET",
+        "/search",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`--header` must be `Name: value`"));
+    assert!(!stderr.contains("11111111-2222-3333-4444-555555555555"));
+
+    let output = run(&[
+        "raw",
+        "GET",
+        "/search",
+        "--query",
+        "q 11111111-2222-3333-4444-555555555555",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("raw --query expects `key=value`"));
+    assert!(!stderr.contains("11111111-2222-3333-4444-555555555555"));
 }
 
 #[test]
@@ -788,6 +997,7 @@ fn parse_preserves_global_flags_with_leaf_command() {
         "1024",
     ]);
     assert!(cli.globals.json);
+    assert!(cli.globals.retry_after);
     assert_eq!(cli.globals.profile.as_deref(), Some("work"));
     assert_eq!(cli.globals.correlation_id.as_deref(), Some("run-1"));
     assert_eq!(cli.globals.idempotency_key.as_deref(), Some("idem-1"));

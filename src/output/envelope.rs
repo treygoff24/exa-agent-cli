@@ -12,6 +12,8 @@ pub struct ErrorEnvelope {
     pub schema: &'static str,
     pub ok: bool,
     pub error: ErrorBody,
+    pub operation: ErrorOperation,
+    pub request: ErrorRequest,
 }
 
 #[derive(Serialize)]
@@ -28,6 +30,23 @@ pub struct ErrorBody {
     pub http_status: Option<u16>,
     #[serde(rename = "suggestedCommand", skip_serializing_if = "Option::is_none")]
     pub suggested_command: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ErrorOperation {
+    pub method: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ErrorRequest {
+    #[serde(rename = "requestId")]
+    pub request_id: Option<String>,
+    #[serde(rename = "upstreamRequestId")]
+    pub upstream_request_id: Option<String>,
+    #[serde(rename = "correlationId")]
+    pub correlation_id: Option<String>,
+    pub redacted: bool,
 }
 
 impl ErrorEnvelope {
@@ -50,11 +69,35 @@ impl ErrorEnvelope {
                 http_status: d.http_status,
                 suggested_command: d.suggested_command.as_deref().map(redaction::scrub_text),
             },
+            operation: ErrorOperation {
+                method: None,
+                path: None,
+            },
+            request: ErrorRequest {
+                request_id: None,
+                upstream_request_id: None,
+                correlation_id: None,
+                redacted: true,
+            },
         }
     }
 
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    pub fn with_context(
+        mut self,
+        method: impl Into<String>,
+        path: impl Into<String>,
+        request_id: impl Into<String>,
+        correlation_id: Option<String>,
+    ) -> Self {
+        self.operation.method = Some(redaction::scrub_text(&method.into()));
+        self.operation.path = Some(redaction::scrub_text(&path.into()));
+        self.request.request_id = Some(request_id.into());
+        self.request.correlation_id = correlation_id.map(|value| redaction::scrub_text(&value));
+        self
     }
 }
 
@@ -73,20 +116,7 @@ pub fn capabilities() -> serde_json::Value {
         })
         .collect();
 
-    let error_codes: serde_json::Map<String, serde_json::Value> = error_code_specs()
-        .into_iter()
-        .map(|(code, spec)| {
-            (
-                code.to_string(),
-                serde_json::json!({
-                    "category": spec.category,
-                    "exit": spec.exit,
-                    "retryable": spec.retryable,
-                    "description": spec.description,
-                }),
-            )
-        })
-        .collect();
+    let error_codes = error_codes_json();
 
     serde_json::json!({
         "schema": "exa.cli.capabilities.v1",
@@ -130,6 +160,70 @@ pub fn capabilities() -> serde_json::Value {
                 "connectivity",
             ],
         },
+    })
+}
+
+pub fn error_codes_json() -> serde_json::Map<String, serde_json::Value> {
+    error_code_specs()
+        .into_iter()
+        .map(|(code, spec)| {
+            (
+                code.to_string(),
+                serde_json::json!({
+                    "category": spec.category,
+                    "exit": spec.exit,
+                    "retryable": spec.retryable,
+                    "description": spec.description,
+                }),
+            )
+        })
+        .collect()
+}
+
+/// `exa.cli.response.v1` success envelope (contracts §4).
+pub struct ResponseEnvelopeArgs<'a> {
+    pub command: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub request_id: &'a str,
+    pub profile: &'a str,
+    pub correlation_id: Option<&'a str>,
+    pub data: serde_json::Value,
+    pub count: Option<u64>,
+    pub data_hash: Option<String>,
+    pub retries: u32,
+}
+
+pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "exa.cli.response.v1",
+        "ok": true,
+        "command": args.command,
+        "operation": {
+            "method": args.method,
+            "path": args.path,
+            "operationId": null,
+            "source": registry::SPEC_URL,
+            "sourceVersion": registry::SPEC_VERSION,
+        },
+        "request": {
+            "requestId": args.request_id,
+            "upstreamRequestId": null,
+            "correlationId": args.correlation_id,
+            "profile": args.profile,
+            "redacted": true,
+        },
+        "count": args.count,
+        "data": args.data,
+        "dataHash": args.data_hash,
+        "pagination": null,
+        "costDollars": { "total": 0.0 },
+        "nextActions": [],
+        "warnings": [],
+        "diagnostics": { "durationMs": 0, "retries": args.retries },
+        "dataTruncated": false,
+        "dataPath": null,
+        "bytes": null,
     })
 }
 

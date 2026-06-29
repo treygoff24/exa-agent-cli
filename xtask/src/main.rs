@@ -226,10 +226,151 @@ fn ci() -> Result<()> {
 
 fn phase_gate(n: Option<&str>) -> Result<()> {
     let n = n.unwrap_or("1");
-    // Phase-1 skeleton: run the workspace tests. The named per-phase test subset lands with
-    // the invariant regression matrix.
     run("cargo", &["test", "--workspace", "--locked"])?;
+    if n == "1" {
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "capabilities",
+                "--compact",
+            ],
+            "exa.cli.capabilities.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "schema",
+                "list",
+                "--compact",
+            ],
+            "exa.cli.schema_list.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "schema",
+                "show",
+                "search",
+                "--compact",
+            ],
+            "exa.cli.schema_show.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "schema",
+                "refresh",
+                "--check",
+                "--compact",
+            ],
+            "exa.cli.schema_refresh.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "robot-docs",
+                "guide",
+                "--compact",
+            ],
+            "exa.cli.robot_docs.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "raw",
+                "GET",
+                "/search",
+                "--body",
+                "{\"query\":\"agents\"}",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "search",
+                "agents",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+    }
     println!("phase-gate {n}: OK");
+    Ok(())
+}
+
+fn run_json(cmd: &str, args: &[&str], expected_schema: &str) -> Result<()> {
+    eprintln!("$ {cmd} {}", args.join(" "));
+    let output = Command::new(cmd)
+        .args(args)
+        .output()
+        .with_context(|| format!("spawn {cmd}"))?;
+    if !output.status.success() {
+        bail!(
+            "{cmd} {} failed ({})\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "{cmd} {} did not emit JSON on stdout:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    let schema = value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if schema != expected_schema {
+        bail!(
+            "{cmd} {} emitted schema `{schema}`, expected `{expected_schema}`",
+            args.join(" ")
+        );
+    }
     Ok(())
 }
 

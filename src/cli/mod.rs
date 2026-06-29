@@ -164,7 +164,7 @@ pub struct GlobalArgs {
     pub connect_timeout: Option<String>,
     #[arg(long, global = true, default_value_t = 2)]
     pub retry: u32,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, default_value_t = true)]
     pub retry_after: bool,
     #[arg(long, global = true)]
     pub idempotency_key: Option<String>,

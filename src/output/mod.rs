@@ -50,3 +50,24 @@ pub fn emit_stdout(value: &serde_json::Value, pretty: bool) {
     };
     println!("{s}");
 }
+
+/// Emit exact upstream response bytes (`--raw`, contracts §2).
+pub fn emit_raw(body: &[u8]) -> std::io::Result<()> {
+    let mut out = std::io::stdout().lock();
+    write_raw(&mut out, body)
+}
+
+pub fn write_raw(out: &mut impl std::io::Write, body: &[u8]) -> std::io::Result<()> {
+    out.write_all(body)?;
+    out.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn write_raw_does_not_append_newline() {
+        let mut out = Vec::new();
+        super::write_raw(&mut out, b"{\"ok\":true}").unwrap();
+        assert_eq!(out, br#"{"ok":true}"#);
+    }
+}

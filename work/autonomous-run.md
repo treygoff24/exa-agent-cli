@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 1C complete after native + GLM review; local commit pending.
+Status: Wave 1D complete; next wave is 2A search/contents typed APIs.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`.
+  `70ac1ad`; latest committed checkpoint `a3dc0dd`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -26,7 +26,8 @@ Codex owns updates.
 - Implementation started. Wave 1A expanded the typed parser surface and
   not-implemented envelope routing. Wave 1B added request merge/redaction spine.
   Wave 1C added local auth, non-secret config, doctor, and contract/error
-  hardening surfaces.
+  hardening surfaces. Wave 1D currently has raw transport/offline
+  self-description changes in the working tree pending review and commit.
 
 ## Pre-run checklist
 
@@ -48,7 +49,7 @@ Codex owns updates.
 | 1A Registry/parser/envelope | complete | Delegate Cursor Composer + parent integration | native reviewer found `raw --query` preview omission; fixed; re-review clean | GLM review clean; P3 redaction hardening fixed | `cargo xtask ci` pass |
 | 1B Request/redaction/body merge | complete | native redaction lane + Delegate Cursor Composer request lane + parent integration | native found `--set` numeric-index panic/OOM risk; fixed; re-review clean | GLM review clean; P3 raw query redaction fixed; narrow re-review clean | `cargo xtask ci` pass |
 | 1C Auth/config/doctor | complete | native auth lane + Delegate Cursor Composer config/doctor lane + parent integration | native found secret-env config, stdin flag, doctor warning/check, URL, and logout issues; fixed; re-reviews clean | GLM found error-code contract drift and empty config path guard; fixed; narrow re-review clean | `cargo xtask ci` pass; non-printing stored-credential smokes pass |
-| 1D Raw/search/goldens | not started | - | - | - | - |
+| 1D Raw/search/goldens | complete | Delegate Cursor Composer + parent integration | findings fixed; narrow re-review found final error-context redaction issue; fixed | findings fixed; re-review no blocking findings | `cargo xtask phase-gate 1` pass; `cargo xtask ci` pass |
 | 2A Search/contents | not started | - | - | - | - |
 | 2B Answer/context/similar/streaming | not started | - | - | - | - |
 | 2C Team/macros/deprecations | not started | - | - | - | - |
@@ -78,6 +79,22 @@ Record every review finding that is not immediately fixed.
 | 1C | GLM | P2 | Error-code dictionary advertised `partial_success` instead of contract `partial_batch` and missed three contract codes | fixed | Added `partial_batch`, `upstream_malformed`, `concurrency_limit`, `idempotency_conflict`; capabilities regressions added. |
 | 1C | GLM | P3 | `config_path()` used empty `EXA_AGENT_CONFIG`/`XDG_CONFIG_HOME` instead of falling through | fixed | Mirrored credentials path empty-env guards; regression added. |
 | 1C | parent | high | Real stored API-key string was accidentally used as a UUID redaction test fixture | fixed | Replaced with synthetic UUID fixture; non-printing secret scan now passes. |
+| 1D | native checklist | high | `raw` lacked live transport/response envelope, `--raw` exact bytes, managed-header refusal, and offline schema/robot-doc commands | fixed | Added ureq/rustls transport seam, success response envelope, exact byte passthrough, auth header refusal, schema/robot-doc dispatch, and tests/gate. |
+| 1D | native review | high | Documented `raw GET /search --body @q.json` path was parsed but rejected by live transport | fixed | Used ureq `force_send_body()` for GET/DELETE/OPTIONS with body; added GET-body raw test and phase-gate dry-run command. |
+| 1D | native review | medium | Raw live error envelopes lacked operation/request context | fixed | Raw dispatch now wraps errors with method/path/requestId/correlationId; no-credential regression asserts the context. |
+| 1D | native review | medium | Forbidden managed auth headers were accepted during `--dry-run --print-request` | fixed | Raw dispatch validates user headers before dry-run success; dry-run regression added. |
+| 1D | native review | medium | Raw query preview redacted by key name only, not secret-shaped values | fixed | Non-secret query values now pass through shared `scrub_text`; UUID-shaped query regression added. |
+| 1D | GLM review | P1 | `--retry-after` defaulted off despite contract default-on | fixed | Clap default is now true; parser regression asserts it. |
+| 1D | GLM review | P1 | Body requests always appended `Content-Type: application/json`, overriding custom raw content types | fixed | Transport now adds default JSON content type only if the user did not provide one; regression added for custom content type preservation. |
+| 1D | GLM review | P2 | `OPTIONS` was considered idempotent but unsupported by transport | fixed | Added OPTIONS transport path and retry-model regression. |
+| 1D | GLM review | P2 | `emit_raw` ignored write errors and relied on drop flush | fixed | Raw writer now writes+flushes and maps failures to structured `interrupted`; no-newline writer regression added. |
+| 1D | GLM review | P2 | 409s could not surface `idempotency_conflict` | fixed | 409 body heuristic now emits `idempotency_conflict` when idempotency is named; regression added. |
+| 1D | GLM review | P3 | Phase 1 gate smoke commands only checked exit status | fixed | `xtask phase-gate 1` now parses stdout JSON and checks expected schema for each smoke command. |
+| 1D | GLM review | P3 | `robot-docs errors` rebuilt full capabilities just to get error codes | fixed | Extracted `error_codes_json()` helper and reused it. |
+| 1D | native re-review | medium | Raw error/context paths and malformed header/query validation could echo user-supplied secret material | fixed | Error context method/path/correlation are scrubbed and malformed header/query errors no longer echo raw input; regressions added. |
+| 1D | GLM re-review | P3 | Error envelopes are pretty-printed even under `--compact`; upstream request ids, HTTP-date Retry-After, and backoff tuning remain limited | accepted for now | Non-blocking residuals; stderr remains parseable JSON, upstream IDs/backoff tuning are later transport hardening work. |
+| 1D | parent | high | The amended Wave 1C commit plus a stale Delegate worktree branch still made the real stored key reachable in branch history | fixed | Amended `src/doctor.rs` fixture to a synthetic UUID and removed `cursor-7` via Delegate manager; branch-wide non-printing secret scan passes. |
+| 1D | parent | medium | Supplied live API key returns 401 with both `x-api-key` and Bearer probes | open | Offline gates pass; final live smoke remains blocked until Trey provides a valid key or account access is restored. |
 
 ## Gate log
 
@@ -103,6 +120,19 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `delegate worktree remove cursor-6 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager |
 | 2026-06-29 | non-printing tracked-file/diff secret scan | pass | Stored API key absent from tracked files and diff after fixture replacement |
 | 2026-06-29 | `cargo xtask ci` | pass | Wave 1C final gate after secret fixture replacement |
+| 2026-06-29 | `cargo test --test transport --test cli --test redaction --test doctor --locked` | pass | Wave 1D focused raw/offline self-description tests |
+| 2026-06-29 | `cargo xtask phase-gate 1` | pass | Strengthened Phase 1 gate: tests plus capabilities/schema/robot-docs/raw/search dry-runs |
+| 2026-06-29 | `cargo xtask ci` | pass | Wave 1D pre-review gate; fmt, clippy, tests |
+| 2026-06-29 | `cargo test --test cli --test transport --locked` | pass | After native review fixes |
+| 2026-06-29 | `cargo xtask ci` | pass | After native review fixes |
+| 2026-06-29 | `cargo test --test cli --test transport --locked` | pass | After GLM review fixes |
+| 2026-06-29 | `cargo xtask phase-gate 1` | pass | After GLM review fixes; smoke commands assert schemas |
+| 2026-06-29 | `cargo xtask ci` | pass | After GLM review fixes |
+| 2026-06-29 | `cargo test --test cli --test transport --locked` | pass | After native narrow re-review error-redaction fix |
+| 2026-06-29 | `cargo xtask phase-gate 1` | pass | After native narrow re-review error-redaction fix |
+| 2026-06-29 | `cargo xtask ci` | pass | After native narrow re-review error-redaction fix |
+| 2026-06-29 | non-printing branch-wide secret scan | pass | Stored API key absent from tracked files, diff, reachable branch commits after commit amend and Delegate worktree removal |
+| 2026-06-29 | non-printing live auth probe | blocked | Stored API key produced structured `reauth_required`/401 for `/websets/v0/teams/me`; output did not contain secret |
 
 ## Local commit log
 
@@ -111,7 +141,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `70ac1ad` | Baseline scaffold + autonomous plan | `cargo xtask ci` |
 | 2026-06-29 | `4a323df` | Wave 1A parser contract surface | `cargo xtask ci`; native review clean; GLM review clean |
 | 2026-06-29 | `c226444` | Wave 1B request merge and redaction spine | `cargo xtask ci`; native review clean; GLM review clean |
-| 2026-06-29 | this commit | Wave 1C auth, config, and doctor surfaces | `cargo xtask ci`; native review clean; GLM review clean; credential smokes pass |
+| 2026-06-29 | `a3dc0dd` | Wave 1C auth, config, and doctor surfaces | `cargo xtask ci`; native review clean; GLM review clean; credential smokes pass; real-key fixture purged by amend |
+| 2026-06-29 | this commit | Wave 1D raw transport, response envelope, offline schema/robot-docs, and Phase 1 gate | `cargo xtask phase-gate 1`; `cargo xtask ci`; native + GLM reviews/re-reviews; branch-wide secret scan pass; live smoke blocked by credential 401 |
 
 ## Final completion checklist
 
@@ -125,7 +156,7 @@ Record every review finding that is not immediately fixed.
 - [ ] `cargo xtask smoke --budget "$EXA_E2E_BUDGET"` with real `EXA_API_KEY`
 - [ ] `cargo run -- capabilities --json`
 - [ ] `cargo run -- search "test query" --dry-run --print-request --json`
-- [ ] `cargo run -- raw GET /v0/teams/me --dry-run --print-request --json`
+- [ ] `cargo run -- raw GET /websets/v0/teams/me --dry-run --print-request --json`
 - [ ] final native review clean
 - [ ] final GLM review clean
 - [ ] no unreviewed Delegate worktrees

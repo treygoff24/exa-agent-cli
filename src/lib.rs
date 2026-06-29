@@ -12,17 +12,22 @@ pub mod output;
 pub mod redaction;
 pub mod registry;
 pub mod request;
+pub mod transport;
 
 use clap::Parser;
 use std::io::{self, IsTerminal, Read};
 
 use cli::{
-    command_path, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, GlobalArgs, SchemaCmd,
+    command_path, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, GlobalArgs, RobotDocsCmd,
+    SchemaCmd,
 };
 use error::{CliError, Diag};
-use output::envelope::{capabilities, ErrorEnvelope};
-use output::{emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
+use output::envelope::{
+    capabilities, error_codes_json, response_envelope, ErrorEnvelope, ResponseEnvelopeArgs,
+};
+use output::{emit_raw, emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
 use request::RequestOverrides;
+use transport::{execute_raw_with_request_id, parse_user_headers, RawExecuteParams, UreqTransport};
 
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
@@ -88,31 +93,8 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             emit_stdout(&capabilities(), pretty);
             Ok(0)
         }
-        Command::Schema {
-            sub: SchemaCmd::List,
-        } => {
-            let list: Vec<_> = registry::REGISTRY
-                .iter()
-                .map(|op| {
-                    serde_json::json!({
-                        "command": op.command(),
-                        "method": op.method.as_str(),
-                        "apiPath": op.api_path,
-                        "operationId": op.operation_id,
-                    })
-                })
-                .collect();
-            emit_stdout(
-                &serde_json::json!({
-                    "schema": "exa.cli.schema_list.v1",
-                    "ok": true,
-                    "count": list.len(),
-                    "operations": list,
-                }),
-                pretty,
-            );
-            Ok(0)
-        }
+        Command::Schema { sub } => dispatch_schema(sub, pretty),
+        Command::RobotDocs { sub } => dispatch_robot_docs(sub, pretty),
         Command::Doctor(args) => {
             let checks = parse_checks(&args.check);
             doctor::validate_check_ids(&checks)?;
@@ -158,34 +140,7 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 ))
             }
         }
-        Command::Raw(args) => {
-            if cli.globals.print_request || cli.globals.dry_run {
-                let mut body = raw_body(&cli.globals)?;
-                let query = raw_query_preview(&args.query)?;
-                redaction::redact_json_value(&mut body);
-                emit_stdout(
-                    &serde_json::json!({
-                        "schema": "exa.cli.request_preview.v1",
-                        "ok": true,
-                        "command": "raw",
-                        "request": {
-                            "method": args.method.to_uppercase(),
-                            "path": args.path,
-                            "query": query,
-                            "body": body
-                        },
-                        "dryRun": true,
-                    }),
-                    pretty,
-                );
-                Ok(0)
-            } else {
-                Err(not_implemented(
-                    "raw",
-                    "transport lands in the next milestone",
-                ))
-            }
-        }
+        Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
         _ => Err(not_implemented(
             &command_path(&cli.command),
             "parser skeleton only in this wave",
@@ -280,6 +235,194 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
             "network auth probe lands with transport",
         )),
     }
+}
+
+fn dispatch_schema(sub: &SchemaCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        SchemaCmd::List => {
+            let list = schema_operations();
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.schema_list.v1",
+                    "ok": true,
+                    "count": list.len(),
+                    "operations": list,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        SchemaCmd::Show { name } => {
+            let op = registry::lookup_by_command(name)
+                .or_else(|| registry::REGISTRY.iter().find(|op| op.operation_id == name))
+                .ok_or_else(|| {
+                    CliError::Usage(
+                        Diag::new(
+                            "invalid_value",
+                            format!("unknown schema or command `{name}`"),
+                        )
+                        .with_suggestion("exa-agent schema list"),
+                    )
+                })?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.schema_show.v1",
+                    "ok": true,
+                    "operation": operation_schema(op),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        SchemaCmd::Export(args) => {
+            let target = args.api.as_deref().or(args.cli.as_deref()).unwrap_or("cli");
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.schema_export.v1",
+                    "ok": true,
+                    "target": target,
+                    "spec": {
+                        "title": registry::SPEC_TITLE,
+                        "version": registry::SPEC_VERSION,
+                        "url": registry::SPEC_URL,
+                        "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
+                    },
+                    "operations": schema_operations(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        SchemaCmd::ValidateInput(args) => {
+            let op = registry::lookup_by_command(&args.command).ok_or_else(|| {
+                CliError::Usage(
+                    Diag::new(
+                        "invalid_value",
+                        format!("unknown command `{}`", args.command),
+                    )
+                    .with_suggestion("exa-agent schema list"),
+                )
+            })?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.schema_validate_input.v1",
+                    "ok": true,
+                    "valid": true,
+                    "command": op.command(),
+                    "note": "offline structural validation is limited to known command discovery in this phase",
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        SchemaCmd::Refresh(args) => {
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.schema_refresh.v1",
+                    "ok": true,
+                    "check": args.check,
+                    "status": "current",
+                    "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        RobotDocsCmd::Guide => emit_robot_docs(
+            serde_json::json!({
+                "schema": "exa.cli.robot_docs.v1",
+                "ok": true,
+                "section": "guide",
+                "guidance": [
+                    "Use capabilities first to discover command metadata.",
+                    "Use --dry-run --print-request before live mutations.",
+                    "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
+                    "Errors are JSON on stderr with stable error.code values."
+                ],
+            }),
+            pretty,
+        ),
+        RobotDocsCmd::Commands => emit_robot_docs(
+            serde_json::json!({
+                "schema": "exa.cli.robot_docs.v1",
+                "ok": true,
+                "section": "commands",
+                "commands": schema_operations(),
+            }),
+            pretty,
+        ),
+        RobotDocsCmd::Errors => emit_robot_docs(
+            serde_json::json!({
+                "schema": "exa.cli.robot_docs.v1",
+                "ok": true,
+                "section": "errors",
+                "exitCodes": error::EXIT_CODES.iter().map(|(code, name, description)| {
+                    serde_json::json!({ "exit": code, "category": name, "description": description })
+                }).collect::<Vec<_>>(),
+                "errorCodes": error_codes_json(),
+            }),
+            pretty,
+        ),
+        RobotDocsCmd::Examples(args) => emit_robot_docs(
+            serde_json::json!({
+                "schema": "exa.cli.robot_docs.v1",
+                "ok": true,
+                "section": "examples",
+                "task": args.task,
+                "examples": [
+                    "exa-agent capabilities --compact",
+                    "exa-agent search \"AI infrastructure news\" --dry-run --print-request --compact",
+                    "exa-agent raw GET /websets/v0/teams/me --compact"
+                ],
+            }),
+            pretty,
+        ),
+        RobotDocsCmd::Prompts => emit_robot_docs(
+            serde_json::json!({
+                "schema": "exa.cli.robot_docs.v1",
+                "ok": true,
+                "section": "prompts",
+                "prompts": [
+                    "First run `exa-agent capabilities --compact`, then choose the narrowest command.",
+                    "Before live writes, run the same command with `--dry-run --print-request` and inspect the JSON envelope."
+                ],
+            }),
+            pretty,
+        ),
+    }
+}
+
+fn emit_robot_docs(value: serde_json::Value, pretty: bool) -> Result<i32, CliError> {
+    emit_stdout(&value, pretty);
+    Ok(0)
+}
+
+fn schema_operations() -> Vec<serde_json::Value> {
+    registry::REGISTRY.iter().map(operation_schema).collect()
+}
+
+fn operation_schema(op: &registry::OperationDef) -> serde_json::Value {
+    serde_json::json!({
+        "command": op.command(),
+        "method": op.method.as_str(),
+        "apiPath": op.api_path,
+        "operationId": op.operation_id,
+        "readOnly": op.read_only,
+        "streaming": op.streaming,
+        "destructive": op.destructive(),
+        "idempotencySensitive": op.idempotency_sensitive,
+        "deprecated": op.deprecated,
+        "fields": op.fields.iter().map(|field| serde_json::json!({
+            "flag": field.flag,
+            "bodyPath": field.body_path,
+            "required": field.required,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
@@ -485,11 +628,146 @@ fn parse_checks(raw: &[String]) -> Vec<String> {
 }
 
 fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
-    spec.preview_with_redactor(|body| {
-        let mut redacted = body.clone();
-        redaction::redact_json_value(&mut redacted);
-        redacted
+    let mut body = spec.body.clone();
+    redaction::redact_json_value(&mut body);
+    let command = spec.op.command();
+    let data = serde_json::json!({
+        "request": {
+            "method": spec.op.method.as_str(),
+            "path": spec.op.api_path,
+            "body": body,
+        },
+        "dryRun": true,
+    });
+    let count = transport::primary_count(data.get("request").unwrap_or(&data));
+    let hash = transport::data_hash(&data);
+    response_envelope(ResponseEnvelopeArgs {
+        command: &command,
+        method: spec.op.method.as_str(),
+        path: spec.op.api_path,
+        request_id: "req_dry_run",
+        profile: "default",
+        correlation_id: None,
+        data,
+        count,
+        data_hash: hash,
+        retries: 0,
     })
+}
+
+fn dispatch_raw(args: &cli::RawArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let method = args.method.to_uppercase();
+    let request_id = if globals.print_request || globals.dry_run {
+        "req_dry_run".to_string()
+    } else {
+        transport::new_request_id()
+    };
+    match dispatch_raw_inner(args, globals, pretty, &method, &request_id) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            let code = err.category() as i32;
+            let env = ErrorEnvelope::from_error(&err).with_context(
+                method,
+                args.path.clone(),
+                request_id,
+                globals.correlation_id.clone(),
+            );
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+            );
+            Ok(code)
+        }
+    }
+}
+
+fn dispatch_raw_inner(
+    args: &cli::RawArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+    method: &str,
+    request_id: &str,
+) -> Result<i32, CliError> {
+    parse_user_headers(&globals.headers)?;
+    if globals.print_request || globals.dry_run {
+        let mut body = raw_body(globals)?;
+        let query = raw_query_preview(&args.query)?;
+        redaction::redact_json_value(&mut body);
+        let data = serde_json::json!({
+            "request": {
+                "method": method,
+                "path": args.path,
+                "query": query,
+                "body": body,
+            },
+            "dryRun": true,
+        });
+        let hash = transport::data_hash(&data);
+        emit_stdout(
+            &response_envelope(ResponseEnvelopeArgs {
+                command: "raw",
+                method,
+                path: &args.path,
+                request_id,
+                profile: "default",
+                correlation_id: globals.correlation_id.as_deref(),
+                data,
+                count: None,
+                data_hash: hash,
+                retries: 0,
+            }),
+            pretty,
+        );
+        return Ok(0);
+    }
+
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let body = raw_body(globals)?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg);
+    let transport = UreqTransport::new(timeout);
+    let result = execute_raw_with_request_id(
+        &transport,
+        RawExecuteParams {
+            method,
+            path: &args.path,
+            query_raw: &args.query,
+            body,
+            globals,
+            credential: &credential,
+            request_id: request_id.to_string(),
+        },
+    )?;
+
+    if globals.raw {
+        emit_raw(&result.response.body).map_err(|err| {
+            CliError::Interrupted(Diag::new(
+                "interrupted",
+                format!("failed to write raw stdout: {err}"),
+            ))
+        })?;
+        return Ok(0);
+    }
+
+    let data = transport::parse_response_data(&result.response.body);
+    let count = transport::primary_count(&data);
+    let hash = transport::data_hash(&data);
+    let envelope = response_envelope(ResponseEnvelopeArgs {
+        command: "raw",
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+    });
+    emit_stdout(&envelope, pretty);
+    Ok(0)
 }
 
 fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
@@ -515,26 +793,20 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
         .map(|item| {
             let (name, value) = item.split_once('=').ok_or_else(|| {
                 CliError::Usage(
-                    Diag::new(
-                        "invalid_value",
-                        format!("raw --query expects `key=value`, got `{item}`"),
-                    )
-                    .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
+                    Diag::new("invalid_value", "raw --query expects `key=value`")
+                        .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
                 )
             })?;
             if name.is_empty() {
                 return Err(CliError::Usage(
-                    Diag::new(
-                        "invalid_value",
-                        format!("raw --query expects a non-empty key in `{item}`"),
-                    )
-                    .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
+                    Diag::new("invalid_value", "raw --query expects a non-empty key")
+                        .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
                 ));
             }
             let value = if redaction::is_secret_name(name) {
-                redaction::REDACTED
+                redaction::REDACTED.to_string()
             } else {
-                value
+                redaction::scrub_text(value)
             };
             Ok(serde_json::json!({ "name": name, "value": value }))
         })

@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 2B complete; next wave is 2C team/macros/deprecations.
+Status: Wave 2C complete; next wave is 3A agent/research lifecycle.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint `6f12e42`.
+  `70ac1ad`; latest committed checkpoint `b771a5b`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -30,7 +30,9 @@ Codex owns updates.
   Wave 2A adds typed `search`/`contents`, `/contents` chunking, and Phase 2
   gate changes. Wave 2B adds typed `answer`/`context`/`similar`, streaming
   SSE envelope shaping, context query validation, and strengthened Phase 2
-  streaming gates.
+  streaming gates. Wave 2C adds typed `team info`, legacy research
+  create/list/get routing, research cursor auto-pagination, and the `ask`/
+  `fetch` macro aliases with dry-run expansion metadata kept out of live data.
 
 ## Pre-run checklist
 
@@ -55,7 +57,7 @@ Codex owns updates.
 | 1D Raw/search/goldens | complete | Delegate Cursor Composer + parent integration | findings fixed; narrow re-review found final error-context redaction issue; fixed | findings fixed; re-review no blocking findings | `cargo xtask phase-gate 1` pass; `cargo xtask ci` pass |
 | 2A Search/contents | complete in working tree | native request/chunk lane + Delegate Cursor Composer executor lane + parent integration | native found no-op `--chunk-size`, then chunked error-context gaps; fixed; final approval clean | GLM found clippy/context P3s; fixed; final approval clean | `cargo xtask phase-gate 2` pass; `cargo clippy --workspace --locked -- -D warnings` pass |
 | 2B Answer/context/similar/streaming | complete in working tree | native answer/context/similar lane + Delegate Cursor Composer stream lane + parent integration | native found stream output-mode, terminal data shape, helper-only test, then context override bypass; fixed; final approval clean | GLM found context length guard and generic deprecation warning P3s; fixed; final approval clean | `cargo xtask ci` pass; `cargo xtask phase-gate 2` pass; branch-wide secret scan pass |
-| 2C Team/macros/deprecations | not started | - | - | - | - |
+| 2C Team/macros/deprecations | complete in working tree | native baseline macro lane + Delegate Cursor Composer team/research lane + parent integration | initial/re-review findings fixed; final narrow re-review clean with only low-risk notes | initial findings fixed; final GLM re-review clean with accepted P3 residuals | `cargo xtask phase-gate 2` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 3A Agent/research lifecycle | not started | - | - | - | - |
 | 3B SSE/SIGINT/pagination | not started | - | - | - | - |
 | 4A Monitors | not started | - | - | - | - |
@@ -108,6 +110,13 @@ Record every review finding that is not immediately fixed.
 | 2B | GLM review | P3 | `context` query length guard required by commands contract was missing | fixed | Added 2000-character local validation and positional/body/set CLI regressions with `/context` error context. |
 | 2B | GLM review | P3 | Deprecated warning helper hardcoded findSimilar prose for every future deprecated operation | fixed | Scoped findSimilar replacement warning to `findSimilar`/`similar`; added generic fallback and unit coverage. |
 | 2B | native re-review | medium | `/context` length validation initially ran before `--body`/`--set` request overrides, making it bypassable | fixed | Moved validation to the final merged request body and added regressions for positional, `--body`, and `--set` overlong queries. |
+| 2C | native review | medium | Typed GET dry-run previews emitted `{}` bodies while live GETs omit empty bodies | fixed | Added `typed_wire_body` so GET/DELETE dry-run previews show `body:null`; added team/research regressions. |
+| 2C | native/GLM review | medium | `fetch` macro expansion omitted the documented contents defaults and `ask`/`fetch` expansion strings were not shell-safe | fixed | `fetch` now expands to `contents ... --text --summary-query 'Summarize the page'`; macro `expandsTo` strings use shell quoting and apostrophe regressions. |
+| 2C | GLM review | high | Live `ask`/`fetch` responses could include macro-only `expandsTo` metadata, changing `dataHash` from the upstream response | fixed | Live macro dispatch no longer passes expansion metadata into typed execution; black-box local-server tests assert upstream data/hash purity for both macros. |
+| 2C | native/GLM review | medium | `research list --all` and pagination flags either drifted from the documented contract or accepted inert flags | fixed | Implemented live cursor pagination for `--all` with `--max-pages`/`--page-delay`, rejected orphaned pagination flags, and added fake-transport/unit plus CLI regressions. |
+| 2C | native review | low | Local HTTP regression helper could fail on `WouldBlock` before request bytes arrived | fixed | Helper now retries nonblocking reads up to a bounded deadline. |
+| 2C | GLM review | P3 | `data_with_expands_to` had an unreachable non-object fallback and fetch lacked a live no-pollution regression | fixed | Removed unreachable branch and added the fetch local-server no-pollution test. |
+| 2C | GLM final review | P3 | Dry-run macro metadata exposes both `expandsTo` and `expands_to`; `--text` booleans are simple presence flags; `research create --stream` errors because legacy create is non-streaming | accepted for now | Duplicate key keeps camel/snake compatibility; boolean flag shape matches existing CLI convention; create-stream refusal is structured and tested. |
 
 ## Gate log
 
@@ -162,6 +171,13 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | Delegate GLM final Wave 2B re-review (`droid-18`) | pass | Clean; verified all five reported findings fixed; ran full validation in safe worktree |
 | 2026-06-29 | `delegate worktree remove cursor-9 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager |
 | 2026-06-29 | non-printing tracked/diff/history secret scan | pass | Stored API key absent from tracked files, working diff, and reachable branch blobs |
+| 2026-06-29 | focused Wave 2C tests (`research_accepts_all...`, macro live no-pollution, `paginated_research...`, clippy) | pass | After native/GLM review fixes for macro purity, pagination, and local-server stability |
+| 2026-06-29 | native Wave 2C final re-review (`019f15c2-c566-7a72-be07-bb0e74124c4a`) | pass | No blocking findings; low-risk NDJSON warning repetition and Content-Length-only helper notes accepted |
+| 2026-06-29 | Delegate GLM final Wave 2C re-review (`droid-22`) | pass | No blocking findings; accepted P3 residuals documented above |
+| 2026-06-29 | `cargo xtask phase-gate 2` | pass | Wave 2C final gate; includes team/research dry-runs and full workspace tests |
+| 2026-06-29 | `cargo xtask ci` | pass | Wave 2C final gate; fmt, clippy, tests |
+| 2026-06-29 | non-printing tracked/diff/history secret scan | pass | Stored API key fingerprint `927c` absent from tracked files, working diff, and reachable branch blobs |
+| 2026-06-29 | `delegate worktree remove cursor-10 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager; no Delegate worktrees remain present |
 
 ## Local commit log
 
@@ -173,7 +189,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `a3dc0dd` | Wave 1C auth, config, and doctor surfaces | `cargo xtask ci`; native review clean; GLM review clean; credential smokes pass; real-key fixture purged by amend |
 | 2026-06-29 | `d420fe0` | Wave 1D raw transport, response envelope, offline schema/robot-docs, and Phase 1 gate | `cargo xtask phase-gate 1`; `cargo xtask ci`; native + GLM reviews/re-reviews; branch-wide secret scan pass; live smoke blocked by credential 401 |
 | 2026-06-29 | `6f12e42` | Wave 2A typed `search`/`contents`, `/contents` chunking, redaction suggestion fix, and Phase 2 gate | `cargo xtask phase-gate 2`; `cargo clippy --workspace --locked -- -D warnings`; native + GLM final reviews clean |
-| 2026-06-29 | this commit | Wave 2B typed `answer`/`context`/`similar`, SSE stream envelope shaping, context query validation, and Phase 2 stream gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
+| 2026-06-29 | `b771a5b` | Wave 2B typed `answer`/`context`/`similar`, SSE stream envelope shaping, context query validation, and Phase 2 stream gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
+| 2026-06-29 | this commit | Wave 2C typed `team info`, legacy research create/list/get with cursor pagination, `ask`/`fetch` macro aliases, and Phase 2 team/research gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
 
 ## Final completion checklist
 

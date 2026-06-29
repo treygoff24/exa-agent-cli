@@ -16,10 +16,12 @@ pub mod transport;
 
 use clap::Parser;
 use std::io::{self, IsTerminal, Read};
+use std::time::Duration;
 
 use cli::{
     command_path, AnswerArgs, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs,
-    ContextArgs, GlobalArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
+    ContextArgs, FetchArgs, GlobalArgs, PaginationArgs, ResearchCmd, ResearchCreateArgs,
+    RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs, TeamCmd,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -35,6 +37,12 @@ use transport::{
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
 const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
+
+#[derive(Clone, Copy)]
+struct TypedRoute<'a> {
+    path: &'a str,
+    query: &'a [(String, String)],
+}
 
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
@@ -121,6 +129,10 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
         Command::Answer(args) => dispatch_answer(args, &cli.globals, pretty),
         Command::Context(args) => dispatch_context(args, &cli.globals, pretty),
+        Command::Team { sub } => dispatch_team(sub, &cli.globals, pretty),
+        Command::Research { sub } => dispatch_research(sub, &cli.globals, pretty),
+        Command::Ask(args) => dispatch_ask(args, &cli.globals, pretty),
+        Command::Fetch(args) => dispatch_fetch(args, &cli.globals, pretty),
         Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
         _ => Err(not_implemented(
             &command_path(&cli.command),
@@ -183,6 +195,8 @@ fn build_contents_spec(
             "ids",
             (!args.ids.is_empty()).then(|| request::encode_str_array(&args.ids)),
         ),
+        ("text", args.text.then_some("true".to_string())),
+        ("summary-query", args.summary_query.clone()),
     ];
     build_typed_spec(op, &flag_values, globals)
 }
@@ -242,6 +256,43 @@ fn build_answer_spec(
         ("output-schema", output_schema),
     ];
     build_typed_spec(op, &flag_values, globals)
+}
+
+fn dispatch_ask(args: &cli::AskArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["answer"]).expect("answer is in the registry");
+    with_typed_error_context(op, globals, || {
+        let answer_args = AnswerArgs {
+            question: args.question.clone(),
+            text: true,
+            stream: false,
+            output_schema: None,
+        };
+        let spec = build_answer_spec(&answer_args, globals)?;
+        let expands_to = format!("answer {} --text", shell_quote(&args.question));
+        dispatch_typed_command_expanded(spec, globals, pretty, Some(expands_to.as_str()))
+    })
+}
+
+fn dispatch_fetch(args: &FetchArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
+    with_typed_error_context(op, globals, || {
+        let contents_args = ContentsArgs {
+            urls: args.urls.clone(),
+            ids: Vec::new(),
+            text: true,
+            summary_query: Some("Summarize the page".to_string()),
+            chunk_size: None,
+        };
+        let spec = build_contents_spec(&contents_args, globals)?;
+        let specs = chunk_contents_specs(spec, None)?;
+        let expands_to = format!(
+            "contents {} --text --summary-query {}",
+            shell_join(&args.urls),
+            shell_quote("Summarize the page")
+        );
+        let spec = specs.into_iter().next().expect("one fetch contents spec");
+        dispatch_typed_command_expanded(spec, globals, pretty, Some(expands_to.as_str()))
+    })
 }
 
 fn dispatch_context(
@@ -310,6 +361,218 @@ fn context_tokens_value(raw: &str) -> Result<Option<u32>, CliError> {
         ));
     }
     Ok(Some(tokens))
+}
+
+fn dispatch_team(sub: &TeamCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        TeamCmd::Info => dispatch_team_info(globals, pretty),
+    }
+}
+
+fn dispatch_team_info(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["team", "info"]).expect("team info is in the registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn dispatch_research(
+    sub: &ResearchCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    match sub {
+        ResearchCmd::Create(args) => dispatch_research_create(args, globals, pretty),
+        ResearchCmd::List(pagination) => dispatch_research_list(pagination, globals, pretty),
+        ResearchCmd::Get { research_id } => dispatch_research_get(research_id, globals, pretty),
+    }
+}
+
+fn dispatch_research_create(
+    args: &ResearchCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["research", "create"])
+        .expect("research create is in the registry");
+    with_typed_error_context(op, globals, || {
+        if args.stream {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`research create --stream` is not supported by the upstream create endpoint",
+                )
+                .with_suggestion("exa-agent research create QUERY && exa-agent research get ID"),
+            ));
+        }
+        let spec = build_research_create_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_research_create_spec(
+    args: &ResearchCreateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["research", "create"])
+        .expect("research create is in the registry");
+    let flag_values = [("query", Some(args.query.clone()))];
+    build_typed_spec(op, &flag_values, globals)
+}
+
+fn dispatch_research_list(
+    pagination: &PaginationArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op =
+        registry::lookup_by_segments(&["research", "list"]).expect("research list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let query = pagination_query(pagination);
+        if pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(spec, globals, pretty, pagination)
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query)
+        }
+    })
+}
+
+fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliError> {
+    if !pagination.all && (pagination.max_pages.is_some() || pagination.page_delay.is_some()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "`--max-pages` and `--page-delay` require `--all` on cursor-paginated list commands",
+            )
+            .with_suggestion("exa-agent research list --all --max-pages 3"),
+        ));
+    }
+    if pagination.max_pages == Some(0) {
+        return Err(CliError::Usage(
+            Diag::new("invalid_value", "--max-pages must be at least 1")
+                .with_suggestion("exa-agent research list --all --max-pages 1"),
+        ));
+    }
+    if let Some(raw) = &pagination.page_delay {
+        parse_page_delay(raw)?;
+    }
+    Ok(())
+}
+
+fn dispatch_research_get(
+    research_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op =
+        registry::lookup_by_segments(&["research", "get"]).expect("research get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("researchId", research_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path), &[])
+    })
+}
+
+fn substitute_path(template: &str, params: &[(&str, &str)]) -> String {
+    let mut path = template.to_string();
+    for (key, value) in params {
+        let value = transport::encode_path_segment(value);
+        path = path.replace(&format!("{{{key}}}"), &value);
+    }
+    path
+}
+
+fn pagination_query(pagination: &PaginationArgs) -> Vec<(String, String)> {
+    pagination_query_with_cursor(pagination, pagination.cursor.as_deref())
+}
+
+fn pagination_query_with_cursor(
+    pagination: &PaginationArgs,
+    cursor: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    if let Some(limit) = pagination.limit {
+        query.push(("limit".to_string(), limit.to_string()));
+    }
+    if let Some(cursor) = cursor {
+        query.push(("cursor".to_string(), cursor.to_string()));
+    }
+    query
+}
+
+fn parse_page_delay(raw: &str) -> Result<Duration, CliError> {
+    let raw = raw.trim();
+    let parsed = if let Some(ms) = raw.strip_suffix("ms") {
+        ms.parse::<u64>().ok().map(Duration::from_millis)
+    } else if let Some(secs) = raw.strip_suffix('s') {
+        secs.parse::<u64>().ok().map(Duration::from_secs)
+    } else {
+        raw.parse::<u64>().ok().map(Duration::from_secs)
+    };
+    parsed.ok_or_else(|| {
+        CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "--page-delay expects a duration like 250ms or 1s",
+            )
+            .with_suggestion("exa-agent research list --all --page-delay 250ms"),
+        )
+    })
+}
+
+fn next_cursor(data: &serde_json::Value) -> Option<String> {
+    data.get("nextCursor")
+        .or_else(|| data.get("next_cursor"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn has_more(data: &serde_json::Value, next: Option<&str>) -> bool {
+    data.get("hasMore")
+        .or_else(|| data.get("has_more"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or_else(|| next.is_some())
+}
+
+fn primary_items(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    data.get("data")
+        .or_else(|| data.get("items"))
+        .or_else(|| data.get("results"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+fn query_preview(query: &[(String, String)]) -> Vec<serde_json::Value> {
+    query
+        .iter()
+        .map(|(name, value)| {
+            let value = if redaction::is_secret_name(name) {
+                redaction::REDACTED.to_string()
+            } else {
+                redaction::scrub_text(value)
+            };
+            serde_json::json!({ "name": name, "value": value })
+        })
+        .collect()
 }
 
 fn build_typed_spec(
@@ -460,15 +723,53 @@ fn dispatch_typed_command(
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
+    dispatch_typed_command_with_options(spec, globals, pretty, None, &[], None)
+}
+
+fn dispatch_typed_command_expanded(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    expands_to: Option<&str>,
+) -> Result<i32, CliError> {
+    dispatch_typed_command_with_options(spec, globals, pretty, None, &[], expands_to)
+}
+
+fn dispatch_typed_command_routed(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    path_override: Option<String>,
+    query: &[(String, String)],
+) -> Result<i32, CliError> {
+    dispatch_typed_command_with_options(spec, globals, pretty, path_override, query, None)
+}
+
+fn dispatch_typed_command_with_options(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    path_override: Option<String>,
+    query: &[(String, String)],
+    expands_to: Option<&str>,
+) -> Result<i32, CliError> {
     let op = spec.op;
     let method = op.method.as_str();
-    let path = op.api_path;
+    let path = path_override.unwrap_or_else(|| op.api_path.to_string());
     let request_id = if globals.print_request || globals.dry_run {
         "req_dry_run".to_string()
     } else {
         transport::new_request_id()
     };
-    match dispatch_typed_inner(&spec, globals, pretty, &request_id) {
+    match dispatch_typed_inner(
+        &spec,
+        globals,
+        pretty,
+        &request_id,
+        &path,
+        query,
+        expands_to,
+    ) {
         Ok(code) => Ok(code),
         Err(err) => {
             let code = err.category() as i32;
@@ -492,10 +793,16 @@ fn dispatch_typed_inner(
     globals: &GlobalArgs,
     pretty: bool,
     request_id: &str,
+    path: &str,
+    query: &[(String, String)],
+    expands_to: Option<&str>,
 ) -> Result<i32, CliError> {
     parse_user_headers(&globals.headers)?;
     if globals.print_request || globals.dry_run {
-        emit_stdout(&redacted_preview(spec), pretty);
+        emit_stdout(
+            &redacted_preview_expanded(spec, path, query, expands_to),
+            pretty,
+        );
         return Ok(0);
     }
 
@@ -505,7 +812,228 @@ fn dispatch_typed_inner(
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg);
     let transport = UreqTransport::new(timeout);
-    execute_typed_live(&transport, spec, globals, &credential, request_id, pretty)
+    execute_typed_live(
+        &transport,
+        spec,
+        globals,
+        &credential,
+        request_id,
+        pretty,
+        TypedRoute { path, query },
+    )
+}
+
+fn dispatch_paginated_typed_command(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    pagination: &PaginationArgs,
+) -> Result<i32, CliError> {
+    if globals.raw {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "`--raw` cannot be combined with `--all`; request JSON or NDJSON pages instead",
+            )
+            .with_suggestion("exa-agent research list --all --ndjson"),
+        ));
+    }
+    parse_user_headers(&globals.headers)?;
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg);
+    let transport = UreqTransport::new(timeout);
+    execute_paginated_live(&transport, &spec, globals, &credential, pretty, pagination)
+}
+
+fn execute_paginated_live<T: Transport>(
+    transport: &T,
+    spec: &request::RequestSpec,
+    globals: &GlobalArgs,
+    credential: &auth::ResolvedCredential,
+    pretty: bool,
+    pagination: &PaginationArgs,
+) -> Result<i32, CliError> {
+    let delay = pagination
+        .page_delay
+        .as_deref()
+        .map(parse_page_delay)
+        .transpose()?
+        .unwrap_or_default();
+    let max_pages = pagination.max_pages.unwrap_or(u32::MAX);
+    let command = spec.op.command();
+    let mut warnings = typed_command_warnings(spec.op);
+    let env_output = std::env::var("EXA_OUTPUT").ok();
+    let ndjson = matches!(
+        resolve_mode(
+            explicit_mode(globals),
+            env_output.as_deref(),
+            stdout_is_tty()
+        ),
+        OutputMode::Ndjson
+    );
+    let mut cursor = pagination.cursor.clone();
+    let mut all_items = Vec::new();
+    let mut first_request_id = String::new();
+    let mut total_retries = 0u32;
+    let mut page = 0u32;
+
+    let (mut last_data, last_next, last_has_more) = loop {
+        page += 1;
+        let request_id = transport::new_request_id();
+        if first_request_id.is_empty() {
+            first_request_id = request_id.clone();
+        }
+        let query = pagination_query_with_cursor(pagination, cursor.as_deref());
+        let query_raw: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let result = execute_raw_with_request_id(
+            transport,
+            RawExecuteParams {
+                method: spec.op.method.as_str(),
+                path: spec.op.api_path,
+                query_raw: &query_raw,
+                body: typed_wire_body(spec),
+                globals,
+                credential,
+                request_id,
+            },
+        )?;
+        total_retries = total_retries.saturating_add(result.retries);
+        let data = transport::parse_response_data(&result.response.body);
+        let next = next_cursor(&data);
+        let mut more = has_more(&data, next.as_deref());
+        let reached_cap = more && page >= max_pages;
+        if reached_cap {
+            warnings.push(serde_json::json!({
+                "code": "pagination_max_pages_reached",
+                "message": "--max-pages stopped auto-pagination before the upstream cursor was exhausted.",
+                "nextCursor": next.clone()
+            }));
+            more = true;
+        } else if more && next.is_none() {
+            warnings.push(serde_json::json!({
+                "code": "pagination_missing_cursor",
+                "message": "Upstream reported more pages but did not return nextCursor."
+            }));
+            more = false;
+        } else if more && next == cursor {
+            warnings.push(serde_json::json!({
+                "code": "pagination_repeated_cursor",
+                "message": "Upstream returned the same cursor twice; stopped to avoid an infinite loop."
+            }));
+            more = false;
+        }
+
+        all_items.extend(primary_items(&data));
+        if ndjson {
+            emit_ndjson(&page_envelope(
+                &command,
+                &result,
+                data.clone(),
+                result.retries,
+                &warnings,
+                PageInfo {
+                    cursor: cursor.as_deref(),
+                    next_cursor: next.as_deref(),
+                    has_more: more,
+                    page,
+                    page_count: page,
+                },
+            ));
+        }
+        if !more || reached_cap {
+            break (data, next, more);
+        }
+        cursor = next;
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+    };
+
+    if !ndjson {
+        if let Some(obj) = last_data.as_object_mut() {
+            obj.insert("data".to_string(), serde_json::Value::Array(all_items));
+        }
+        let count = last_data
+            .get("data")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len() as u64);
+        let hash = transport::data_hash(&last_data);
+        let mut envelope = response_envelope(ResponseEnvelopeArgs {
+            command: &command,
+            method: spec.op.method.as_str(),
+            path: spec.op.api_path,
+            request_id: &first_request_id,
+            profile: &credential.profile,
+            correlation_id: globals.correlation_id.as_deref(),
+            data: last_data,
+            count,
+            data_hash: hash,
+            retries: total_retries,
+            warnings: &warnings,
+        });
+        set_pagination(
+            &mut envelope,
+            PageInfo {
+                cursor: pagination.cursor.as_deref(),
+                next_cursor: last_next.as_deref(),
+                has_more: last_has_more,
+                page,
+                page_count: page,
+            },
+        );
+        emit_stdout(&envelope, pretty);
+    }
+    Ok(0)
+}
+
+struct PageInfo<'a> {
+    cursor: Option<&'a str>,
+    next_cursor: Option<&'a str>,
+    has_more: bool,
+    page: u32,
+    page_count: u32,
+}
+
+fn page_envelope(
+    command: &str,
+    result: &transport::RawExecuteResult,
+    data: serde_json::Value,
+    retries: u32,
+    warnings: &[serde_json::Value],
+    page: PageInfo<'_>,
+) -> serde_json::Value {
+    let count = transport::primary_count(&data);
+    let hash = transport::data_hash(&data);
+    let mut envelope = response_envelope(ResponseEnvelopeArgs {
+        command,
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data,
+        count,
+        data_hash: hash,
+        retries,
+        warnings,
+    });
+    set_pagination(&mut envelope, page);
+    envelope
+}
+
+fn set_pagination(envelope: &mut serde_json::Value, page: PageInfo<'_>) {
+    envelope["pagination"] = serde_json::json!({
+        "cursor": page.cursor,
+        "nextCursor": page.next_cursor,
+        "hasMore": page.has_more,
+        "autoPaginated": true,
+        "page": page.page,
+        "pageCount": page.page_count,
+        "total": null
+    });
 }
 
 fn dispatch_typed_chunks(
@@ -568,7 +1096,18 @@ fn dispatch_typed_chunks_inner(
     let mut exit_code = 0;
     for spec in &specs {
         let request_id = transport::new_request_id();
-        match execute_typed_live(&transport, spec, globals, &credential, &request_id, false) {
+        match execute_typed_live(
+            &transport,
+            spec,
+            globals,
+            &credential,
+            &request_id,
+            false,
+            TypedRoute {
+                path: spec.op.api_path,
+                query: &[],
+            },
+        ) {
             Ok(10) => exit_code = 10,
             Ok(_) => {}
             Err(err) => {
@@ -594,14 +1133,21 @@ fn execute_typed_live<T: Transport>(
     credential: &auth::ResolvedCredential,
     request_id: &str,
     pretty: bool,
+    route: TypedRoute<'_>,
 ) -> Result<i32, CliError> {
+    let body = typed_wire_body(spec);
+    let query_raw: Vec<String> = route
+        .query
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
     let result = execute_raw_with_request_id(
         transport,
         RawExecuteParams {
             method: spec.op.method.as_str(),
-            path: spec.op.api_path,
-            query_raw: &[],
-            body: spec.body.clone(),
+            path: route.path,
+            query_raw: &query_raw,
+            body,
             globals,
             credential,
             request_id: request_id.to_string(),
@@ -652,6 +1198,24 @@ fn execute_typed_live<T: Transport>(
         emit_stdout(&envelope, pretty);
     }
     Ok(exit_code)
+}
+
+fn typed_wire_body(spec: &request::RequestSpec) -> serde_json::Value {
+    let empty_object = spec
+        .body
+        .as_object()
+        .map(|obj| obj.is_empty())
+        .unwrap_or(false);
+    if empty_object
+        && matches!(
+            spec.op.method,
+            registry::Method::Get | registry::Method::Delete
+        )
+    {
+        serde_json::Value::Null
+    } else {
+        spec.body.clone()
+    }
 }
 
 fn emit_stream_typed_output(
@@ -752,6 +1316,13 @@ fn stream_output_mode_from_env(
 }
 
 fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json::Value> {
+    if op.cli_path.first() == Some(&"research") {
+        return vec![serde_json::json!({
+            "code": "legacy_api",
+            "message": "The /research/v1 API is legacy; prefer `exa-agent agent run` for new work.",
+            "replacement": "exa-agent agent run <query>"
+        })];
+    }
     if !op.deprecated {
         return Vec::new();
     }
@@ -1250,24 +1821,37 @@ fn parse_checks(raw: &[String]) -> Vec<String> {
 }
 
 fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
-    let mut body = spec.body.clone();
+    redacted_preview_expanded(spec, spec.op.api_path, &[], None)
+}
+
+fn redacted_preview_expanded(
+    spec: &request::RequestSpec,
+    path: &str,
+    query: &[(String, String)],
+    expands_to: Option<&str>,
+) -> serde_json::Value {
+    let mut body = typed_wire_body(spec);
     redaction::redact_json_value(&mut body);
     let command = spec.op.command();
     let warnings = typed_command_warnings(spec.op);
-    let data = serde_json::json!({
-        "request": {
-            "method": spec.op.method.as_str(),
-            "path": spec.op.api_path,
-            "body": body,
-        },
-        "dryRun": true,
-    });
+    let data = data_with_expands_to(
+        serde_json::json!({
+            "request": {
+                "method": spec.op.method.as_str(),
+                "path": path,
+                "query": query_preview(query),
+                "body": body,
+            },
+            "dryRun": true,
+        }),
+        expands_to,
+    );
     let count = transport::primary_count(data.get("request").unwrap_or(&data));
     let hash = transport::data_hash(&data);
     response_envelope(ResponseEnvelopeArgs {
         command: &command,
         method: spec.op.method.as_str(),
-        path: spec.op.api_path,
+        path,
         request_id: "req_dry_run",
         profile: "default",
         correlation_id: None,
@@ -1277,6 +1861,27 @@ fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
         retries: 0,
         warnings: &warnings,
     })
+}
+
+fn data_with_expands_to(
+    mut data: serde_json::Value,
+    expands_to: Option<&str>,
+) -> serde_json::Value {
+    let Some(expands_to) = expands_to else {
+        return data;
+    };
+    let expands_to = redaction::scrub_text(expands_to);
+    if let serde_json::Value::Object(obj) = &mut data {
+        obj.insert(
+            "expandsTo".to_string(),
+            serde_json::Value::String(expands_to.clone()),
+        );
+        obj.insert(
+            "expands_to".to_string(),
+            serde_json::Value::String(expands_to),
+        );
+    }
+    data
 }
 
 fn dispatch_raw(args: &cli::RawArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -1601,13 +2206,133 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            execute_typed_live(&fake, &spec, &globals, &credential, "req_test", false).unwrap(),
+            execute_typed_live(
+                &fake,
+                &spec,
+                &globals,
+                &credential,
+                "req_test",
+                false,
+                TypedRoute {
+                    path: spec.op.api_path,
+                    query: &[],
+                },
+            )
+            .unwrap(),
             0
         );
         assert!(fake.recorded_requests()[0]
             .headers
             .iter()
             .any(|(k, v)| k.eq_ignore_ascii_case("accept") && v == "text/event-stream"));
+    }
+
+    #[test]
+    fn typed_get_live_omits_empty_object_body() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, r#"{"team":"ok"}"#);
+        let globals = parse_globals(&["--format", "json", "--api-key", "test-key-abcdef12"]);
+        let op = registry::lookup_by_segments(&["team", "info"]).unwrap();
+        let spec = request::build_body(op, &[]).unwrap();
+        let credential = auth::resolve_api_credential(
+            &CredentialInput {
+                explicit: Some("test-key-abcdef12".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+
+        assert_eq!(
+            execute_typed_live(
+                &fake,
+                &spec,
+                &globals,
+                &credential,
+                "req_test",
+                false,
+                TypedRoute {
+                    path: spec.op.api_path,
+                    query: &[],
+                },
+            )
+            .unwrap(),
+            0
+        );
+        let recorded = fake.recorded_requests();
+        assert_eq!(recorded[0].method, "GET");
+        assert!(recorded[0].body.is_none());
+    }
+
+    #[test]
+    fn paginated_research_list_follows_next_cursor() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(
+            200,
+            r#"{"data":[{"researchId":"r1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+        );
+        fake.push_ok_json(
+            200,
+            r#"{"data":[{"researchId":"r2"}],"hasMore":false,"nextCursor":null}"#,
+        );
+        let globals = parse_globals(&[
+            "--format",
+            "json",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            "http://example.test",
+        ]);
+        let op = registry::lookup_by_segments(&["research", "list"]).unwrap();
+        let spec = request::build_body(op, &[]).unwrap();
+        let credential = auth::resolve_api_credential(
+            &CredentialInput {
+                explicit: Some("test-key-abcdef12".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        let pagination = PaginationArgs {
+            limit: Some(1),
+            all: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            execute_paginated_live(&fake, &spec, &globals, &credential, false, &pagination)
+                .unwrap(),
+            0
+        );
+        let recorded = fake.recorded_requests();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded[0].url.ends_with("/research/v1?limit=1"));
+        assert!(recorded[1].url.contains("limit=1"));
+        assert!(recorded[1].url.contains("cursor=cur2"));
+    }
+
+    #[test]
+    fn live_macro_metadata_does_not_pollute_data_or_hash() {
+        let upstream = serde_json::json!({"answer":"done","citations":[]});
+        let count = transport::primary_count(&upstream);
+        let hash = transport::data_hash(&upstream);
+        let envelope = response_envelope(ResponseEnvelopeArgs {
+            command: "answer",
+            method: "POST",
+            path: "/answer",
+            request_id: "req_test",
+            profile: "default",
+            correlation_id: None,
+            data: upstream,
+            count,
+            data_hash: hash.clone(),
+            retries: 0,
+            warnings: &[],
+        });
+
+        assert!(envelope["data"].get("expandsTo").is_none());
+        assert!(envelope["data"].get("expands_to").is_none());
+        assert_eq!(envelope["dataHash"].as_str(), hash.as_deref());
     }
 
     #[test]
@@ -1650,5 +2375,29 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("/findSimilar"));
+    }
+
+    #[test]
+    fn research_commands_emit_legacy_api_warning() {
+        let create = registry::lookup_by_segments(&["research", "create"]).unwrap();
+        let list = registry::lookup_by_segments(&["research", "list"]).unwrap();
+        let get = registry::lookup_by_segments(&["research", "get"]).unwrap();
+        for op in [create, list, get] {
+            let warnings = typed_command_warnings(op);
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0]["code"], "legacy_api");
+            assert!(warnings[0]["replacement"]
+                .as_str()
+                .unwrap()
+                .contains("agent run"));
+        }
+    }
+
+    #[test]
+    fn substitute_path_encodes_template_segments() {
+        assert_eq!(
+            substitute_path("/research/v1/{researchId}", &[("researchId", "abc/def")]),
+            "/research/v1/abc%2Fdef"
+        );
     }
 }

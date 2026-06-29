@@ -2,10 +2,14 @@
 
 use clap::Parser;
 use exa_agent_cli::cli::{command_path, Cli, Command};
+use exa_agent_cli::transport;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn parses(args: &[&str]) -> Cli {
     let argv: Vec<String> = std::iter::once("exa-agent")
@@ -102,6 +106,83 @@ fn temp_path(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn http_request_lengths(buf: &[u8]) -> Option<(usize, usize)> {
+    let header_end = buf.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let headers = String::from_utf8_lossy(&buf[..header_end]);
+    let content_len = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    Some((header_end, content_len))
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let started = Instant::now();
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(err)
+                if err.kind() == ErrorKind::WouldBlock
+                    && started.elapsed() < Duration::from_secs(10) =>
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(err) => panic!("failed to read local test request: {err}"),
+        }
+        if let Some((header_end, content_len)) = http_request_lengths(&buf) {
+            if buf.len() >= header_end + content_len {
+                break;
+            }
+        }
+    }
+    buf
+}
+
+fn local_json_server<F>(
+    validate: F,
+    response_body: &'static [u8],
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(String) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let started = Instant::now();
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(err)
+                    if err.kind() == ErrorKind::WouldBlock
+                        && started.elapsed() < Duration::from_secs(10) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("failed to accept local test request: {err}"),
+            }
+        };
+        validate(String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned());
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        )
+        .unwrap();
+        stream.write_all(response_body).unwrap();
+    });
+    (format!("http://{addr}"), server)
 }
 
 #[test]
@@ -1109,6 +1190,116 @@ fn similar_dry_run_builds_request_body() {
 }
 
 #[test]
+fn team_info_dry_run_builds_get_path() {
+    let json = run_ok_json(&["team", "info", "--dry-run", "--print-request", "--compact"]);
+    assert_eq!(json["command"], "team info");
+    assert_eq!(json["data"]["request"]["method"], "GET");
+    assert_eq!(json["data"]["request"]["path"], "/v0/teams/me");
+    assert_eq!(json["data"]["request"]["query"], serde_json::json!([]));
+    assert_eq!(json["data"]["request"]["body"], serde_json::json!(null));
+    assert_eq!(json["data"]["dryRun"], true);
+}
+
+#[test]
+fn research_dry_run_builds_create_list_and_get_requests() {
+    let create = run_ok_json(&[
+        "research",
+        "create",
+        "legacy topic",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "research create");
+    assert_eq!(create["data"]["request"]["path"], "/research/v1");
+    assert_eq!(
+        create["data"]["request"]["body"]["instructions"],
+        "legacy topic"
+    );
+    assert_eq!(create["warnings"][0]["code"], "legacy_api");
+
+    let list = run_ok_json(&[
+        "research",
+        "list",
+        "--limit",
+        "10",
+        "--cursor",
+        "cur_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "research list");
+    assert_eq!(list["data"]["request"]["path"], "/research/v1");
+    assert_eq!(
+        list["data"]["request"]["query"],
+        serde_json::json!([
+            {"name": "limit", "value": "10"},
+            {"name": "cursor", "value": "cur_abc"}
+        ])
+    );
+    assert_eq!(list["data"]["request"]["body"], serde_json::json!(null));
+    assert_eq!(list["warnings"][0]["code"], "legacy_api");
+
+    let get = run_ok_json(&["research", "get", "research/abc", "--dry-run", "--compact"]);
+    assert_eq!(get["command"], "research get");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/research/v1/research%2Fabc"
+    );
+    assert_eq!(get["data"]["request"]["body"], serde_json::json!(null));
+    assert_eq!(get["warnings"][0]["code"], "legacy_api");
+}
+
+#[test]
+fn research_accepts_all_but_rejects_orphaned_pagination_flags_and_create_stream() {
+    let list_all = run_ok_json(&["research", "list", "--all", "--dry-run", "--compact"]);
+    assert_eq!(list_all["command"], "research list");
+    assert_eq!(list_all["data"]["request"]["path"], "/research/v1");
+    assert_eq!(list_all["data"]["request"]["query"], serde_json::json!([]));
+
+    let max_pages = run(&[
+        "research",
+        "list",
+        "--max-pages",
+        "3",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(max_pages.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&max_pages.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("--all"));
+
+    let page_delay = run(&[
+        "research",
+        "list",
+        "--page-delay",
+        "100ms",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(page_delay.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&page_delay.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+
+    let create_stream = run(&[
+        "research",
+        "create",
+        "legacy topic",
+        "--stream",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create_stream.status.code(), Some(1));
+    assert!(create_stream.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&create_stream.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert_eq!(stderr["operation"]["path"], "/research/v1");
+}
+
+#[test]
 fn parse_search_core() {
     assert_path(&["search", "latest AI chip launches"], "search");
     parses(&[
@@ -1140,6 +1331,13 @@ fn parse_contents_answer_context_similar() {
         clap::error::ErrorKind::ArgumentConflict
     );
     assert_path(&["answer", "What is Exa?"], "answer");
+    parses(&[
+        "contents",
+        "https://exa.ai/docs",
+        "--text",
+        "--summary-query",
+        "Summarize the page",
+    ]);
     parses(&[
         "answer",
         "What is Exa?",
@@ -1178,6 +1376,9 @@ fn parse_contents_accepts_urls_only_and_ids_only() {
         "contents",
         "https://exa.ai/docs",
         "https://docs.exa.ai/reference/search",
+        "--text",
+        "--summary-query",
+        "Summarize the page",
         "--chunk-size",
         "100",
     ]);
@@ -1192,6 +1393,8 @@ fn parse_contents_accepts_urls_only_and_ids_only() {
         ]
     );
     assert!(args.ids.is_empty());
+    assert!(args.text);
+    assert_eq!(args.summary_query.as_deref(), Some("Summarize the page"));
     assert_eq!(args.chunk_size, Some(100));
 
     let cli = parses(&["contents", "--ids", "doc_1", "doc_2"]);
@@ -1200,6 +1403,8 @@ fn parse_contents_accepts_urls_only_and_ids_only() {
     };
     assert!(args.urls.is_empty());
     assert_eq!(args.ids, vec!["doc_1".to_string(), "doc_2".to_string()]);
+    assert!(!args.text);
+    assert_eq!(args.summary_query, None);
     assert_eq!(args.chunk_size, None);
 }
 
@@ -1348,9 +1553,182 @@ fn parse_admin_keys_commands() {
 fn parse_macros_ask_and_fetch() {
     assert_path(&["ask", "What changed in AI this week?"], "ask");
     assert_path(&["fetch", "https://exa.ai", "https://docs.exa.ai"], "fetch");
+    let ask = parses(&["ask", "What changed in AI this week?"]);
+    let Command::Ask(args) = ask.command else {
+        panic!("expected ask command");
+    };
+    assert_eq!(args.question, "What changed in AI this week?");
+
+    let fetch = parses(&["fetch", "https://exa.ai", "https://docs.exa.ai"]);
+    let Command::Fetch(args) = fetch.command else {
+        panic!("expected fetch command");
+    };
+    assert_eq!(args.urls, ["https://exa.ai", "https://docs.exa.ai"]);
     assert_eq!(
         parse_err(&["fetch"]).kind(),
         clap::error::ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn ask_dry_run_expands_to_typed_answer_request() {
+    let json = run_ok_json(&[
+        "ask",
+        "What is Exa?",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(json["command"], "answer");
+    assert_eq!(json["data"]["request"]["path"], "/answer");
+    assert_eq!(body["query"], "What is Exa?");
+    assert_eq!(body["text"], true);
+    assert_eq!(json["data"]["expandsTo"], "answer 'What is Exa?' --text");
+    assert_eq!(json["data"]["expands_to"], "answer 'What is Exa?' --text");
+
+    let quoted = run_ok_json(&[
+        "ask",
+        "What's Exa?",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(
+        quoted["data"]["expandsTo"],
+        "answer 'What'\\''s Exa?' --text"
+    );
+}
+
+#[test]
+fn ask_live_response_does_not_include_macro_metadata() {
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(
+                request_text.starts_with("POST /answer "),
+                "unexpected request:\n{request_text}"
+            );
+            assert!(
+                request_text
+                    .to_ascii_lowercase()
+                    .contains("x-api-key: test-key-abcdef12"),
+                "request did not include explicit test API key:\n{request_text}"
+            );
+            assert!(
+                request_text.contains(r#""query":"What is Exa?""#)
+                    && request_text.contains(r#""text":true"#),
+                "ask macro did not send the typed answer body:\n{request_text}"
+            );
+        },
+        br#"{"answer":"done","citations":[]}"#,
+    );
+    let output = run(&[
+        "ask",
+        "What is Exa?",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert!(
+        output.status.success(),
+        "expected live local ask success\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let upstream = serde_json::json!({"answer":"done","citations":[]});
+    assert_eq!(json["command"], "answer");
+    assert_eq!(json["data"], upstream);
+    assert!(json["data"].get("expandsTo").is_none());
+    assert!(json["data"].get("expands_to").is_none());
+    assert_eq!(json["dataHash"], transport::data_hash(&upstream).unwrap());
+}
+
+#[test]
+fn fetch_live_response_does_not_include_macro_metadata() {
+    let upstream =
+        br#"{"results":[{"url":"https://exa.ai","text":"ok"}],"statuses":[{"id":"https://exa.ai","status":"success"}]}"#;
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(
+                request_text.starts_with("POST /contents "),
+                "unexpected request:\n{request_text}"
+            );
+            assert!(
+                request_text
+                    .to_ascii_lowercase()
+                    .contains("x-api-key: test-key-abcdef12"),
+                "request did not include explicit test API key:\n{request_text}"
+            );
+            assert!(
+                request_text.contains(r#""urls":["https://exa.ai"]"#)
+                    && request_text.contains(r#""text":true"#)
+                    && request_text.contains(r#""summary":{"query":"Summarize the page"}"#),
+                "fetch macro did not send the typed contents body:\n{request_text}"
+            );
+        },
+        upstream,
+    );
+    let output = run(&[
+        "fetch",
+        "https://exa.ai",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert!(
+        output.status.success(),
+        "expected live local fetch success\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let upstream: serde_json::Value = serde_json::from_slice(upstream).unwrap();
+    assert_eq!(json["command"], "contents");
+    assert_eq!(json["data"], upstream);
+    assert!(json["data"].get("expandsTo").is_none());
+    assert!(json["data"].get("expands_to").is_none());
+    assert_eq!(json["dataHash"], transport::data_hash(&upstream).unwrap());
+}
+
+#[test]
+fn fetch_dry_run_expands_to_typed_contents_request() {
+    let json = run_ok_json(&[
+        "fetch",
+        "https://exa.ai",
+        "https://docs.exa.ai/search?q=rust&sort=new",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(json["command"], "contents");
+    assert_eq!(json["data"]["request"]["path"], "/contents");
+    assert_eq!(
+        body["urls"],
+        serde_json::json!([
+            "https://exa.ai",
+            "https://docs.exa.ai/search?q=rust&sort=new"
+        ])
+    );
+    assert_eq!(body["text"], true);
+    assert_eq!(body["summary"]["query"], "Summarize the page");
+    assert_eq!(
+        json["data"]["expandsTo"],
+        "contents 'https://exa.ai' 'https://docs.exa.ai/search?q=rust&sort=new' --text --summary-query 'Summarize the page'"
+    );
+    assert_eq!(
+        json["data"]["expands_to"],
+        "contents 'https://exa.ai' 'https://docs.exa.ai/search?q=rust&sort=new' --text --summary-query 'Summarize the page'"
     );
 }
 

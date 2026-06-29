@@ -406,3 +406,19 @@ kind = "str_array"
 flag = "ids"
 body_path = "ids"
 kind = "str_array"
+
+[[operations."getContents".fields]]
+flag = "text"
+body_path = "text"
+kind = "bool"
+
+[[operations."getContents".fields]]
+flag = "summary-query"
+body_path = "summary.query"
+kind = "str"
+
+[[operations."ResearchController_createResearch".fields]]
+flag = "query"
+body_path = "instructions"
+kind = "str"
+required = true

@@ -26,6 +26,14 @@ fn similar_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["similar"]).expect("similar op")
 }
 
+fn research_create_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["research", "create"]).expect("research create op")
+}
+
+fn team_info_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["team", "info"]).expect("team info op")
+}
+
 #[test]
 fn search_core_fields_map_and_overrides_keep_precedence() {
     let spec = request::build_request(
@@ -137,6 +145,25 @@ fn similar_fields_map_core_flags() {
 }
 
 #[test]
+fn research_create_maps_query_to_instructions() {
+    let spec = request::build_body(
+        research_create_op(),
+        &[("query", Some("legacy research topic".into()))],
+    )
+    .unwrap();
+
+    assert_eq!(spec.body["instructions"], "legacy research topic");
+    assert_eq!(spec.op.api_path, "/research/v1");
+}
+
+#[test]
+fn team_info_builds_empty_get_body() {
+    let spec = request::build_body(team_info_op(), &[]).unwrap();
+    assert_eq!(spec.body, json!({}));
+    assert_eq!(spec.op.api_path, "/v0/teams/me");
+}
+
+#[test]
 fn body_deep_merges_over_named_flags() {
     let spec = request::build_request(
         search_op(),
@@ -170,7 +197,11 @@ fn contents_urls_build_body_from_registry_metadata() {
     ];
     let spec = request::build_body(
         contents_op(),
-        &[("urls", Some(request::encode_str_array(&urls)))],
+        &[
+            ("urls", Some(request::encode_str_array(&urls))),
+            ("text", Some("true".into())),
+            ("summary-query", Some("Summarize the page".into())),
+        ],
     )
     .unwrap();
 
@@ -180,7 +211,9 @@ fn contents_urls_build_body_from_registry_metadata() {
             "urls": [
                 "https://exa.ai/docs",
                 "https://docs.exa.ai/reference/search"
-            ]
+            ],
+            "text": true,
+            "summary": { "query": "Summarize the page" }
         })
     );
 }

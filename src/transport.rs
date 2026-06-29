@@ -288,6 +288,10 @@ fn encode_component(s: &str) -> String {
     out
 }
 
+pub fn encode_path_segment(s: &str) -> String {
+    encode_component(s)
+}
+
 pub fn parse_raw_query(raw: &[String]) -> Result<Vec<(String, String)>, CliError> {
     raw.iter()
         .map(|item| {

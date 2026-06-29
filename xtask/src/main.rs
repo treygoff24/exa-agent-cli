@@ -421,6 +421,39 @@ fn phase_gate(n: Option<&str>) -> Result<()> {
             ],
             "exa.cli.response.v1",
         )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "team",
+                "info",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "research",
+                "create",
+                "legacy topic",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
         run(
             "cargo",
             &[

@@ -11,7 +11,7 @@ pub mod request;
 
 use clap::Parser;
 
-use cli::{Cli, Command, GlobalArgs, SchemaCmd};
+use cli::{command_path, Cli, Command, GlobalArgs, SchemaCmd};
 use error::{CliError, Diag};
 use output::envelope::{capabilities, ErrorEnvelope};
 use output::{emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
@@ -80,38 +80,38 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             emit_stdout(&capabilities(), pretty);
             Ok(0)
         }
-        Command::Schema { sub } => match sub {
-            SchemaCmd::List => {
-                let list: Vec<_> = registry::REGISTRY
-                    .iter()
-                    .map(|op| {
-                        serde_json::json!({
-                            "command": op.command(),
-                            "method": op.method.as_str(),
-                            "apiPath": op.api_path,
-                            "operationId": op.operation_id,
-                        })
+        Command::Schema {
+            sub: SchemaCmd::List,
+        } => {
+            let list: Vec<_> = registry::REGISTRY
+                .iter()
+                .map(|op| {
+                    serde_json::json!({
+                        "command": op.command(),
+                        "method": op.method.as_str(),
+                        "apiPath": op.api_path,
+                        "operationId": op.operation_id,
                     })
-                    .collect();
-                emit_stdout(
-                    &serde_json::json!({
-                        "schema": "exa.cli.schema_list.v1",
-                        "ok": true,
-                        "count": list.len(),
-                        "operations": list,
-                    }),
-                    pretty,
-                );
-                Ok(0)
-            }
-        },
+                })
+                .collect();
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.schema_list.v1",
+                    "ok": true,
+                    "count": list.len(),
+                    "operations": list,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
         Command::Search(args) => {
             let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
             let flag_values = [
                 ("query", Some(args.query.clone())),
                 ("num-results", args.num_results.map(|n| n.to_string())),
-                ("type", args.r#type.clone()),
-                ("category", args.category.clone()),
+                ("type", args.r#type.map(|t| t.as_str().to_string())),
+                ("category", args.category.map(|c| c.as_str().to_string())),
             ];
             let spec = request::build_body(op, &flag_values)?;
             if cli.globals.print_request || cli.globals.dry_run {
@@ -126,16 +126,22 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         }
         Command::Raw(args) => {
             if cli.globals.print_request || cli.globals.dry_run {
-                let body: serde_json::Value = match &args.body {
+                let body: serde_json::Value = match &cli.globals.body {
                     Some(b) => serde_json::from_str(b).unwrap_or(serde_json::Value::Null),
                     None => serde_json::Value::Null,
                 };
+                let query = raw_query_preview(&args.query)?;
                 emit_stdout(
                     &serde_json::json!({
                         "schema": "exa.cli.request_preview.v1",
                         "ok": true,
                         "command": "raw",
-                        "request": { "method": args.method.to_uppercase(), "path": args.path, "body": body },
+                        "request": {
+                            "method": args.method.to_uppercase(),
+                            "path": args.path,
+                            "query": query,
+                            "body": body
+                        },
                         "dryRun": true,
                     }),
                     pretty,
@@ -148,7 +154,37 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 ))
             }
         }
+        _ => Err(not_implemented(
+            &command_path(&cli.command),
+            "parser skeleton only in this wave",
+        )),
     }
+}
+
+fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError> {
+    raw.iter()
+        .map(|item| {
+            let (name, value) = item.split_once('=').ok_or_else(|| {
+                CliError::Usage(
+                    Diag::new(
+                        "invalid_value",
+                        format!("raw --query expects `key=value`, got `{item}`"),
+                    )
+                    .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
+                )
+            })?;
+            if name.is_empty() {
+                return Err(CliError::Usage(
+                    Diag::new(
+                        "invalid_value",
+                        format!("raw --query expects a non-empty key in `{item}`"),
+                    )
+                    .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
+                ));
+            }
+            Ok(serde_json::json!({ "name": name, "value": value }))
+        })
+        .collect()
 }
 
 fn not_implemented(cmd: &str, detail: &str) -> CliError {

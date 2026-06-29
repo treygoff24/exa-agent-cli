@@ -1,7 +1,6 @@
 # Autonomous Run Ledger
 
-Status: ready for implementation; baseline git decision and live smoke credentials
-still pending.
+Status: Wave 1A complete and locally committed; Wave 1B next.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -10,34 +9,41 @@ Codex owns updates.
 
 ## Baseline
 
-- Current observed git state: scaffold and docs are untracked.
+- Current observed git state: implementation branch
+  `codex/autonomous-v1-implementation`; baseline scaffold committed as
+  `70ac1ad`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
+  - `cargo xtask vendor-spec --check`
 - Delegate availability verified with non-printing `delegate --json describe` and
   `delegate --json models`.
 - Delegate Cursor Composer work mode verified after local command collision fix;
   smoke artifact: `work/delegate-cursor-composer-smoke.md`.
-- Implementation has not started.
+- Live smoke credential available from
+  `~/.config/exa-agent-cli/credentials.json` (fingerprint `64c321d8ab24`; do
+  not print full key).
+- Implementation started. Wave 1A expanded the typed parser surface and
+  not-implemented envelope routing.
 
 ## Pre-run checklist
 
-- [ ] Resolve baseline git state: commit current scaffold or confirm dirty tree
+- [x] Resolve baseline git state: commit current scaffold or confirm dirty tree
       as the intended baseline.
 - [x] Confirm Delegate lanes with `delegate --json describe`.
 - [x] Confirm model roster with `delegate --json models`.
 - [x] Confirm Delegate Cursor Composer work-mode smoke.
-- [ ] Confirm whether live smoke may use `EXA_API_KEY`.
+- [x] Confirm whether live smoke may use `EXA_API_KEY`.
 - [x] Run `cargo test --workspace --locked`.
-- [ ] Confirm local commit baseline. After that, parent Codex should commit
+- [x] Confirm local commit baseline. After that, parent Codex should commit
       coherent passing checkpoints locally and never push unless Trey asks.
 
 ## Wave ledger
 
 | Wave | Status | Implementation lanes | Native review | GLM review | Gate |
 |---|---|---|---|---|---|
-| 0 Baseline/spec audit | not started | - | - | - | - |
-| 1A Registry/parser/envelope | not started | - | - | - | - |
+| 0 Baseline/spec audit | complete | parent + native map | n/a | n/a | `cargo xtask vendor-spec --check` pass |
+| 1A Registry/parser/envelope | complete | Delegate Cursor Composer + parent integration | native reviewer found `raw --query` preview omission; fixed; re-review clean | GLM review clean; P3 redaction hardening fixed | `cargo xtask ci` pass |
 | 1B Request/redaction/body merge | not started | - | - | - | - |
 | 1C Auth/config/doctor | not started | - | - | - | - |
 | 1D Raw/search/goldens | not started | - | - | - | - |
@@ -58,6 +64,8 @@ Record every review finding that is not immediately fixed.
 
 | Wave | Reviewer | Severity | Finding | Disposition | Rationale / fix |
 |---|---|---|---|---|---|
+| 1A | native | medium | `raw --query` parsed but omitted from dry-run/print-request preview | fixed | Added ordered query preview array plus black-box output test. |
+| 1A | GLM | P3 | Debug redaction missed service-key style header names and command payloads could leak via `Cli` debug | fixed | Broadened secret-name matcher; custom `Cli` debug now prints command path, not command arg payloads. |
 
 ## Gate log
 
@@ -67,13 +75,16 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `cargo xtask ci` | pass | fmt, clippy, tests |
 | 2026-06-29 | `delegate --json describe`; `delegate --json models` | pass | output suppressed |
 | 2026-06-29 | `delegate cursor work` | pass | wrote `work/delegate-cursor-composer-smoke.md` |
+| 2026-06-29 | `cargo xtask vendor-spec --check` | pass | Wave 0 embedded spec audit |
+| 2026-06-29 | `cargo test --test cli --locked` | pass | 20 parser/output tests after review fix |
+| 2026-06-29 | `cargo xtask ci` | pass | Wave 1A final gate after native + GLM fixes |
 
 ## Local commit log
 
-No implementation commits yet.
-
 | Date | Commit | Scope | Checks |
 |---|---|---|---|
+| 2026-06-29 | `70ac1ad` | Baseline scaffold + autonomous plan | `cargo xtask ci` |
+| 2026-06-29 | this commit | Wave 1A parser contract surface | `cargo xtask ci`; native review clean; GLM review clean |
 
 ## Final completion checklist
 

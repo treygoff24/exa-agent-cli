@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod error;
 pub mod output;
+pub mod redaction;
 pub mod registry;
 pub mod request;
 
@@ -15,6 +16,7 @@ use cli::{command_path, Cli, Command, GlobalArgs, SchemaCmd};
 use error::{CliError, Diag};
 use output::envelope::{capabilities, ErrorEnvelope};
 use output::{emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
+use request::RequestOverrides;
 
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
@@ -113,9 +115,21 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 ("type", args.r#type.map(|t| t.as_str().to_string())),
                 ("category", args.category.map(|c| c.as_str().to_string())),
             ];
-            let spec = request::build_body(op, &flag_values)?;
+            let spec = request::build_request(
+                op,
+                &flag_values,
+                RequestOverrides {
+                    body: cli
+                        .globals
+                        .body
+                        .as_deref()
+                        .map(request::parse_body_source)
+                        .transpose()?,
+                    sets: &cli.globals.set,
+                },
+            )?;
             if cli.globals.print_request || cli.globals.dry_run {
-                emit_stdout(&spec.preview(), pretty);
+                emit_stdout(&redacted_preview(&spec), pretty);
                 Ok(0)
             } else {
                 Err(not_implemented(
@@ -126,11 +140,9 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         }
         Command::Raw(args) => {
             if cli.globals.print_request || cli.globals.dry_run {
-                let body: serde_json::Value = match &cli.globals.body {
-                    Some(b) => serde_json::from_str(b).unwrap_or(serde_json::Value::Null),
-                    None => serde_json::Value::Null,
-                };
+                let mut body = raw_body(&cli.globals)?;
                 let query = raw_query_preview(&args.query)?;
+                redaction::redact_json_value(&mut body);
                 emit_stdout(
                     &serde_json::json!({
                         "schema": "exa.cli.request_preview.v1",
@@ -161,6 +173,32 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     }
 }
 
+fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
+    spec.preview_with_redactor(|body| {
+        let mut redacted = body.clone();
+        redaction::redact_json_value(&mut redacted);
+        redacted
+    })
+}
+
+fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
+    let mut body = match &globals.body {
+        Some(raw) => {
+            let source = request::parse_body_source(raw)?;
+            request::read_body_source(source)?
+        }
+        None => serde_json::Value::Null,
+    };
+    for entry in &globals.set {
+        let (path, value) = request::parse_set(entry)?;
+        if body.is_null() {
+            body = serde_json::Value::Object(serde_json::Map::new());
+        }
+        request::set_at_path(&mut body, &path, value)?;
+    }
+    Ok(body)
+}
+
 fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError> {
     raw.iter()
         .map(|item| {
@@ -182,6 +220,11 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
                     .with_suggestion("exa-agent raw METHOD PATH --query key=value --dry-run"),
                 ));
             }
+            let value = if redaction::is_secret_name(name) {
+                redaction::REDACTED
+            } else {
+                value
+            };
             Ok(serde_json::json!({ "name": name, "value": value }))
         })
         .collect()

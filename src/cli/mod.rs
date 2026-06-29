@@ -196,7 +196,14 @@ impl std::fmt::Debug for GlobalArgs {
             .field("api_key_stdin", &self.api_key_stdin)
             .field("profile", &self.profile)
             .field("base_url", &self.base_url)
-            .field("headers", &redact_headers(&self.headers))
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|h| crate::redaction::redact_header(h))
+                    .collect::<Vec<_>>(),
+            )
             .field("beta", &self.beta)
             .field("timeout", &self.timeout)
             .field("connect_timeout", &self.connect_timeout)
@@ -205,7 +212,14 @@ impl std::fmt::Debug for GlobalArgs {
             .field("idempotency_key", &self.idempotency_key)
             .field("input", &self.input)
             .field("input_format", &self.input_format)
-            .field("set", &redact_possible_secrets(&self.set))
+            .field(
+                "set",
+                &self
+                    .set
+                    .iter()
+                    .map(|v| crate::redaction::redact_set_value(v))
+                    .collect::<Vec<_>>(),
+            )
             .field("body", &self.body.as_ref().map(|_| "<redacted>"))
             .field("quiet", &self.quiet)
             .field("verbose", &self.verbose)
@@ -216,51 +230,6 @@ impl std::fmt::Debug for GlobalArgs {
             .field("print_request", &self.print_request)
             .finish()
     }
-}
-
-fn redact_headers(headers: &[String]) -> Vec<String> {
-    headers
-        .iter()
-        .map(|h| {
-            let name = h.split_once(':').map(|(name, _)| name).unwrap_or(h);
-            if is_secret_name(name) {
-                format!("{}: <redacted>", name.trim())
-            } else {
-                h.clone()
-            }
-        })
-        .collect()
-}
-
-fn redact_possible_secrets(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .map(|v| {
-            let key = v.split_once('=').map(|(key, _)| key).unwrap_or(v);
-            if is_secret_name(key) {
-                format!("{key}=<redacted>")
-            } else {
-                v.clone()
-            }
-        })
-        .collect()
-}
-
-fn is_secret_name(name: &str) -> bool {
-    let n = name.trim().to_ascii_lowercase();
-    n.contains("authorization")
-        || n.contains("api-key")
-        || n.contains("api_key")
-        || n.contains("apikey")
-        || n.contains("service-key")
-        || n.contains("service_key")
-        || n.contains("servicekey")
-        || n.contains("access-key")
-        || n.contains("access_key")
-        || n.contains("accesskey")
-        || n.contains("token")
-        || n.contains("secret")
-        || n.contains("password")
 }
 
 #[derive(Args, Debug, Default)]

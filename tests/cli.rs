@@ -165,6 +165,101 @@ fn raw_dry_run_includes_query_preview() {
 }
 
 #[test]
+fn raw_dry_run_redacts_secret_query_values() {
+    let json = run_ok_json(&[
+        "raw",
+        "GET",
+        "/v0/websets",
+        "--query",
+        "api_key=query-secret",
+        "--query",
+        "status=running",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["request"]["query"],
+        serde_json::json!([
+            { "name": "api_key", "value": "<redacted>" },
+            { "name": "status", "value": "running" }
+        ])
+    );
+}
+
+#[test]
+fn search_dry_run_merges_body_and_set_with_redaction() {
+    let json = run_ok_json(&[
+        "search",
+        "named query",
+        "--body",
+        r#"{"numResults":10,"token":"body-secret","contents":{"summary":{"query":"body summary"}}}"#,
+        "--set",
+        "contents.text=true",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["request"]["body"];
+    assert_eq!(body["query"], "named query");
+    assert_eq!(body["numResults"], 10);
+    assert_eq!(body["contents"]["summary"]["query"], "body summary");
+    assert_eq!(body["contents"]["text"], true);
+    assert_eq!(body["token"], "<redacted>");
+}
+
+#[test]
+fn raw_dry_run_reads_body_and_set_then_redacts() {
+    let json = run_ok_json(&[
+        "raw",
+        "POST",
+        "/custom",
+        "--body",
+        r#"{"query":"keep","password":"body-secret"}"#,
+        "--set",
+        "token=set-secret",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["request"]["body"];
+    assert_eq!(body["query"], "keep");
+    assert_eq!(body["password"], "<redacted>");
+    assert_eq!(body["token"], "<redacted>");
+}
+
+#[test]
+fn raw_body_stdin_empty_returns_no_input() {
+    let output = run(&["raw", "POST", "/custom", "--body", "-", "--dry-run"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["error"]["code"], "no_input");
+    assert_eq!(stderr["error"]["category"], "no_input");
+}
+
+#[test]
+fn set_overflow_path_returns_structured_error_not_panic() {
+    let output = run(&[
+        "search",
+        "q",
+        "--set",
+        "18446744073709551615=x",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+}
+
+#[test]
 fn recognized_unimplemented_commands_return_structured_error() {
     let output = run(&["contents", "https://exa.ai", "--compact"]);
     assert!(!output.status.success());

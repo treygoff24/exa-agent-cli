@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 1A complete and locally committed; Wave 1B next.
+Status: Wave 1B complete and locally committed; Wave 1C next.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -24,7 +24,7 @@ Codex owns updates.
   `~/.config/exa-agent-cli/credentials.json` (fingerprint `64c321d8ab24`; do
   not print full key).
 - Implementation started. Wave 1A expanded the typed parser surface and
-  not-implemented envelope routing.
+  not-implemented envelope routing. Wave 1B added request merge/redaction spine.
 
 ## Pre-run checklist
 
@@ -44,7 +44,7 @@ Codex owns updates.
 |---|---|---|---|---|---|
 | 0 Baseline/spec audit | complete | parent + native map | n/a | n/a | `cargo xtask vendor-spec --check` pass |
 | 1A Registry/parser/envelope | complete | Delegate Cursor Composer + parent integration | native reviewer found `raw --query` preview omission; fixed; re-review clean | GLM review clean; P3 redaction hardening fixed | `cargo xtask ci` pass |
-| 1B Request/redaction/body merge | not started | - | - | - | - |
+| 1B Request/redaction/body merge | complete | native redaction lane + Delegate Cursor Composer request lane + parent integration | native found `--set` numeric-index panic/OOM risk; fixed; re-review clean | GLM review clean; P3 raw query redaction fixed; narrow re-review clean | `cargo xtask ci` pass |
 | 1C Auth/config/doctor | not started | - | - | - | - |
 | 1D Raw/search/goldens | not started | - | - | - | - |
 | 2A Search/contents | not started | - | - | - | - |
@@ -66,6 +66,8 @@ Record every review finding that is not immediately fixed.
 |---|---|---|---|---|---|
 | 1A | native | medium | `raw --query` parsed but omitted from dry-run/print-request preview | fixed | Added ordered query preview array plus black-box output test. |
 | 1A | GLM | P3 | Debug redaction missed service-key style header names and command payloads could leak via `Cli` debug | fixed | Broadened secret-name matcher; custom `Cli` debug now prints command path, not command arg payloads. |
+| 1B | native | high | numeric `--set` path segments could overflow or allocate unbounded arrays | fixed | Added array-index cap, checked length, and CLI/request regressions. |
+| 1B | GLM | P3 | secret-ish raw `--query` values leaked in dry-run preview | fixed | Redact query values by shared secret-name predicate; added black-box regression. |
 
 ## Gate log
 
@@ -78,13 +80,16 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `cargo xtask vendor-spec --check` | pass | Wave 0 embedded spec audit |
 | 2026-06-29 | `cargo test --test cli --locked` | pass | 20 parser/output tests after review fix |
 | 2026-06-29 | `cargo xtask ci` | pass | Wave 1A final gate after native + GLM fixes |
+| 2026-06-29 | `cargo test --test request --test redaction --test cli --locked` | pass | Wave 1B focused tests after integration |
+| 2026-06-29 | `cargo xtask ci` | pass | Wave 1B final gate after native + GLM fixes |
 
 ## Local commit log
 
 | Date | Commit | Scope | Checks |
 |---|---|---|---|
 | 2026-06-29 | `70ac1ad` | Baseline scaffold + autonomous plan | `cargo xtask ci` |
-| 2026-06-29 | this commit | Wave 1A parser contract surface | `cargo xtask ci`; native review clean; GLM review clean |
+| 2026-06-29 | `4a323df` | Wave 1A parser contract surface | `cargo xtask ci`; native review clean; GLM review clean |
+| 2026-06-29 | this commit | Wave 1B request merge and redaction spine | `cargo xtask ci`; native review clean; GLM review clean |
 
 ## Final completion checklist
 

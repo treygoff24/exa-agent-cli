@@ -3,7 +3,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod cli;
+pub mod config;
+pub mod doctor;
 pub mod error;
 pub mod output;
 pub mod redaction;
@@ -11,8 +14,11 @@ pub mod registry;
 pub mod request;
 
 use clap::Parser;
+use std::io::{self, IsTerminal, Read};
 
-use cli::{command_path, Cli, Command, GlobalArgs, SchemaCmd};
+use cli::{
+    command_path, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, GlobalArgs, SchemaCmd,
+};
 use error::{CliError, Diag};
 use output::envelope::{capabilities, ErrorEnvelope};
 use output::{emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
@@ -107,6 +113,20 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             );
             Ok(0)
         }
+        Command::Doctor(args) => {
+            let checks = parse_checks(&args.check);
+            doctor::validate_check_ids(&checks)?;
+            let options = doctor::DoctorOptions {
+                online: args.online,
+                checks,
+            };
+            let ctx = doctor::DoctorCtx::from_process();
+            let report = doctor::run_doctor(&options, &ctx);
+            emit_stdout(&report.to_json(), pretty);
+            Ok(doctor::doctor_exit_code(&report))
+        }
+        Command::Auth { sub } => dispatch_auth(sub, &cli.globals, pretty),
+        Command::Config { sub } => dispatch_config(sub, pretty),
         Command::Search(args) => {
             let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
             let flag_values = [
@@ -171,6 +191,297 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             "parser skeleton only in this wave",
         )),
     }
+}
+
+fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        AuthCmd::Status => {
+            let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+            let service_input = credential_input(auth::CredentialNamespace::Service, globals)?;
+            let api = auth::resolve_api_credential(&api_input, &auth::NoopKeyring);
+            let service = auth::resolve_service_credential(&service_input, &auth::NoopKeyring);
+            let (authenticated, source, key_fingerprint, last4, checked) = match api {
+                Ok(resolved) => {
+                    let status = resolved.status();
+                    (
+                        true,
+                        Some(status.source),
+                        Some(status.fingerprint),
+                        Some(status.last4),
+                        Vec::new(),
+                    )
+                }
+                Err(missing) => (false, None, None, None, missing.checked),
+            };
+            let mut warnings = Vec::new();
+            let (can_admin, service_source) = match service {
+                Ok(resolved) if auth::looks_like_api_key(resolved.secret.expose()) => {
+                    warnings.push(
+                        "EXA_SERVICE_KEY looks like an API key; admin commands require a service key"
+                            .to_string(),
+                    );
+                    (false, Some(resolved.source.label()))
+                }
+                Ok(resolved) => (true, Some(resolved.source.label())),
+                Err(_) => (false, None),
+            };
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.auth_status.v1",
+                    "ok": true,
+                    "authenticated": authenticated,
+                    "source": source,
+                    "profile": auth::resolve_profile(globals.profile.as_deref(), std::env::var("EXA_PROFILE").ok().as_deref()),
+                    "keyFingerprint": key_fingerprint,
+                    "last4": last4,
+                    "canAdmin": can_admin,
+                    "serviceSource": service_source,
+                    "checked": checked,
+                    "warnings": warnings,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        AuthCmd::Login => {
+            let secret = read_secret_stdin("auth login", "EXA_API_KEY")?;
+            let path = auth::write_credential_file(auth::CredentialNamespace::Api, &secret)?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.auth_login.v1",
+                    "ok": true,
+                    "stored": true,
+                    "source": "credentials_file",
+                    "path": path.display().to_string(),
+                    "redacted": true,
+                    "keyFingerprint": secret.fingerprint(),
+                    "last4": secret.last4(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        AuthCmd::Logout => {
+            let path = auth::clear_credential_file(auth::CredentialNamespace::Api)?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.auth_logout.v1",
+                    "ok": true,
+                    "cleared": true,
+                    "source": "credentials_file",
+                    "path": path.display().to_string(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        AuthCmd::Test => Err(not_implemented(
+            "auth test",
+            "network auth probe lands with transport",
+        )),
+    }
+}
+
+fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        ConfigCmd::Path => {
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_path.v1",
+                    "ok": true,
+                    "path": config::config_path().display().to_string(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigCmd::List { effective } => {
+            let cfg = config::Config::load()?;
+            let mut data = cfg.list_json();
+            data["effective"] = serde_json::json!(effective);
+            data["effectiveBaseUrl"] = serde_json::json!(cfg.effective_base_url());
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_list.v1",
+                    "ok": true,
+                    "config": data,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigCmd::Get { path } => {
+            let cfg = config::Config::load()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_get.v1",
+                    "ok": true,
+                    "path": path,
+                    "value": cfg.get_path(path)?,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigCmd::Set { path, value } => {
+            let mut cfg = config::Config::load()?;
+            cfg.set_path(path, value)?;
+            cfg.save()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_set.v1",
+                    "ok": true,
+                    "path": path,
+                    "configPath": config::config_path().display().to_string(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigCmd::Unset { path } => {
+            let mut cfg = config::Config::load()?;
+            cfg.unset_path(path)?;
+            cfg.save()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_unset.v1",
+                    "ok": true,
+                    "path": path,
+                    "configPath": config::config_path().display().to_string(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigCmd::Profiles { sub } => dispatch_config_profiles(sub, pretty),
+    }
+}
+
+fn dispatch_config_profiles(sub: &ConfigProfilesCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        ConfigProfilesCmd::List => {
+            let cfg = config::Config::load()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_profiles.v1",
+                    "ok": true,
+                    "data": cfg.profiles_json(),
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigProfilesCmd::Show { name } => {
+            let cfg = config::Config::load()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_profile.v1",
+                    "ok": true,
+                    "name": name,
+                    "profile": cfg.show_profile(name)?,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigProfilesCmd::Use { name } => {
+            let mut cfg = config::Config::load()?;
+            cfg.use_profile(name)?;
+            cfg.save()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_profile_use.v1",
+                    "ok": true,
+                    "activeProfile": name,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigProfilesCmd::Create { name } => {
+            let mut cfg = config::Config::load()?;
+            cfg.create_profile(name)?;
+            cfg.save()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_profile_create.v1",
+                    "ok": true,
+                    "name": name,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        ConfigProfilesCmd::Delete { name } => {
+            let mut cfg = config::Config::load()?;
+            cfg.delete_profile(name)?;
+            cfg.save()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.config_profile_delete.v1",
+                    "ok": true,
+                    "name": name,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn credential_input(
+    ns: auth::CredentialNamespace,
+    globals: &GlobalArgs,
+) -> Result<auth::CredentialInput, CliError> {
+    let stdin = match ns {
+        auth::CredentialNamespace::Api if globals.api_key_stdin => Some(
+            read_secret_stdin("--api-key-stdin", "EXA_API_KEY")?
+                .expose()
+                .to_string(),
+        ),
+        auth::CredentialNamespace::Service if globals.service_key_stdin => Some(
+            read_secret_stdin("--service-key-stdin", "EXA_SERVICE_KEY")?
+                .expose()
+                .to_string(),
+        ),
+        _ => None,
+    };
+    let explicit = match ns {
+        auth::CredentialNamespace::Api => globals.api_key.clone(),
+        auth::CredentialNamespace::Service => globals.service_key.clone(),
+    };
+    Ok(auth::CredentialInput::from_env(
+        globals.profile.clone(),
+        explicit,
+        stdin,
+        ns,
+    ))
+}
+
+fn read_secret_stdin(context: &str, env_var: &str) -> Result<auth::Secret, CliError> {
+    if io::stdin().is_terminal() {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "no_input",
+                format!("{context} requires piped stdin (refusing to read an interactive TTY)"),
+            )
+            .with_suggestion(format!("printf '%s' \"${env_var}\" | exa-agent {context}")),
+        ));
+    }
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf).map_err(|e| {
+        CliError::NoInput(Diag::new("no_input", format!("failed to read stdin: {e}")))
+    })?;
+    auth::Secret::new(buf).ok_or_else(|| CliError::NoInput(Diag::new("no_input", "stdin is empty")))
+}
+
+fn parse_checks(raw: &[String]) -> Vec<String> {
+    raw.iter()
+        .flat_map(|item| item.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {

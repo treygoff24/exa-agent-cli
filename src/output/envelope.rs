@@ -2,7 +2,8 @@
 
 use serde::Serialize;
 
-use crate::error::{error_code_dictionary, CliError, EXIT_CODES};
+use crate::error::{error_code_specs, CliError, EXIT_CODES};
+use crate::redaction;
 use crate::registry::{self, OperationDef, Pagination};
 
 /// `exa.cli.error.v1` (contracts §5). Rendered to stderr; stdout stays empty on error.
@@ -21,6 +22,8 @@ pub struct ErrorBody {
     pub exit_code: u8,
     pub message: String,
     pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
     #[serde(rename = "httpStatus", skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
     #[serde(rename = "suggestedCommand", skip_serializing_if = "Option::is_none")]
@@ -30,6 +33,10 @@ pub struct ErrorBody {
 impl ErrorEnvelope {
     pub fn from_error(err: &CliError) -> Self {
         let d = err.diag();
+        let mut details = d.details.as_deref().cloned();
+        if let Some(value) = &mut details {
+            redaction::scrub_json_value(value);
+        }
         ErrorEnvelope {
             schema: "exa.cli.error.v1",
             ok: false,
@@ -37,10 +44,11 @@ impl ErrorEnvelope {
                 code: d.code.clone(),
                 category: err.category_name(),
                 exit_code: err.category(),
-                message: d.message.clone(),
+                message: redaction::scrub_text(&d.message),
                 retryable: d.retryable,
+                details,
                 http_status: d.http_status,
-                suggested_command: d.suggested_command.clone(),
+                suggested_command: d.suggested_command.as_deref().map(redaction::scrub_text),
             },
         }
     }
@@ -65,12 +73,17 @@ pub fn capabilities() -> serde_json::Value {
         })
         .collect();
 
-    let error_codes: serde_json::Map<String, serde_json::Value> = error_code_dictionary()
+    let error_codes: serde_json::Map<String, serde_json::Value> = error_code_specs()
         .into_iter()
-        .map(|(code, desc)| {
+        .map(|(code, spec)| {
             (
                 code.to_string(),
-                serde_json::Value::String(desc.to_string()),
+                serde_json::json!({
+                    "category": spec.category,
+                    "exit": spec.exit,
+                    "retryable": spec.retryable,
+                    "description": spec.description,
+                }),
             )
         })
         .collect();
@@ -99,6 +112,24 @@ pub fn capabilities() -> serde_json::Value {
         "commands": commands,
         "exitCodes": exit_codes,
         "errorCodes": error_codes,
+        "doctor": {
+            "exitCodes": {
+                "0": "healthy",
+                "1": "findings",
+                "4": "refused-unsafe",
+            },
+            "detectors": [
+                "config.parse",
+                "key.present",
+                "service-key.scope",
+                "base-url",
+                "spec.hash",
+                "binary.version",
+                "tty.discipline",
+                "auth.online",
+                "connectivity",
+            ],
+        },
     })
 }
 

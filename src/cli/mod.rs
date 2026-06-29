@@ -134,10 +134,22 @@ pub struct GlobalArgs {
     pub max_output_bytes: u64,
     #[arg(long, global = true, env = "EXA_CORRELATION_ID")]
     pub correlation_id: Option<String>,
-    #[arg(long, global = true, env = "EXA_API_KEY")]
+    #[arg(long, global = true, conflicts_with = "api_key_stdin")]
     pub api_key: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["api_key", "service_key_stdin"]
+    )]
     pub api_key_stdin: bool,
+    #[arg(long, global = true, conflicts_with = "service_key_stdin")]
+    pub service_key: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["service_key", "api_key_stdin"]
+    )]
+    pub service_key_stdin: bool,
     #[arg(long, global = true, env = "EXA_PROFILE")]
     pub profile: Option<String>,
     #[arg(long, global = true)]
@@ -194,6 +206,11 @@ impl std::fmt::Debug for GlobalArgs {
             .field("correlation_id", &self.correlation_id)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("api_key_stdin", &self.api_key_stdin)
+            .field(
+                "service_key",
+                &self.service_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("service_key_stdin", &self.service_key_stdin)
             .field("profile", &self.profile)
             .field("base_url", &self.base_url)
             .field(

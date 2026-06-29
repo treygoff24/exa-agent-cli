@@ -12,6 +12,7 @@ pub struct Diag {
     pub suggested_command: Option<String>,
     pub http_status: Option<u16>,
     pub retryable: bool,
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 impl Diag {
@@ -25,6 +26,11 @@ impl Diag {
 
     pub fn with_suggestion(mut self, cmd: impl Into<String>) -> Self {
         self.suggested_command = Some(cmd.into());
+        self
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(Box::new(details));
         self
     }
 }
@@ -140,43 +146,223 @@ pub const EXIT_CODES: &[(u8, &str, &str)] = &[
 /// The error-code vocabulary (contracts §5.1), surfaced in `capabilities.errorCodes`.
 /// Every `error.code` the binary emits MUST be a member of this map (static test, Phase 1).
 pub fn error_code_dictionary() -> BTreeMap<&'static str, &'static str> {
+    error_code_specs()
+        .into_iter()
+        .map(|(code, spec)| (code, spec.description))
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorCodeSpec {
+    pub category: &'static str,
+    pub exit: u8,
+    pub retryable: bool,
+    pub description: &'static str,
+}
+
+pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
     BTreeMap::from([
-        ("unknown_flag", "an unrecognized flag was passed"),
+        (
+            "usage_error",
+            spec(1, "usage", false, "generic parse/usage failure"),
+        ),
+        (
+            "unknown_flag",
+            spec(1, "usage", false, "an unrecognized flag was passed"),
+        ),
         (
             "unknown_subcommand",
-            "an unrecognized subcommand was passed",
+            spec(1, "usage", false, "an unrecognized subcommand was passed"),
         ),
         (
             "invalid_value",
-            "a flag value failed validation or enum membership",
+            spec(
+                1,
+                "usage",
+                false,
+                "a flag value failed validation, range, or enum membership",
+            ),
+        ),
+        (
+            "invalid_flag_combination",
+            spec(
+                1,
+                "usage",
+                false,
+                "mutually-exclusive or unsupported flags were combined",
+            ),
         ),
         (
             "missing_required_argument",
-            "a required argument was omitted",
+            spec(1, "usage", false, "a required argument was omitted"),
         ),
         (
             "placeholder_argument",
-            "a literal placeholder (<id>, $VAR, YOUR_*) was passed as a value",
+            spec(
+                1,
+                "usage",
+                false,
+                "a literal placeholder (<id>, $VAR, YOUR_*) was passed as a value",
+            ),
+        ),
+        (
+            "broadcast_scope_refused",
+            spec(
+                1,
+                "usage",
+                false,
+                "a broad/destructive scope was refused without an explicit opt-in",
+            ),
         ),
         (
             "not_authenticated",
-            "no credential resolved from any ladder rung",
+            spec(
+                2,
+                "auth",
+                false,
+                "no credential resolved from any ladder rung",
+            ),
         ),
         (
             "reauth_required",
-            "a credential was sent but upstream rejected it",
+            spec(
+                2,
+                "auth",
+                false,
+                "a credential was sent but upstream rejected it",
+            ),
         ),
         (
             "key_scope_mismatch",
-            "an api key was used where a service key is required (or vice versa)",
+            spec(
+                2,
+                "auth",
+                false,
+                "an api key was used where a service key is required, or vice versa",
+            ),
+        ),
+        (
+            "config_parse_error",
+            spec(3, "config", false, "config TOML failed to parse"),
+        ),
+        (
+            "unknown_profile",
+            spec(3, "config", false, "the selected profile does not exist"),
+        ),
+        (
+            "config_invalid",
+            spec(3, "config", false, "a config value is malformed"),
+        ),
+        (
+            "network_error",
+            spec(
+                4,
+                "network",
+                true,
+                "DNS/connect/TLS/timeout before an upstream response",
+            ),
+        ),
+        (
+            "upstream_error",
+            spec(
+                5,
+                "upstream",
+                true,
+                "Exa returned a 5xx or equivalent server error",
+            ),
+        ),
+        (
+            "upstream_malformed",
+            spec(
+                5,
+                "upstream",
+                false,
+                "upstream returned an unparseable or contract-violating body",
+            ),
+        ),
+        (
+            "rate_limited",
+            spec(
+                6,
+                "rate_limit",
+                true,
+                "Exa returned 429 or a budget was exhausted",
+            ),
+        ),
+        (
+            "concurrency_limit",
+            spec(6, "rate_limit", true, "account concurrency cap was hit"),
+        ),
+        (
+            "not_found",
+            spec(
+                7,
+                "not_found",
+                false,
+                "the requested resource does not exist",
+            ),
+        ),
+        (
+            "conflict",
+            spec(8, "conflict", false, "duplicate/externalId conflict"),
+        ),
+        (
+            "idempotency_conflict",
+            spec(
+                8,
+                "conflict",
+                false,
+                "idempotency-key reuse with a different payload",
+            ),
+        ),
+        (
+            "confirmation_required",
+            spec(
+                9,
+                "safety",
+                false,
+                "a destructive operation was refused without confirmation",
+            ),
+        ),
+        (
+            "partial_batch",
+            spec(10, "partial", false, "a batch had mixed success/failure"),
         ),
         (
             "no_input",
-            "required stdin/@file input absent or a TTY would block",
+            spec(
+                11,
+                "no_input",
+                false,
+                "required stdin/@file input absent or a TTY would block",
+            ),
+        ),
+        (
+            "interrupted",
+            spec(12, "interrupted", false, "SIGINT or stream interruption"),
         ),
         (
             "not_implemented",
-            "the command is recognized but not yet wired in this build",
+            spec(
+                1,
+                "usage",
+                false,
+                "the command is recognized but not yet wired in this build",
+            ),
         ),
     ])
+}
+
+const fn spec(
+    exit: u8,
+    category: &'static str,
+    retryable: bool,
+    description: &'static str,
+) -> ErrorCodeSpec {
+    ErrorCodeSpec {
+        category,
+        exit,
+        retryable,
+        description,
+    }
 }

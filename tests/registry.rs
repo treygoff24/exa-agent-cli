@@ -60,6 +60,15 @@ fn capabilities_covers_every_operation() {
     );
     assert_eq!(caps["spec"]["title"], "Exa Public API");
     assert_eq!(caps["spec"]["version"], "2.0.0");
+    assert_eq!(caps["errorCodes"]["not_authenticated"]["category"], "auth");
+    assert_eq!(caps["errorCodes"]["not_authenticated"]["exit"], 2);
+    assert_eq!(caps["errorCodes"]["not_authenticated"]["retryable"], false);
+    assert_eq!(caps["errorCodes"]["partial_batch"]["category"], "partial");
+    assert_eq!(caps["errorCodes"]["upstream_malformed"]["exit"], 5);
+    assert_eq!(caps["errorCodes"]["concurrency_limit"]["exit"], 6);
+    assert_eq!(caps["errorCodes"]["idempotency_conflict"]["exit"], 8);
+    assert!(caps["errorCodes"].get("partial_success").is_none());
+    assert_eq!(caps["doctor"]["exitCodes"]["1"], "findings");
 }
 
 /// Admin operations live in the service namespace and nowhere else (D4).
@@ -83,6 +92,14 @@ fn admin_ops_are_service_namespace() {
 fn error_code_dictionary_is_well_formed() {
     let dict = error_code_dictionary();
     assert!(!dict.is_empty());
+    for expected in [
+        "upstream_malformed",
+        "concurrency_limit",
+        "idempotency_conflict",
+        "partial_batch",
+    ] {
+        assert!(dict.contains_key(expected), "missing {expected}");
+    }
     for code in dict.keys() {
         assert!(
             code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),

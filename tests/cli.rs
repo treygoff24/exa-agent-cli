@@ -2,7 +2,10 @@
 
 use clap::Parser;
 use exa_agent_cli::cli::{command_path, Cli, Command};
-use std::process::{Command as ProcessCommand, Output};
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command as ProcessCommand, Output, Stdio};
 
 fn parses(args: &[&str]) -> Cli {
     let argv: Vec<String> = std::iter::once("exa-agent")
@@ -26,11 +29,50 @@ fn assert_path(args: &[&str], expected: &str) {
 }
 
 fn run(args: &[&str]) -> Output {
-    ProcessCommand::new(env!("CARGO_BIN_EXE_exa-agent"))
-        .args(args)
+    run_with_env(args, &[])
+}
+
+fn command(args: &[&str]) -> ProcessCommand {
+    let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_exa-agent"));
+    cmd.args(args)
         .env_remove("EXA_OUTPUT")
-        .output()
+        .env_remove("EXA_API_KEY")
+        .env_remove("EXA_SERVICE_KEY")
+        .env_remove("EXA_AGENT_CREDENTIALS")
+        .env_remove("EXA_AGENT_CONFIG")
+        .env_remove("EXA_PROFILE");
+    cmd
+}
+
+fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = command(args);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.output()
         .unwrap_or_else(|e| panic!("failed to run exa-agent {args:?}: {e}"))
+}
+
+fn run_with_env_stdin(args: &[&str], envs: &[(&str, &str)], stdin: &str) -> Output {
+    let mut cmd = command(args);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn exa-agent {args:?}: {e}"));
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin pipe")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("failed to wait for exa-agent {args:?}: {e}"))
 }
 
 fn run_ok_json(args: &[&str]) -> serde_json::Value {
@@ -43,6 +85,16 @@ fn run_ok_json(args: &[&str]) -> serde_json::Value {
     );
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("stdout was not JSON for {args:?}: {e}"))
+}
+
+fn temp_path(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "exa-agent-cli-blackbox-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[test]
@@ -116,6 +168,14 @@ fn parse_auth_commands() {
     assert_path(&["auth", "status"], "auth status");
     assert_path(&["auth", "login"], "auth login");
     assert_path(&["auth", "logout"], "auth logout");
+    assert_eq!(
+        parse_err(&["--api-key", "key", "--api-key-stdin", "auth", "status"]).kind(),
+        clap::error::ErrorKind::ArgumentConflict
+    );
+    assert_eq!(
+        parse_err(&["--api-key-stdin", "--service-key-stdin", "auth", "status"]).kind(),
+        clap::error::ErrorKind::ArgumentConflict
+    );
 }
 
 #[test]
@@ -184,6 +244,263 @@ fn raw_dry_run_redacts_secret_query_values() {
             { "name": "status", "value": "running" }
         ])
     );
+}
+
+#[test]
+fn auth_status_uses_credentials_file_without_leaking_secret() {
+    let dir = temp_path("auth-status");
+    let credentials = dir.join("credentials.json");
+    fs::write(&credentials, r#"{"api_key":"file-secret-1234"}"#).unwrap();
+    let output = run_with_env(
+        &["auth", "status", "--compact"],
+        &[("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap())],
+    );
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("file-secret-1234"));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema"], "exa.cli.auth_status.v1");
+    assert_eq!(json["authenticated"], true);
+    assert!(json["source"].as_str().unwrap().starts_with("file:"));
+    assert_eq!(json["last4"], "1234");
+}
+
+#[test]
+fn auth_login_and_logout_use_isolated_credentials_file() {
+    let dir = temp_path("auth-login");
+    let credentials = dir.join("credentials.json");
+    let envs = [("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap())];
+    let login = run_with_env_stdin(&["auth", "login", "--compact"], &envs, "login-secret-9999");
+    assert!(login.status.success());
+    let stdout = String::from_utf8_lossy(&login.stdout);
+    assert!(!stdout.contains("login-secret-9999"));
+    assert!(fs::read_to_string(&credentials)
+        .unwrap()
+        .contains("login-secret-9999"));
+
+    let logout = run_with_env(&["auth", "logout", "--compact"], &envs);
+    assert!(logout.status.success());
+    let remaining = fs::read_to_string(&credentials).unwrap_or_default();
+    assert!(!remaining.contains("login-secret-9999"));
+}
+
+#[test]
+fn config_set_get_roundtrip_uses_config_override() {
+    let dir = temp_path("config-roundtrip");
+    let config = dir.join("config.toml");
+    let envs = [("EXA_AGENT_CONFIG", config.to_str().unwrap())];
+    let set = run_with_env(
+        &[
+            "config",
+            "set",
+            "base-url",
+            "https://example.com",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert!(set.status.success());
+    let get = run_with_env(&["config", "get", "base-url", "--compact"], &envs);
+    assert!(get.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
+    assert_eq!(json["schema"], "exa.cli.config_get.v1");
+    assert_eq!(json["value"], "https://example.com");
+}
+
+#[test]
+fn doctor_malformed_config_reports_finding_on_stdout_exit_one() {
+    let dir = temp_path("doctor-bad-config");
+    let config = dir.join("config.toml");
+    fs::write(&config, "not = valid toml [[[\\n").unwrap();
+    let output = run_with_env(
+        &["doctor", "--compact"],
+        &[("EXA_AGENT_CONFIG", config.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema"], "exa.cli.doctor.v1");
+    assert_eq!(json["status"], "findings");
+    assert!(json["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["id"] == "config.parse" && finding["status"] == "fail"));
+}
+
+#[test]
+fn doctor_warn_findings_exit_one() {
+    let dir = temp_path("doctor-warn");
+    let config = dir.join("config.toml");
+    let credentials = dir.join("missing-credentials.json");
+    fs::write(&config, "base_url = \"https://api.exa.ai\"\n").unwrap();
+    let output = run_with_env(
+        &["doctor", "--check", "key.present", "--compact"],
+        &[
+            ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+            ("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "findings");
+    assert_eq!(json["ok"], false);
+    assert!(json["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["id"] == "key.present" && finding["status"] == "warn"));
+}
+
+#[test]
+fn doctor_unknown_check_is_usage_error() {
+    let output = run(&["doctor", "--check", "key.presnt", "--compact"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert!(stderr["error"]["details"]["valid"].is_array());
+}
+
+#[test]
+fn doctor_key_present_detector_uses_credentials_file_without_leaking_secret() {
+    let dir = temp_path("doctor-key-file");
+    let credentials = dir.join("credentials.json");
+    fs::write(&credentials, r#"{"api_key":"doctor-secret-5555"}"#).unwrap();
+    let output = run_with_env(
+        &["doctor", "--check", "key.present", "--compact"],
+        &[("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap())],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("doctor-secret-5555"));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "healthy");
+    assert!(json["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["id"] == "key.present" && finding["status"] == "ok"));
+}
+
+#[test]
+fn config_errors_redact_secret_shaped_values() {
+    let dir = temp_path("config-error-redaction");
+    let config = dir.join("config.toml");
+    let output = run_with_env(
+        &[
+            "config",
+            "set",
+            "base-url",
+            "exa-secret-config-1234",
+            "--compact",
+        ],
+        &[("EXA_AGENT_CONFIG", config.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("exa-secret-config-1234"));
+    assert!(stderr.contains("<redacted>"));
+}
+
+#[test]
+fn config_rejects_secret_shaped_key_env_and_malformed_base_url() {
+    let dir = temp_path("config-validation");
+    let config = dir.join("config.toml");
+    let envs = [("EXA_AGENT_CONFIG", config.to_str().unwrap())];
+
+    let profile = run_with_env(
+        &["config", "profiles", "create", "work", "--compact"],
+        &envs,
+    );
+    assert!(profile.status.success());
+
+    let secret_env = run_with_env(
+        &[
+            "config",
+            "set",
+            "profiles.work.api-key-env",
+            "sk-exa-secret-1234",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert_eq!(secret_env.status.code(), Some(3));
+    let secret_stderr = String::from_utf8_lossy(&secret_env.stderr);
+    assert!(!secret_stderr.contains("sk-exa-secret-1234"));
+    assert!(!fs::read_to_string(&config)
+        .unwrap()
+        .contains("sk-exa-secret-1234"));
+
+    let bad_url = run_with_env(
+        &[
+            "config",
+            "set",
+            "base-url",
+            "https://not a url",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert_eq!(bad_url.status.code(), Some(3));
+}
+
+#[test]
+fn doctor_redacts_secret_shaped_config_values() {
+    let dir = temp_path("doctor-redaction");
+    let config = dir.join("config.toml");
+    fs::write(&config, "base_url = \"https://exa-secret-base-1234\"\n").unwrap();
+    let output = run_with_env(
+        &["doctor", "--check", "base-url", "--compact"],
+        &[("EXA_AGENT_CONFIG", config.to_str().unwrap())],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("exa-secret-base-1234"));
+    assert!(stdout.contains("<redacted>"));
+}
+
+#[test]
+fn auth_status_rejects_api_shaped_service_key_for_admin_capability() {
+    let output = run_with_env(
+        &["auth", "status", "--compact"],
+        &[("EXA_SERVICE_KEY", "exa-api-shaped-service-key")],
+    );
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["canAdmin"], false);
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .unwrap_or_default()
+            .contains("admin commands require a service key")));
+}
+
+#[cfg(unix)]
+#[test]
+fn auth_login_with_credentials_override_does_not_chmod_parent_dir() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = temp_path("auth-login-perms");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let before = fs::metadata(&dir).unwrap().mode() & 0o777;
+    let credentials = dir.join("credentials.json");
+    let output = run_with_env_stdin(
+        &["auth", "login", "--compact"],
+        &[("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap())],
+        "permission-secret-1234",
+    );
+    assert!(output.status.success());
+    let after = fs::metadata(&dir).unwrap().mode() & 0o777;
+    let file_mode = fs::metadata(&credentials).unwrap().mode() & 0o777;
+    assert_eq!(before, 0o755);
+    assert_eq!(after, 0o755);
+    assert_eq!(file_mode, 0o600);
 }
 
 #[test]
@@ -482,6 +799,8 @@ fn debug_redacts_global_secret_values() {
     let cli = parses(&[
         "--api-key",
         "exa-secret-key",
+        "--service-key",
+        "service-secret-key",
         "--header",
         "Authorization: Bearer header-secret",
         "--header",
@@ -498,6 +817,7 @@ fn debug_redacts_global_secret_values() {
     ]);
     let dbg = format!("{cli:?}");
     assert!(!dbg.contains("exa-secret-key"));
+    assert!(!dbg.contains("service-secret-key"));
     assert!(!dbg.contains("header-secret"));
     assert!(!dbg.contains("service-key-secret"));
     assert!(!dbg.contains("set-secret"));

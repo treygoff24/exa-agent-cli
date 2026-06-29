@@ -29,6 +29,7 @@ fn detects_secret_names() {
 
     assert!(!is_secret_name("limit"));
     assert!(!is_secret_name("query"));
+    assert!(!is_secret_name("tokensNum"));
 }
 
 #[test]

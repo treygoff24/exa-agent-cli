@@ -192,6 +192,7 @@ pub struct ResponseEnvelopeArgs<'a> {
     pub count: Option<u64>,
     pub data_hash: Option<String>,
     pub retries: u32,
+    pub warnings: &'a [serde_json::Value],
 }
 
 pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
@@ -219,12 +220,68 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         "pagination": null,
         "costDollars": { "total": 0.0 },
         "nextActions": [],
-        "warnings": [],
+        "warnings": args.warnings,
         "diagnostics": { "durationMs": 0, "retries": args.retries },
         "dataTruncated": false,
         "dataPath": null,
         "bytes": null,
     })
+}
+
+pub struct EventEnvelopeArgs<'a> {
+    pub event_type: &'a str,
+    pub command: &'a str,
+    pub seq: u64,
+    pub event_id: Option<&'a str>,
+    pub correlation_id: Option<&'a str>,
+    pub event: serde_json::Value,
+}
+
+/// One NDJSON streaming record (`exa.cli.event.v1`, contracts §8).
+pub fn event_envelope(args: EventEnvelopeArgs<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "exa.cli.event.v1",
+        "type": args.event_type,
+        "command": args.command,
+        "seq": args.seq,
+        "eventId": args.event_id,
+        "timestamp": stream_event_timestamp(),
+        "correlationId": args.correlation_id,
+        "event": args.event,
+    })
+}
+
+fn stream_event_timestamp() -> String {
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    unix_epoch_to_rfc3339(epoch)
+}
+
+fn unix_epoch_to_rfc3339(epoch: u64) -> String {
+    let days = (epoch / 86_400).min(i64::MAX as u64) as i64;
+    let seconds_of_day = epoch % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+// Howard Hinnant's civil-from-days algorithm, with day 0 = 1970-01-01.
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let y = y + if m <= 2 { 1 } else { 0 };
+    (y, m as u32, d as u32)
 }
 
 fn command_entry(op: &OperationDef) -> serde_json::Value {
@@ -251,4 +308,15 @@ fn command_entry(op: &OperationDef) -> serde_json::Value {
         "source": op.source,
         "sourceVersion": op.source_version,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unix_epoch_to_rfc3339;
+
+    #[test]
+    fn unix_epoch_timestamp_format_is_reproducible() {
+        assert_eq!(unix_epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(unix_epoch_to_rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
 }

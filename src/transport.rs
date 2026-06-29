@@ -595,6 +595,140 @@ pub fn execute_raw<T: Transport>(
     )
 }
 
+/// True when the merged request body opts into upstream SSE (`stream: true`).
+pub fn body_wants_stream(body: &Value) -> bool {
+    body.get("stream").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Whether upstream returned an SSE payload (by header or recognizable framing).
+pub fn response_is_sse(response: &HttpResponse) -> bool {
+    if response.headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("content-type")
+            && v.to_ascii_lowercase().contains("text/event-stream")
+    }) {
+        return true;
+    }
+    response.body.starts_with(b"data:") || response.body.starts_with(b"id:")
+}
+
+/// One SSE event block after blank-line framing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SseFrame {
+    pub id: Option<String>,
+    pub data: Vec<String>,
+}
+
+/// Parse SSE bytes into framed events (`data:`, `id:`, `data: [DONE]`).
+pub fn parse_sse(bytes: &[u8]) -> Vec<SseFrame> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut frames = Vec::new();
+    let mut id: Option<String> = None;
+    let mut data = Vec::new();
+
+    for line in text.lines() {
+        if line.is_empty() {
+            if id.is_some() || !data.is_empty() {
+                frames.push(SseFrame {
+                    id: id.take(),
+                    data: std::mem::take(&mut data),
+                });
+            }
+            continue;
+        }
+        if line.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("id:") {
+            id = Some(rest.trim_start().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            data.push(rest.trim_start().to_string());
+        }
+    }
+
+    if id.is_some() || !data.is_empty() {
+        frames.push(SseFrame { id, data });
+    }
+    frames
+}
+
+pub fn infer_stream_event_type(event: &Value) -> &'static str {
+    if event.get("choices").is_some() {
+        return "delta";
+    }
+    match event.get("type").and_then(Value::as_str) {
+        Some("done") => "done",
+        Some("error") => "error",
+        _ if event.get("done").and_then(Value::as_bool) == Some(true) => "done",
+        _ => "item",
+    }
+}
+
+/// Accumulate parsed SSE JSON payloads into a single upstream-shaped `data` value.
+pub fn accumulate_stream_data(frames: &[SseFrame]) -> Value {
+    let mut events: Vec<_> = parsed_stream_events(frames)
+        .map(|value| value.unwrap_or_else(Value::String))
+        .collect();
+    if events.len() == 1 {
+        events.pop().unwrap_or(Value::Null)
+    } else {
+        Value::Array(events)
+    }
+}
+
+/// Terminal response `data` for a stream: prefer final answer-like event, then concat deltas.
+pub fn terminal_stream_data(frames: &[SseFrame]) -> Value {
+    let mut fallback = Vec::new();
+    let mut answer_like = None;
+    let mut delta_text = String::new();
+
+    for event in parsed_stream_events(frames) {
+        match event {
+            Ok(value) => {
+                if value.get("answer").is_some() || value.get("citations").is_some() {
+                    answer_like = Some(value.clone());
+                }
+                if let Some(content) = openai_delta_content(&value) {
+                    delta_text.push_str(content);
+                }
+                fallback.push(value);
+            }
+            Err(raw) => fallback.push(Value::String(raw)),
+        }
+    }
+
+    if let Some(value) = answer_like {
+        return value;
+    }
+    if !delta_text.is_empty() {
+        return serde_json::json!({ "answer": delta_text });
+    }
+    if fallback.len() == 1 {
+        fallback.pop().unwrap_or(Value::Null)
+    } else {
+        Value::Array(fallback)
+    }
+}
+
+fn parsed_stream_events(frames: &[SseFrame]) -> impl Iterator<Item = Result<Value, String>> + '_ {
+    frames.iter().flat_map(|frame| {
+        frame
+            .data
+            .iter()
+            .filter(|chunk| chunk.as_str() != "[DONE]")
+            .map(|chunk| serde_json::from_str::<Value>(chunk).map_err(|_| chunk.clone()))
+    })
+}
+
+fn openai_delta_content(value: &Value) -> Option<&str> {
+    value
+        .get("choices")?
+        .as_array()?
+        .iter()
+        .find_map(|choice| choice.get("delta")?.get("content")?.as_str())
+}
+
 /// Execute a live `raw` command through the supplied transport with a caller-provided request id.
 pub fn execute_raw_with_request_id<T: Transport>(
     transport: &T,
@@ -607,6 +741,9 @@ pub fn execute_raw_with_request_id<T: Transport>(
     let url = build_url(&base_url, params.path, &query)?;
 
     let mut headers = parse_user_headers(&params.globals.headers)?;
+    if body_wants_stream(&params.body) {
+        headers.push(("Accept".to_string(), "text/event-stream".to_string()));
+    }
     if let Some(key) = &params.globals.idempotency_key {
         headers.push(("Idempotency-Key".to_string(), key.clone()));
     }
@@ -848,5 +985,68 @@ mod tests {
             "statuses": [{ "id": "https://a.test", "status": "error" }]
         });
         assert_eq!(contents_mixed_status_exit_code(&all_err), 0);
+    }
+
+    #[test]
+    fn parse_sse_frames_data_id_and_done() {
+        let bytes =
+            b"id: evt-1\ndata: {\"seq\":1}\n\nid: evt-2\ndata: {\"seq\":2}\n\ndata: [DONE]\n\n";
+        let frames = parse_sse(bytes);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].id.as_deref(), Some("evt-1"));
+        assert_eq!(frames[0].data, vec!["{\"seq\":1}".to_string()]);
+        assert_eq!(frames[1].id.as_deref(), Some("evt-2"));
+        assert_eq!(frames[2].data, vec!["[DONE]".to_string()]);
+    }
+
+    #[test]
+    fn accumulate_stream_data_skips_done_marker() {
+        let frames = parse_sse(b"data: {\"answer\":\"hi\"}\n\ndata: [DONE]\n\n");
+        let data = accumulate_stream_data(&frames);
+        assert_eq!(data["answer"], "hi");
+    }
+
+    #[test]
+    fn body_wants_stream_reads_boolean_field() {
+        assert!(!body_wants_stream(&serde_json::json!({})));
+        assert!(body_wants_stream(&serde_json::json!({"stream": true})));
+    }
+
+    #[test]
+    fn execute_raw_adds_sse_accept_when_stream_true() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, "data: {}\n\n");
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            "test-key-12345678",
+            "raw",
+            "POST",
+            "/answer",
+        ])
+        .unwrap();
+        let cred = auth::resolve_api_credential(
+            &auth::CredentialInput {
+                explicit: Some("test-key-12345678".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        execute_raw(
+            &fake,
+            "POST",
+            "/answer",
+            &[],
+            serde_json::json!({"query":"q","stream": true}),
+            &cli.globals,
+            &cred,
+        )
+        .unwrap();
+        let recorded = &fake.recorded_requests()[0];
+        assert!(recorded
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("accept") && v == "text/event-stream"));
     }
 }

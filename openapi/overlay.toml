@@ -39,6 +39,7 @@ cursor = "cursor"
 [operations."answer"]
 cli_path = "answer"
 namespace = "api"
+streaming = true
 
 [operations."getContents"]
 cli_path = "contents"
@@ -333,6 +334,48 @@ body_path = "tokensNum"
 kind = "int"
 
 # --- Request-field maps for spec-derived ops (Phase 1 seeds `search`; rest land per-phase) ---
+[[operations."answer".fields]]
+flag = "question"
+body_path = "query"
+kind = "str"
+required = true
+
+[[operations."answer".fields]]
+flag = "text"
+body_path = "text"
+kind = "bool"
+
+[[operations."answer".fields]]
+flag = "stream"
+body_path = "stream"
+kind = "bool"
+
+[[operations."answer".fields]]
+flag = "output-schema"
+body_path = "outputSchema"
+kind = "json"
+
+[[operations."findSimilar".fields]]
+flag = "url"
+body_path = "url"
+kind = "str"
+required = true
+
+[[operations."findSimilar".fields]]
+flag = "num-results"
+body_path = "numResults"
+kind = "int"
+
+[[operations."findSimilar".fields]]
+flag = "exclude-source-domain"
+body_path = "excludeSourceDomain"
+kind = "bool"
+
+[[operations."findSimilar".fields]]
+flag = "category"
+body_path = "category"
+kind = "str"
+
 [[operations."search".fields]]
 flag = "query"
 body_path = "query"

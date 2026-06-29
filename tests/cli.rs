@@ -934,18 +934,178 @@ fn contents_rejects_more_than_one_hundred_inputs_without_chunk_size() {
 }
 
 #[test]
-fn recognized_unimplemented_commands_return_structured_error() {
-    let output = run(&["answer", "What is Exa?", "--compact"]);
-    assert!(!output.status.success());
+fn answer_dry_run_builds_request_body_with_schema_file() {
+    let dir = temp_path("answer-schema");
+    let schema_path = dir.join("answer.schema.json");
+    fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"answer":{"type":"string"}}}"#,
+    )
+    .unwrap();
+    let schema_arg = format!("@{}", schema_path.display());
+
+    let output = run_owned(&[
+        "answer".into(),
+        "What is Exa?".into(),
+        "--text".into(),
+        "--stream".into(),
+        "--output-schema".into(),
+        schema_arg,
+        "--body".into(),
+        r#"{"text":false}"#.into(),
+        "--set".into(),
+        "stream=false".into(),
+        "--dry-run".into(),
+        "--compact".into(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(json["command"], "answer");
+    assert_eq!(json["data"]["request"]["path"], "/answer");
+    assert_eq!(body["query"], "What is Exa?");
+    assert_eq!(body["text"], false);
+    assert_eq!(body["stream"], false);
+    assert_eq!(
+        body["outputSchema"],
+        serde_json::json!({"type":"object","properties":{"answer":{"type":"string"}}})
+    );
+}
+
+#[test]
+fn context_dry_run_omits_dynamic_tokens_and_validates_range() {
+    let dynamic = run_ok_json(&[
+        "context",
+        "rust async patterns",
+        "--tokens",
+        "dynamic",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(dynamic["command"], "context");
+    assert_eq!(dynamic["data"]["request"]["path"], "/context");
+    assert_eq!(
+        dynamic["data"]["request"]["body"],
+        serde_json::json!({"query":"rust async patterns"})
+    );
+
+    let fixed = run_ok_json(&[
+        "context",
+        "rust async patterns",
+        "--tokens",
+        "1000",
+        "--body",
+        r#"{"tokensNum":2000}"#,
+        "--set",
+        "tokensNum=3000",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(fixed["data"]["request"]["body"]["tokensNum"], 3000);
+
+    for bad in ["49", "100001", "lots"] {
+        let output = run(&["context", "q", "--tokens", bad, "--dry-run", "--compact"]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "bad={bad}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(stderr["error"]["code"], "invalid_value");
+        assert_eq!(stderr["operation"]["path"], "/context");
+    }
+}
+
+#[test]
+fn context_rejects_queries_over_two_thousand_chars() {
+    let ok_query = "x".repeat(2_000);
+    let ok = run_owned(&[
+        "context".into(),
+        ok_query,
+        "--dry-run".into(),
+        "--compact".into(),
+    ]);
+    assert!(ok.status.success());
+
+    let too_long = "x".repeat(2_001);
+    let output = run_owned(&[
+        "context".into(),
+        too_long,
+        "--dry-run".into(),
+        "--compact".into(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
-        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
-    assert_eq!(stderr["schema"], "exa.cli.error.v1");
-    assert_eq!(stderr["error"]["code"], "not_implemented");
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
     assert!(stderr["error"]["message"]
         .as_str()
         .unwrap_or_default()
-        .contains("answer"));
+        .contains("2000"));
+    assert_eq!(stderr["operation"]["path"], "/context");
+
+    let body_override = run_owned(&[
+        "context".into(),
+        "short".into(),
+        "--body".into(),
+        serde_json::json!({ "query": "x".repeat(2_001) }).to_string(),
+        "--dry-run".into(),
+        "--compact".into(),
+    ]);
+    assert_eq!(body_override.status.code(), Some(1));
+    assert!(body_override.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&body_override.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert_eq!(stderr["operation"]["path"], "/context");
+
+    let set_override = run_owned(&[
+        "context".into(),
+        "short".into(),
+        "--set".into(),
+        format!("query={}", "x".repeat(2_001)),
+        "--dry-run".into(),
+        "--compact".into(),
+    ]);
+    assert_eq!(set_override.status.code(), Some(1));
+    assert!(set_override.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&set_override.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert_eq!(stderr["operation"]["path"], "/context");
+}
+
+#[test]
+fn similar_dry_run_builds_request_body() {
+    let json = run_ok_json(&[
+        "similar",
+        "https://exa.ai",
+        "--num-results",
+        "7",
+        "--exclude-source-domain",
+        "--category",
+        "company",
+        "--body",
+        r#"{"numResults":8}"#,
+        "--set",
+        "category=people",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(json["command"], "similar");
+    assert_eq!(json["data"]["request"]["path"], "/findSimilar");
+    assert_eq!(body["url"], "https://exa.ai");
+    assert_eq!(body["numResults"], 8);
+    assert_eq!(body["excludeSourceDomain"], true);
+    assert_eq!(body["category"], "people");
+    assert_eq!(json["warnings"][0]["code"], "deprecated_upstream");
 }
 
 #[test]
@@ -980,8 +1140,24 @@ fn parse_contents_answer_context_similar() {
         clap::error::ErrorKind::ArgumentConflict
     );
     assert_path(&["answer", "What is Exa?"], "answer");
+    parses(&[
+        "answer",
+        "What is Exa?",
+        "--text",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+    ]);
     assert_path(&["context", "rust async patterns"], "context");
-    assert_path(&["similar", "https://exa.ai"], "similar");
+    parses(&["context", "rust async patterns", "--tokens", "dynamic"]);
+    parses(&["context", "rust async patterns", "--tokens", "1000"]);
+    parses(&[
+        "similar",
+        "https://exa.ai",
+        "--exclude-source-domain",
+        "--category",
+        "news",
+    ]);
 }
 
 #[test]

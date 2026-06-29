@@ -142,9 +142,38 @@ pub fn read_body_source(source: BodySource<'_>) -> Result<Value, CliError> {
     })
 }
 
+/// Read a JSON-valued flag from inline JSON or `@file`.
+pub fn read_json_value_arg(raw: &str, flag: &str) -> Result<Value, CliError> {
+    let (text, inline) = if let Some(path) = raw.strip_prefix('@') {
+        if path.is_empty() {
+            return Err(usage(
+                "invalid_value",
+                format!("`--{flag} @` requires a file path"),
+            ));
+        }
+        (read_named_file(path, flag)?, false)
+    } else {
+        (raw.to_string(), true)
+    };
+    serde_json::from_str(&text).map_err(|_| {
+        usage(
+            "invalid_value",
+            if inline {
+                format!("`--{flag}` is not valid JSON")
+            } else {
+                format!("`--{flag}` file is not valid JSON")
+            },
+        )
+    })
+}
+
 fn read_file(path: &str) -> Result<String, CliError> {
+    read_named_file(path, "body")
+}
+
+fn read_named_file(path: &str, label: &str) -> Result<String, CliError> {
     if !Path::new(path).is_file() {
-        return Err(no_input(format!("body file not found: `{path}`")));
+        return Err(no_input(format!("{label} file not found: `{path}`")));
     }
     std::fs::read_to_string(path).map_err(|e| no_input(format!("failed to read `{path}`: {e}")))
 }

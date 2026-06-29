@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 2A complete; next wave is 2B answer/context/similar/streaming.
+Status: Wave 2B complete; next wave is 2C team/macros/deprecations.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint `d420fe0`.
+  `70ac1ad`; latest committed checkpoint `6f12e42`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -28,7 +28,9 @@ Codex owns updates.
   Wave 1C added local auth, non-secret config, doctor, and contract/error
   hardening surfaces. Wave 1D added raw transport/offline self-description.
   Wave 2A adds typed `search`/`contents`, `/contents` chunking, and Phase 2
-  gate changes.
+  gate changes. Wave 2B adds typed `answer`/`context`/`similar`, streaming
+  SSE envelope shaping, context query validation, and strengthened Phase 2
+  streaming gates.
 
 ## Pre-run checklist
 
@@ -52,7 +54,7 @@ Codex owns updates.
 | 1C Auth/config/doctor | complete | native auth lane + Delegate Cursor Composer config/doctor lane + parent integration | native found secret-env config, stdin flag, doctor warning/check, URL, and logout issues; fixed; re-reviews clean | GLM found error-code contract drift and empty config path guard; fixed; narrow re-review clean | `cargo xtask ci` pass; non-printing stored-credential smokes pass |
 | 1D Raw/search/goldens | complete | Delegate Cursor Composer + parent integration | findings fixed; narrow re-review found final error-context redaction issue; fixed | findings fixed; re-review no blocking findings | `cargo xtask phase-gate 1` pass; `cargo xtask ci` pass |
 | 2A Search/contents | complete in working tree | native request/chunk lane + Delegate Cursor Composer executor lane + parent integration | native found no-op `--chunk-size`, then chunked error-context gaps; fixed; final approval clean | GLM found clippy/context P3s; fixed; final approval clean | `cargo xtask phase-gate 2` pass; `cargo clippy --workspace --locked -- -D warnings` pass |
-| 2B Answer/context/similar/streaming | not started | - | - | - | - |
+| 2B Answer/context/similar/streaming | complete in working tree | native answer/context/similar lane + Delegate Cursor Composer stream lane + parent integration | native found stream output-mode, terminal data shape, helper-only test, then context override bypass; fixed; final approval clean | GLM found context length guard and generic deprecation warning P3s; fixed; final approval clean | `cargo xtask ci` pass; `cargo xtask phase-gate 2` pass; branch-wide secret scan pass |
 | 2C Team/macros/deprecations | not started | - | - | - | - |
 | 3A Agent/research lifecycle | not started | - | - | - | - |
 | 3B SSE/SIGINT/pagination | not started | - | - | - | - |
@@ -100,6 +102,12 @@ Record every review finding that is not immediately fixed.
 | 2A | native re-review | medium | Chunked preflight/auth errors lost typed operation context; chunk live errors were stderr/abort rather than per-chunk NDJSON | fixed | Added chunk error-context wrapper and emitted chunk execution errors as NDJSON error envelopes before fail-fast exit; added missing-credential context regression. |
 | 2A | GLM review | P3 | New typed live helper had a clippy `needless_borrow` and chunk/build validation errors lacked operation context | fixed | Removed needless borrow, added `with_typed_error_context` around `search`/`contents` build/validation, and asserted >100 guard context. |
 | 2A | GLM/native residual | low | Single-chunk `--chunk-size` uses compact NDJSON shape; all-error `/contents` statuses exit 0; chunk transport errors fail fast | accepted for now | Matches current batch contract or is explicit fail-fast behavior; all-error promotion deferred until a future `--fail-on-url-error` decision. |
+| 2B | native review | high | Streamed typed output keyed only on `--ndjson`, so `--format ndjson`, `EXA_OUTPUT=ndjson`, and default piped stream output missed event NDJSON | fixed | Added stream-specific output-mode resolution with explicit/env/piped defaults and integrated fake-transport tests. |
+| 2B | native review | high | Terminal streamed `answer` response exposed raw SSE chunk arrays instead of upstream-shaped `data.answer`/`data.citations` | fixed | Added `terminal_stream_data` to prefer final answer objects and concatenate OpenAI-style delta chunks; stream tests now assert terminal response shape. |
+| 2B | native review | medium | Stream shape test manually duplicated helper code rather than exercising the typed live path | fixed | Made typed live execution generic over the transport trait and added no-network fake-transport coverage for stream dispatch. |
+| 2B | GLM review | P3 | `context` query length guard required by commands contract was missing | fixed | Added 2000-character local validation and positional/body/set CLI regressions with `/context` error context. |
+| 2B | GLM review | P3 | Deprecated warning helper hardcoded findSimilar prose for every future deprecated operation | fixed | Scoped findSimilar replacement warning to `findSimilar`/`similar`; added generic fallback and unit coverage. |
+| 2B | native re-review | medium | `/context` length validation initially ran before `--body`/`--set` request overrides, making it bypassable | fixed | Moved validation to the final merged request body and added regressions for positional, `--body`, and `--set` overlong queries. |
 
 ## Gate log
 
@@ -146,6 +154,14 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `cargo xtask ci` | pass | Wave 2A final pre-commit gate |
 | 2026-06-29 | non-printing branch-wide secret scan | pass | Stored API key absent from tracked files, diff, and reachable branch commits |
 | 2026-06-29 | `delegate worktree remove cursor-8 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager |
+| 2026-06-29 | `cargo test --test request`; `cargo test --test transport streaming_ndjson_shape_from_canned_sse -- --exact`; `cargo test --test cli dry_run` | pass | Wave 2B focused typed request/dry-run/stream checks before review |
+| 2026-06-29 | `cargo xtask ci`; `cargo xtask phase-gate 2` | pass | Wave 2B pre-review gate after answer/context/similar + streaming integration |
+| 2026-06-29 | `cargo xtask ci`; `cargo xtask phase-gate 2` | pass | After native + GLM Wave 2B streaming/context/deprecation fixes |
+| 2026-06-29 | `cargo test --test cli context_rejects_queries_over_two_thousand_chars -- --exact`; `cargo xtask ci`; `cargo xtask phase-gate 2` | pass | After final native re-review context override-bypass fix |
+| 2026-06-29 | native final Wave 2B re-review | pass | Clean; verified positional/body/set context length errors and direct probes |
+| 2026-06-29 | Delegate GLM final Wave 2B re-review (`droid-18`) | pass | Clean; verified all five reported findings fixed; ran full validation in safe worktree |
+| 2026-06-29 | `delegate worktree remove cursor-9 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager |
+| 2026-06-29 | non-printing tracked/diff/history secret scan | pass | Stored API key absent from tracked files, working diff, and reachable branch blobs |
 
 ## Local commit log
 
@@ -156,7 +172,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `c226444` | Wave 1B request merge and redaction spine | `cargo xtask ci`; native review clean; GLM review clean |
 | 2026-06-29 | `a3dc0dd` | Wave 1C auth, config, and doctor surfaces | `cargo xtask ci`; native review clean; GLM review clean; credential smokes pass; real-key fixture purged by amend |
 | 2026-06-29 | `d420fe0` | Wave 1D raw transport, response envelope, offline schema/robot-docs, and Phase 1 gate | `cargo xtask phase-gate 1`; `cargo xtask ci`; native + GLM reviews/re-reviews; branch-wide secret scan pass; live smoke blocked by credential 401 |
-| 2026-06-29 | this commit | Wave 2A typed `search`/`contents`, `/contents` chunking, redaction suggestion fix, and Phase 2 gate | `cargo xtask phase-gate 2`; `cargo clippy --workspace --locked -- -D warnings`; native + GLM final reviews clean |
+| 2026-06-29 | `6f12e42` | Wave 2A typed `search`/`contents`, `/contents` chunking, redaction suggestion fix, and Phase 2 gate | `cargo xtask phase-gate 2`; `cargo clippy --workspace --locked -- -D warnings`; native + GLM final reviews clean |
+| 2026-06-29 | this commit | Wave 2B typed `answer`/`context`/`similar`, SSE stream envelope shaping, context query validation, and Phase 2 stream gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
 
 ## Final completion checklist
 

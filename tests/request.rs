@@ -4,13 +4,26 @@ use exa_agent_cli::error::CliError;
 use exa_agent_cli::registry;
 use exa_agent_cli::request::{self, BodySource, RequestOverrides};
 use serde_json::json;
+use std::fs;
 
 fn search_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["search"]).expect("search op")
 }
 
+fn answer_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["answer"]).expect("answer op")
+}
+
 fn contents_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["contents"]).expect("contents op")
+}
+
+fn context_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["context"]).expect("context op")
+}
+
+fn similar_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["similar"]).expect("similar op")
 }
 
 #[test]
@@ -34,6 +47,93 @@ fn search_core_fields_map_and_overrides_keep_precedence() {
     assert_eq!(spec.body["numResults"], 10);
     assert_eq!(spec.body["type"], "deep");
     assert_eq!(spec.body["category"], "research paper");
+}
+
+#[test]
+fn answer_fields_map_schema_and_overrides_keep_precedence() {
+    let schema = json!({"type":"object","properties":{"answer":{"type":"string"}}});
+    let spec = request::build_request(
+        answer_op(),
+        &[
+            ("question", Some("typed question".into())),
+            ("text", Some("true".into())),
+            ("stream", Some("true".into())),
+            ("output-schema", Some(schema.to_string())),
+        ],
+        RequestOverrides {
+            body: Some(BodySource::Inline(
+                r#"{"text":false,"outputSchema":{"type":"string"}}"#,
+            )),
+            sets: &["stream=false".into()],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(spec.body["query"], "typed question");
+    assert_eq!(spec.body["text"], false);
+    assert_eq!(spec.body["stream"], false);
+    assert_eq!(
+        spec.body["outputSchema"],
+        json!({"type":"string","properties":{"answer":{"type":"string"}}})
+    );
+}
+
+#[test]
+fn output_schema_at_file_reads_json_for_typed_builders() {
+    let path = std::env::temp_dir().join(format!(
+        "exa-agent-output-schema-{}.json",
+        std::process::id()
+    ));
+    fs::write(&path, r#"{"type":"object","required":["answer"]}"#).unwrap();
+
+    let schema =
+        request::read_json_value_arg(&format!("@{}", path.display()), "output-schema").unwrap();
+
+    fs::remove_file(path).unwrap();
+    assert_eq!(schema, json!({"type":"object","required":["answer"]}));
+}
+
+#[test]
+fn context_fields_map_tokens_and_precedence() {
+    let spec = request::build_request(
+        context_op(),
+        &[
+            ("query", Some("rust async".into())),
+            ("tokens", Some("1000".into())),
+        ],
+        RequestOverrides {
+            body: Some(BodySource::Inline(r#"{"tokensNum":2000}"#)),
+            sets: &["tokensNum=3000".into()],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(spec.body["query"], "rust async");
+    assert_eq!(spec.body["tokensNum"], 3000);
+}
+
+#[test]
+fn similar_fields_map_core_flags() {
+    let spec = request::build_body(
+        similar_op(),
+        &[
+            ("url", Some("https://exa.ai".into())),
+            ("num-results", Some("7".into())),
+            ("exclude-source-domain", Some("true".into())),
+            ("category", Some("company".into())),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        spec.body,
+        json!({
+            "url": "https://exa.ai",
+            "numResults": 7,
+            "excludeSourceDomain": true,
+            "category": "company"
+        })
+    );
 }
 
 #[test]

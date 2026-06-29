@@ -18,18 +18,23 @@ use clap::Parser;
 use std::io::{self, IsTerminal, Read};
 
 use cli::{
-    command_path, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, GlobalArgs,
-    RobotDocsCmd, SchemaCmd, SearchArgs,
+    command_path, AnswerArgs, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs,
+    ContextArgs, GlobalArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
 };
 use error::{CliError, Diag};
 use output::envelope::{
-    capabilities, error_codes_json, response_envelope, ErrorEnvelope, ResponseEnvelopeArgs,
+    capabilities, error_codes_json, event_envelope, response_envelope, ErrorEnvelope,
+    EventEnvelopeArgs, ResponseEnvelopeArgs,
 };
 use output::{emit_ndjson, emit_raw, emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
 use request::RequestOverrides;
-use transport::{execute_raw_with_request_id, parse_user_headers, RawExecuteParams, UreqTransport};
+use transport::{
+    body_wants_stream, execute_raw_with_request_id, infer_stream_event_type, parse_sse,
+    parse_user_headers, terminal_stream_data, RawExecuteParams, Transport, UreqTransport,
+};
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
+const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
 
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
@@ -113,6 +118,9 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Config { sub } => dispatch_config(sub, pretty),
         Command::Search(args) => dispatch_search(args, &cli.globals, pretty),
         Command::Contents(args) => dispatch_contents(args, &cli.globals, pretty),
+        Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
+        Command::Answer(args) => dispatch_answer(args, &cli.globals, pretty),
+        Command::Context(args) => dispatch_context(args, &cli.globals, pretty),
         Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
         _ => Err(not_implemented(
             &command_path(&cli.command),
@@ -177,6 +185,131 @@ fn build_contents_spec(
         ),
     ];
     build_typed_spec(op, &flag_values, globals)
+}
+
+fn dispatch_similar(
+    args: &SimilarArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_similar_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_similar_spec(
+    args: &SimilarArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
+    let flag_values = [
+        ("url", Some(args.url.clone())),
+        ("num-results", args.num_results.map(|n| n.to_string())),
+        (
+            "exclude-source-domain",
+            args.exclude_source_domain.then_some("true".to_string()),
+        ),
+        ("category", args.category.map(|c| c.as_str().to_string())),
+    ];
+    build_typed_spec(op, &flag_values, globals)
+}
+
+fn dispatch_answer(args: &AnswerArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["answer"]).expect("answer is in the registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_answer_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_answer_spec(
+    args: &AnswerArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["answer"]).expect("answer is in the registry");
+    let output_schema = args
+        .output_schema
+        .as_deref()
+        .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+        .transpose()?
+        .map(|value| value.to_string());
+    let flag_values = [
+        ("question", Some(args.question.clone())),
+        ("text", args.text.then_some("true".to_string())),
+        ("stream", args.stream.then_some("true".to_string())),
+        ("output-schema", output_schema),
+    ];
+    build_typed_spec(op, &flag_values, globals)
+}
+
+fn dispatch_context(
+    args: &ContextArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["context"]).expect("context is in the registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_context_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_context_spec(
+    args: &ContextArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["context"]).expect("context is in the registry");
+    let tokens = args
+        .tokens
+        .as_deref()
+        .map(context_tokens_value)
+        .transpose()?
+        .flatten()
+        .map(|n| n.to_string());
+    let flag_values = [("query", Some(args.query.clone())), ("tokens", tokens)];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_context_query_length(&spec.body)?;
+    Ok(spec)
+}
+
+fn validate_context_query_length(body: &serde_json::Value) -> Result<(), CliError> {
+    let Some(query) = body.get("query").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    if query.chars().count() <= MAX_CONTEXT_QUERY_CHARS {
+        return Ok(());
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            format!("context query must be at most {MAX_CONTEXT_QUERY_CHARS} characters"),
+        )
+        .with_suggestion("shorten the query or use exa-agent search/contents for broader input"),
+    ))
+}
+
+fn context_tokens_value(raw: &str) -> Result<Option<u32>, CliError> {
+    if raw.eq_ignore_ascii_case("dynamic") {
+        return Ok(None);
+    }
+    let tokens = raw.parse::<u32>().map_err(|_| {
+        CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`--tokens` must be `dynamic` or an integer between 50 and 100000",
+            )
+            .with_suggestion("exa-agent context QUERY --tokens dynamic"),
+        )
+    })?;
+    if !(50..=100_000).contains(&tokens) {
+        return Err(CliError::Usage(
+            Diag::new("invalid_value", "`--tokens` must be between 50 and 100000")
+                .with_suggestion("exa-agent context QUERY --tokens dynamic"),
+        ));
+    }
+    Ok(Some(tokens))
 }
 
 fn build_typed_spec(
@@ -454,8 +587,8 @@ fn dispatch_typed_chunks_inner(
     Ok(exit_code)
 }
 
-fn execute_typed_live(
-    transport: &UreqTransport,
+fn execute_typed_live<T: Transport>(
+    transport: &T,
     spec: &request::RequestSpec,
     globals: &GlobalArgs,
     credential: &auth::ResolvedCredential,
@@ -485,10 +618,16 @@ fn execute_typed_live(
         return Ok(0);
     }
 
+    let command = spec.op.command();
+    let warnings = typed_command_warnings(spec.op);
+
+    if body_wants_stream(&spec.body) && transport::response_is_sse(&result.response) {
+        return emit_stream_typed_output(&result, &command, globals, pretty, &warnings);
+    }
+
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let command = spec.op.command();
     let exit_code = if command == "contents" {
         transport::contents_mixed_status_exit_code(&data)
     } else {
@@ -505,6 +644,7 @@ fn execute_typed_live(
         count,
         data_hash: hash,
         retries: result.retries,
+        warnings: &warnings,
     });
     if globals.ndjson {
         emit_ndjson(&envelope);
@@ -512,6 +652,122 @@ fn execute_typed_live(
         emit_stdout(&envelope, pretty);
     }
     Ok(exit_code)
+}
+
+fn emit_stream_typed_output(
+    result: &transport::RawExecuteResult,
+    command: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+    warnings: &[serde_json::Value],
+) -> Result<i32, CliError> {
+    let frames = parse_sse(&result.response.body);
+    let terminal_data = terminal_stream_data(&frames);
+    let count = transport::primary_count(&terminal_data);
+    let hash = transport::data_hash(&terminal_data);
+
+    if stream_output_mode(globals, stdout_is_tty()) == OutputMode::Ndjson {
+        for line in stream_ndjson_values(result, command, warnings, terminal_data, count, hash) {
+            emit_ndjson(&line);
+        }
+        return Ok(0);
+    }
+
+    let envelope = response_envelope(ResponseEnvelopeArgs {
+        command,
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data: terminal_data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+        warnings,
+    });
+    emit_stdout(&envelope, pretty);
+    Ok(0)
+}
+
+fn stream_ndjson_values(
+    result: &transport::RawExecuteResult,
+    command: &str,
+    warnings: &[serde_json::Value],
+    terminal_data: serde_json::Value,
+    count: Option<u64>,
+    hash: Option<String>,
+) -> Vec<serde_json::Value> {
+    let frames = parse_sse(&result.response.body);
+    let mut values = Vec::new();
+    let mut seq = 0u64;
+    for frame in &frames {
+        for chunk in &frame.data {
+            if chunk == "[DONE]" {
+                continue;
+            }
+            seq += 1;
+            let event = serde_json::from_str::<serde_json::Value>(chunk)
+                .unwrap_or_else(|_| serde_json::Value::String(chunk.clone()));
+            values.push(event_envelope(EventEnvelopeArgs {
+                event_type: infer_stream_event_type(&event),
+                command,
+                seq,
+                event_id: frame.id.as_deref(),
+                correlation_id: result.correlation_id.as_deref(),
+                event,
+            }));
+        }
+    }
+    values.push(response_envelope(ResponseEnvelopeArgs {
+        command,
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data: terminal_data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+        warnings,
+    }));
+    values
+}
+
+fn stream_output_mode(g: &GlobalArgs, stdout_is_tty: bool) -> OutputMode {
+    let env_output = std::env::var("EXA_OUTPUT").ok();
+    stream_output_mode_from_env(g, env_output.as_deref(), stdout_is_tty)
+}
+
+fn stream_output_mode_from_env(
+    g: &GlobalArgs,
+    env_output: Option<&str>,
+    stdout_is_tty: bool,
+) -> OutputMode {
+    if explicit_mode(g).is_none() && env_output.is_none() && !stdout_is_tty {
+        return OutputMode::Ndjson;
+    }
+    resolve_mode(explicit_mode(g), env_output, stdout_is_tty)
+}
+
+fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json::Value> {
+    if !op.deprecated {
+        return Vec::new();
+    }
+    let warning = if op.operation_id == "findSimilar" || op.command() == "similar" {
+        serde_json::json!({
+            "code": "deprecated_upstream",
+            "message": "POST /findSimilar is deprecated upstream; prefer exa-agent search with a query describing the source URL.",
+            "replacement": "exa-agent search \"pages similar to <url>\" --num-results N"
+        })
+    } else {
+        serde_json::json!({
+            "code": "deprecated_upstream",
+            "message": format!("{} is deprecated upstream.", op.command()),
+        })
+    };
+    vec![warning]
 }
 
 fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -997,6 +1253,7 @@ fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
     let mut body = spec.body.clone();
     redaction::redact_json_value(&mut body);
     let command = spec.op.command();
+    let warnings = typed_command_warnings(spec.op);
     let data = serde_json::json!({
         "request": {
             "method": spec.op.method.as_str(),
@@ -1018,6 +1275,7 @@ fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
         count,
         data_hash: hash,
         retries: 0,
+        warnings: &warnings,
     })
 }
 
@@ -1081,6 +1339,7 @@ fn dispatch_raw_inner(
                 count: None,
                 data_hash: hash,
                 retries: 0,
+                warnings: &[],
             }),
             pretty,
         );
@@ -1131,6 +1390,7 @@ fn dispatch_raw_inner(
         count,
         data_hash: hash,
         retries: result.retries,
+        warnings: &[],
     });
     emit_stdout(&envelope, pretty);
     Ok(0)
@@ -1218,4 +1478,177 @@ fn explicit_mode(g: &GlobalArgs) -> Option<OutputMode> {
         cli::Format::Json => OutputMode::Json,
         cli::Format::Ndjson => OutputMode::Ndjson,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{CredentialInput, NoopKeyring};
+    use crate::registry::{FieldDef, Method, Namespace, OperationDef, Pagination};
+    use crate::transport::{FakeTransport, HttpResponse, RawExecuteResult};
+
+    static GENERIC_DEPRECATED_OP: OperationDef = OperationDef {
+        cli_path: &["old"],
+        operation_id: "oldThing",
+        method: Method::Get,
+        api_path: "/old",
+        read_only: true,
+        streaming: false,
+        pagination: Pagination::None,
+        dangerous: false,
+        namespace: Namespace::Api,
+        idempotency_sensitive: false,
+        deprecated: true,
+        source: "test",
+        source_version: "0",
+        fields: &[] as &[FieldDef],
+    };
+
+    fn parse_globals(args: &[&str]) -> GlobalArgs {
+        let argv: Vec<_> = std::iter::once("exa-agent")
+            .chain(args.iter().copied())
+            .chain(std::iter::once("capabilities"))
+            .collect();
+        Cli::try_parse_from(argv).unwrap().globals
+    }
+
+    #[test]
+    fn stream_mode_honors_explicit_env_and_piped_default() {
+        let defaults = parse_globals(&[]);
+        assert_eq!(
+            stream_output_mode_from_env(&defaults, None, false),
+            OutputMode::Ndjson
+        );
+        assert_eq!(
+            stream_output_mode_from_env(&defaults, Some("ndjson"), true),
+            OutputMode::Ndjson
+        );
+
+        let explicit_json = parse_globals(&["--format", "json"]);
+        assert_eq!(
+            stream_output_mode_from_env(&explicit_json, Some("ndjson"), false),
+            OutputMode::Json
+        );
+
+        let explicit_ndjson = parse_globals(&["--format", "ndjson"]);
+        assert_eq!(
+            stream_output_mode_from_env(&explicit_ndjson, Some("json"), true),
+            OutputMode::Ndjson
+        );
+    }
+
+    #[test]
+    fn stream_ndjson_terminal_line_prefers_final_answer_object() {
+        let result = RawExecuteResult {
+            request_id: "req_test".into(),
+            method: "POST".into(),
+            path: "/answer".into(),
+            profile: "default".into(),
+            correlation_id: Some("corr-test".into()),
+            response: HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body: b"id: evt-1\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\nid: evt-2\ndata: {\"answer\":\"done\",\"citations\":[]}\n\ndata: [DONE]\n\n".to_vec(),
+            },
+            retries: 0,
+        };
+        let frames = parse_sse(&result.response.body);
+        let terminal_data = terminal_stream_data(&frames);
+        let lines = stream_ndjson_values(
+            &result,
+            "answer",
+            &[],
+            terminal_data.clone(),
+            transport::primary_count(&terminal_data),
+            transport::data_hash(&terminal_data),
+        );
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["schema"], "exa.cli.event.v1");
+        assert_eq!(
+            lines[0]["event"]["choices"][0]["delta"]["content"],
+            "partial"
+        );
+        assert_eq!(lines[2]["schema"], "exa.cli.response.v1");
+        assert_eq!(
+            lines[2]["data"],
+            serde_json::json!({"answer":"done","citations":[]})
+        );
+    }
+
+    #[test]
+    fn execute_typed_live_accepts_fake_transport_for_streams() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, "data: {\"answer\":\"done\",\"citations\":[]}\n\n");
+        let globals = parse_globals(&["--format", "json", "--api-key", "test-key-abcdef12"]);
+        let spec = build_answer_spec(
+            &AnswerArgs {
+                question: "What is Exa?".into(),
+                text: false,
+                stream: true,
+                output_schema: None,
+            },
+            &globals,
+        )
+        .unwrap();
+        let credential = auth::resolve_api_credential(
+            &CredentialInput {
+                explicit: Some("test-key-abcdef12".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+
+        assert_eq!(
+            execute_typed_live(&fake, &spec, &globals, &credential, "req_test", false).unwrap(),
+            0
+        );
+        assert!(fake.recorded_requests()[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("accept") && v == "text/event-stream"));
+    }
+
+    #[test]
+    fn context_query_limit_counts_chars_not_bytes() {
+        let globals = parse_globals(&[]);
+        let two_thousand_multibyte = "é".repeat(2_000);
+        let spec = build_context_spec(
+            &ContextArgs {
+                query: two_thousand_multibyte.clone(),
+                tokens: None,
+            },
+            &globals,
+        )
+        .unwrap();
+        assert_eq!(spec.body["query"], two_thousand_multibyte);
+
+        let err = build_context_spec(
+            &ContextArgs {
+                query: "é".repeat(2_001),
+                tokens: None,
+            },
+            &globals,
+        )
+        .unwrap_err();
+        assert_eq!(err.diag().code, "invalid_value");
+    }
+
+    #[test]
+    fn deprecated_warning_is_specific_only_for_similar() {
+        let similar = registry::lookup_by_segments(&["similar"]).unwrap();
+        let specific = typed_command_warnings(similar);
+        assert!(specific[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/findSimilar"));
+
+        let generic = typed_command_warnings(&GENERIC_DEPRECATED_OP);
+        assert_eq!(generic[0]["code"], "deprecated_upstream");
+        assert!(!generic[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/findSimilar"));
+    }
 }

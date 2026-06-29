@@ -369,6 +369,10 @@ pub struct SimilarArgs {
     pub url: String,
     #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub num_results: Option<u32>,
+    #[arg(long)]
+    pub exclude_source_domain: bool,
+    #[arg(long, value_enum, ignore_case = true)]
+    pub category: Option<SearchCategory>,
 }
 
 #[derive(Args, Debug)]
@@ -378,6 +382,8 @@ pub struct AnswerArgs {
     pub text: bool,
     #[arg(long)]
     pub stream: bool,
+    #[arg(long)]
+    pub output_schema: Option<String>,
 }
 
 #[derive(Args, Debug)]

@@ -250,6 +250,84 @@ fn get_is_retried_on_upstream_503() {
     assert_eq!(retries, 1);
 }
 
+#[test]
+fn streaming_ndjson_shape_from_canned_sse() {
+    use exa_agent_cli::output::envelope::{
+        event_envelope, response_envelope, EventEnvelopeArgs, ResponseEnvelopeArgs,
+    };
+    use exa_agent_cli::transport::{
+        data_hash, infer_stream_event_type, parse_sse, primary_count, terminal_stream_data,
+    };
+
+    let sse = b"id: evt-1\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\nid: evt-2\ndata: {\"answer\":\"done\",\"citations\":[]}\n\ndata: [DONE]\n\n";
+    let frames = parse_sse(sse);
+    let mut lines = Vec::new();
+    let mut seq = 0u64;
+    for frame in &frames {
+        for chunk in &frame.data {
+            if chunk == "[DONE]" {
+                continue;
+            }
+            seq += 1;
+            let event: serde_json::Value = serde_json::from_str(chunk).unwrap();
+            lines.push(
+                serde_json::to_string(&event_envelope(EventEnvelopeArgs {
+                    event_type: infer_stream_event_type(&event),
+                    command: "answer",
+                    seq,
+                    event_id: frame.id.as_deref(),
+                    correlation_id: Some("corr-test"),
+                    event,
+                }))
+                .unwrap(),
+            );
+        }
+    }
+    let accumulated = terminal_stream_data(&frames);
+    lines.push(
+        serde_json::to_string(&response_envelope(ResponseEnvelopeArgs {
+            command: "answer",
+            method: "POST",
+            path: "/answer",
+            request_id: "req_test",
+            profile: "default",
+            correlation_id: Some("corr-test"),
+            data: accumulated.clone(),
+            count: primary_count(&accumulated),
+            data_hash: data_hash(&accumulated),
+            retries: 0,
+            warnings: &[],
+        }))
+        .unwrap(),
+    );
+
+    assert_eq!(lines.len(), 3);
+    let first: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(first["schema"], "exa.cli.event.v1");
+    assert_eq!(first["type"], "delta");
+    assert_eq!(first["seq"], 1);
+    assert_eq!(first["eventId"], "evt-1");
+    let last: serde_json::Value = serde_json::from_str(&lines[2]).unwrap();
+    assert_eq!(last["schema"], "exa.cli.response.v1");
+    assert_eq!(
+        last["data"],
+        serde_json::json!({"answer":"done","citations":[]})
+    );
+}
+
+#[test]
+fn terminal_stream_data_concatenates_openai_delta_chunks() {
+    use exa_agent_cli::transport::{parse_sse, terminal_stream_data};
+
+    let frames = parse_sse(
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n",
+    );
+    assert_eq!(
+        terminal_stream_data(&frames),
+        serde_json::json!({"answer":"hello"})
+    );
+}
+
 fn parse_globals(args: &[&str]) -> GlobalArgs {
     let argv: Vec<String> = std::iter::once("exa-agent")
         .chain(args.iter().copied())

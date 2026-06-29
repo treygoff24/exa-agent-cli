@@ -369,6 +369,70 @@ fn phase_gate(n: Option<&str>) -> Result<()> {
             ],
             "exa.cli.response.v1",
         )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "answer",
+                "What is Exa?",
+                "--text",
+                "--stream",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "context",
+                "rust async patterns",
+                "--tokens",
+                "1000",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "similar",
+                "https://exa.ai",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run(
+            "cargo",
+            &[
+                "test",
+                "--quiet",
+                "--test",
+                "transport",
+                "streaming_ndjson_shape_from_canned_sse",
+                "--",
+                "--exact",
+            ],
+        )?;
     }
     println!("phase-gate {n}: OK");
     Ok(())

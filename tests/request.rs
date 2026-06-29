@@ -9,6 +9,33 @@ fn search_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["search"]).expect("search op")
 }
 
+fn contents_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["contents"]).expect("contents op")
+}
+
+#[test]
+fn search_core_fields_map_and_overrides_keep_precedence() {
+    let spec = request::build_request(
+        search_op(),
+        &[
+            ("query", Some("typed query".into())),
+            ("num-results", Some("5".into())),
+            ("type", Some("fast".into())),
+            ("category", Some("news".into())),
+        ],
+        RequestOverrides {
+            body: Some(BodySource::Inline(r#"{"numResults":10,"type":"deep"}"#)),
+            sets: &["category=research paper".into()],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(spec.body["query"], "typed query");
+    assert_eq!(spec.body["numResults"], 10);
+    assert_eq!(spec.body["type"], "deep");
+    assert_eq!(spec.body["category"], "research paper");
+}
+
 #[test]
 fn body_deep_merges_over_named_flags() {
     let spec = request::build_request(
@@ -16,6 +43,7 @@ fn body_deep_merges_over_named_flags() {
         &[
             ("query", Some("hello".into())),
             ("num-results", Some("5".into())),
+            ("type", Some("fast".into())),
             ("category", Some("news".into())),
         ],
         RequestOverrides {
@@ -29,8 +57,65 @@ fn body_deep_merges_over_named_flags() {
 
     assert_eq!(spec.body["query"], "hello");
     assert_eq!(spec.body["numResults"], 10);
+    assert_eq!(spec.body["type"], "fast");
     assert_eq!(spec.body["category"], "news");
     assert_eq!(spec.body["contents"]["text"], true);
+}
+
+#[test]
+fn contents_urls_build_body_from_registry_metadata() {
+    let urls = vec![
+        "https://exa.ai/docs".to_string(),
+        "https://docs.exa.ai/reference/search".to_string(),
+    ];
+    let spec = request::build_body(
+        contents_op(),
+        &[("urls", Some(request::encode_str_array(&urls)))],
+    )
+    .unwrap();
+
+    assert_eq!(
+        spec.body,
+        json!({
+            "urls": [
+                "https://exa.ai/docs",
+                "https://docs.exa.ai/reference/search"
+            ]
+        })
+    );
+}
+
+#[test]
+fn contents_ids_build_body_from_registry_metadata() {
+    let ids = vec!["doc_1".to_string(), "doc_2".to_string()];
+    let spec = request::build_body(
+        contents_op(),
+        &[("ids", Some(request::encode_str_array(&ids)))],
+    )
+    .unwrap();
+
+    assert_eq!(spec.body, json!({ "ids": ["doc_1", "doc_2"] }));
+}
+
+#[test]
+fn contents_chunk_size_is_local_only_not_request_body() {
+    assert!(contents_op()
+        .fields
+        .iter()
+        .all(|field| field.flag != "chunk-size" && field.body_path != "chunkSize"));
+
+    let urls = vec!["https://exa.ai/docs".to_string()];
+    let spec = request::build_body(
+        contents_op(),
+        &[
+            ("urls", Some(request::encode_str_array(&urls))),
+            ("chunk-size", Some("25".into())),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(spec.body, json!({ "urls": ["https://exa.ai/docs"] }));
+    assert!(spec.body.get("chunkSize").is_none());
 }
 
 #[test]

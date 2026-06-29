@@ -18,16 +18,18 @@ use clap::Parser;
 use std::io::{self, IsTerminal, Read};
 
 use cli::{
-    command_path, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, GlobalArgs, RobotDocsCmd,
-    SchemaCmd,
+    command_path, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, GlobalArgs,
+    RobotDocsCmd, SchemaCmd, SearchArgs,
 };
 use error::{CliError, Diag};
 use output::envelope::{
     capabilities, error_codes_json, response_envelope, ErrorEnvelope, ResponseEnvelopeArgs,
 };
-use output::{emit_raw, emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
+use output::{emit_ndjson, emit_raw, emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
 use request::RequestOverrides;
 use transport::{execute_raw_with_request_id, parse_user_headers, RawExecuteParams, UreqTransport};
+
+const MAX_CONTENTS_BATCH_SIZE: usize = 100;
 
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
@@ -109,43 +111,407 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         }
         Command::Auth { sub } => dispatch_auth(sub, &cli.globals, pretty),
         Command::Config { sub } => dispatch_config(sub, pretty),
-        Command::Search(args) => {
-            let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
-            let flag_values = [
-                ("query", Some(args.query.clone())),
-                ("num-results", args.num_results.map(|n| n.to_string())),
-                ("type", args.r#type.map(|t| t.as_str().to_string())),
-                ("category", args.category.map(|c| c.as_str().to_string())),
-            ];
-            let spec = request::build_request(
-                op,
-                &flag_values,
-                RequestOverrides {
-                    body: cli
-                        .globals
-                        .body
-                        .as_deref()
-                        .map(request::parse_body_source)
-                        .transpose()?,
-                    sets: &cli.globals.set,
-                },
-            )?;
-            if cli.globals.print_request || cli.globals.dry_run {
-                emit_stdout(&redacted_preview(&spec), pretty);
-                Ok(0)
-            } else {
-                Err(not_implemented(
-                    "search",
-                    "transport lands in the next milestone",
-                ))
-            }
-        }
+        Command::Search(args) => dispatch_search(args, &cli.globals, pretty),
+        Command::Contents(args) => dispatch_contents(args, &cli.globals, pretty),
         Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
         _ => Err(not_implemented(
             &command_path(&cli.command),
             "parser skeleton only in this wave",
         )),
     }
+}
+
+fn dispatch_search(args: &SearchArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_search_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_search_spec(
+    args: &SearchArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
+    let flag_values = [
+        ("query", Some(args.query.clone())),
+        ("num-results", args.num_results.map(|n| n.to_string())),
+        ("type", args.r#type.map(|t| t.as_str().to_string())),
+        ("category", args.category.map(|c| c.as_str().to_string())),
+    ];
+    build_typed_spec(op, &flag_values, globals)
+}
+
+fn dispatch_contents(
+    args: &ContentsArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_contents_spec(args, globals)?;
+        let specs = chunk_contents_specs(spec, args.chunk_size)?;
+        if specs.len() == 1 && args.chunk_size.is_none() {
+            let spec = specs.into_iter().next().expect("one contents spec");
+            dispatch_typed_command(spec, globals, pretty)
+        } else {
+            dispatch_typed_chunks(specs, globals, pretty)
+        }
+    })
+}
+
+fn build_contents_spec(
+    args: &ContentsArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
+    let flag_values = [
+        (
+            "urls",
+            (!args.urls.is_empty()).then(|| request::encode_str_array(&args.urls)),
+        ),
+        (
+            "ids",
+            (!args.ids.is_empty()).then(|| request::encode_str_array(&args.ids)),
+        ),
+    ];
+    build_typed_spec(op, &flag_values, globals)
+}
+
+fn build_typed_spec(
+    op: &'static registry::OperationDef,
+    flag_values: &[(&str, Option<String>)],
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    request::build_request(
+        op,
+        flag_values,
+        RequestOverrides {
+            body: globals
+                .body
+                .as_deref()
+                .map(request::parse_body_source)
+                .transpose()?,
+            sets: &globals.set,
+        },
+    )
+}
+
+fn with_typed_error_context<F>(
+    op: &'static registry::OperationDef,
+    globals: &GlobalArgs,
+    f: F,
+) -> Result<i32, CliError>
+where
+    F: FnOnce() -> Result<i32, CliError>,
+{
+    match f() {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            let code = err.category() as i32;
+            let request_id = if globals.print_request || globals.dry_run {
+                "req_dry_run".to_string()
+            } else {
+                transport::new_request_id()
+            };
+            let env = ErrorEnvelope::from_error(&err).with_context(
+                op.method.as_str(),
+                op.api_path,
+                request_id,
+                globals.correlation_id.clone(),
+            );
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+            );
+            Ok(code)
+        }
+    }
+}
+
+fn chunk_contents_specs(
+    spec: request::RequestSpec,
+    chunk_size: Option<u32>,
+) -> Result<Vec<request::RequestSpec>, CliError> {
+    let (field, values) = contents_inputs_from_body(&spec.body)?;
+    if values.len() > MAX_CONTENTS_BATCH_SIZE && chunk_size.is_none() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                format!(
+                    "contents accepts at most {MAX_CONTENTS_BATCH_SIZE} urls/ids per request; pass --chunk-size {MAX_CONTENTS_BATCH_SIZE} to split larger batches"
+                ),
+            )
+            .with_suggestion(format!(
+                "exa-agent contents <inputs> --chunk-size {MAX_CONTENTS_BATCH_SIZE}"
+            )),
+        ));
+    }
+
+    let size = chunk_size.map(|n| n as usize).unwrap_or(values.len());
+    if size == 0 || size > MAX_CONTENTS_BATCH_SIZE {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                format!("--chunk-size must be between 1 and {MAX_CONTENTS_BATCH_SIZE}"),
+            )
+            .with_suggestion(format!("--chunk-size {MAX_CONTENTS_BATCH_SIZE}")),
+        ));
+    }
+
+    let mut specs = Vec::new();
+    for chunk in values.chunks(size) {
+        let mut body = spec.body.clone();
+        body[field] = serde_json::Value::Array(
+            chunk
+                .iter()
+                .map(|value| serde_json::Value::String(value.clone()))
+                .collect(),
+        );
+        specs.push(request::RequestSpec { op: spec.op, body });
+    }
+    Ok(specs)
+}
+
+fn contents_inputs_from_body(
+    body: &serde_json::Value,
+) -> Result<(&'static str, Vec<String>), CliError> {
+    let urls = string_array_field(body, "urls")?;
+    let ids = string_array_field(body, "ids")?;
+    match (urls, ids) {
+        (Some(urls), None) if !urls.is_empty() => Ok(("urls", urls)),
+        (None, Some(ids)) if !ids.is_empty() => Ok(("ids", ids)),
+        (Some(urls), Some(ids)) if urls.is_empty() && !ids.is_empty() => Ok(("ids", ids)),
+        (Some(urls), Some(ids)) if !urls.is_empty() && ids.is_empty() => Ok(("urls", urls)),
+        (Some(_), Some(_)) => Err(CliError::Usage(Diag::new(
+            "invalid_flag_combination",
+            "contents request body must contain urls or ids, not both",
+        ))),
+        _ => Err(CliError::NoInput(Diag::new(
+            "missing_required_argument",
+            "contents requires at least one URL or --ids value",
+        ))),
+    }
+}
+
+fn string_array_field(
+    body: &serde_json::Value,
+    key: &'static str,
+) -> Result<Option<Vec<String>>, CliError> {
+    let Some(value) = body.get(key) else {
+        return Ok(None);
+    };
+    let Some(items) = value.as_array() else {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("contents request body field `{key}` must be an array of strings"),
+        )));
+    };
+    let mut strings = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(s) = item.as_str() else {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("contents request body field `{key}` must be an array of strings"),
+            )));
+        };
+        strings.push(s.to_string());
+    }
+    Ok(Some(strings))
+}
+
+/// Registry-backed typed command path: dry-run preview or live transport + response envelope.
+fn dispatch_typed_command(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = spec.op;
+    let method = op.method.as_str();
+    let path = op.api_path;
+    let request_id = if globals.print_request || globals.dry_run {
+        "req_dry_run".to_string()
+    } else {
+        transport::new_request_id()
+    };
+    match dispatch_typed_inner(&spec, globals, pretty, &request_id) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            let code = err.category() as i32;
+            let env = ErrorEnvelope::from_error(&err).with_context(
+                method,
+                path,
+                request_id,
+                globals.correlation_id.clone(),
+            );
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+            );
+            Ok(code)
+        }
+    }
+}
+
+fn dispatch_typed_inner(
+    spec: &request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    request_id: &str,
+) -> Result<i32, CliError> {
+    parse_user_headers(&globals.headers)?;
+    if globals.print_request || globals.dry_run {
+        emit_stdout(&redacted_preview(spec), pretty);
+        return Ok(0);
+    }
+
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg);
+    let transport = UreqTransport::new(timeout);
+    execute_typed_live(&transport, spec, globals, &credential, request_id, pretty)
+}
+
+fn dispatch_typed_chunks(
+    specs: Vec<request::RequestSpec>,
+    globals: &GlobalArgs,
+    _pretty: bool,
+) -> Result<i32, CliError> {
+    let op = specs
+        .first()
+        .map(|spec| spec.op)
+        .expect("contents chunking creates at least one spec");
+    let batch_request_id = if globals.print_request || globals.dry_run {
+        "req_dry_run".to_string()
+    } else {
+        transport::new_request_id()
+    };
+    match dispatch_typed_chunks_inner(specs, globals) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            let code = err.category() as i32;
+            let env = ErrorEnvelope::from_error(&err).with_context(
+                op.method.as_str(),
+                op.api_path,
+                batch_request_id,
+                globals.correlation_id.clone(),
+            );
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+            );
+            Ok(code)
+        }
+    }
+}
+
+fn dispatch_typed_chunks_inner(
+    specs: Vec<request::RequestSpec>,
+    globals: &GlobalArgs,
+) -> Result<i32, CliError> {
+    parse_user_headers(&globals.headers)?;
+    if globals.raw && specs.len() > 1 {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_flag_combination",
+            "contents --chunk-size cannot be combined with --raw when it creates multiple upstream requests",
+        )));
+    }
+    if globals.print_request || globals.dry_run {
+        for spec in &specs {
+            emit_ndjson(&redacted_preview(spec));
+        }
+        return Ok(0);
+    }
+
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg);
+    let transport = UreqTransport::new(timeout);
+    let mut exit_code = 0;
+    for spec in &specs {
+        let request_id = transport::new_request_id();
+        match execute_typed_live(&transport, spec, globals, &credential, &request_id, false) {
+            Ok(10) => exit_code = 10,
+            Ok(_) => {}
+            Err(err) => {
+                let code = err.category() as i32;
+                let env = ErrorEnvelope::from_error(&err).with_context(
+                    spec.op.method.as_str(),
+                    spec.op.api_path,
+                    request_id,
+                    globals.correlation_id.clone(),
+                );
+                emit_ndjson(&env.to_json());
+                return Ok(code);
+            }
+        }
+    }
+    Ok(exit_code)
+}
+
+fn execute_typed_live(
+    transport: &UreqTransport,
+    spec: &request::RequestSpec,
+    globals: &GlobalArgs,
+    credential: &auth::ResolvedCredential,
+    request_id: &str,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let result = execute_raw_with_request_id(
+        transport,
+        RawExecuteParams {
+            method: spec.op.method.as_str(),
+            path: spec.op.api_path,
+            query_raw: &[],
+            body: spec.body.clone(),
+            globals,
+            credential,
+            request_id: request_id.to_string(),
+        },
+    )?;
+
+    if globals.raw {
+        emit_raw(&result.response.body).map_err(|err| {
+            CliError::Interrupted(Diag::new(
+                "interrupted",
+                format!("failed to write raw stdout: {err}"),
+            ))
+        })?;
+        return Ok(0);
+    }
+
+    let data = transport::parse_response_data(&result.response.body);
+    let count = transport::primary_count(&data);
+    let hash = transport::data_hash(&data);
+    let command = spec.op.command();
+    let exit_code = if command == "contents" {
+        transport::contents_mixed_status_exit_code(&data)
+    } else {
+        0
+    };
+    let envelope = response_envelope(ResponseEnvelopeArgs {
+        command: &command,
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+    });
+    if globals.ndjson {
+        emit_ndjson(&envelope);
+    } else {
+        emit_stdout(&envelope, pretty);
+    }
+    Ok(exit_code)
 }
 
 fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {

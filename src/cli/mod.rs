@@ -360,7 +360,7 @@ pub struct ContentsArgs {
     pub urls: Vec<String>,
     #[arg(long, conflicts_with = "urls", num_args = 1..)]
     pub ids: Vec<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub chunk_size: Option<u32>,
 }
 

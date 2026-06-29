@@ -140,6 +140,9 @@ fn looks_like_secret_value(token: &str) -> bool {
     if t.is_empty() {
         return false;
     }
+    if t == "exa-agent" {
+        return false;
+    }
     t.starts_with("exa-")
         || t.starts_with("sk-exa")
         || t.starts_with("sk_exa")

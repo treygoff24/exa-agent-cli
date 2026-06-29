@@ -32,6 +32,13 @@ fn run(args: &[&str]) -> Output {
     run_with_env(args, &[])
 }
 
+fn run_owned(args: &[String]) -> Output {
+    let mut cmd = command(&[]);
+    cmd.args(args);
+    cmd.output()
+        .unwrap_or_else(|e| panic!("failed to run exa-agent {args:?}: {e}"))
+}
+
 fn command(args: &[&str]) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_exa-agent"));
     cmd.args(args)
@@ -763,6 +770,53 @@ fn raw_body_stdin_empty_returns_no_input() {
 }
 
 #[test]
+fn search_live_without_credential_is_not_authenticated() {
+    let dir = temp_path("search-no-credential");
+    let missing_credentials = dir.join("missing-credentials.json");
+    let output = run_with_env(
+        &["search", "agents", "--compact"],
+        &[(
+            "EXA_AGENT_CREDENTIALS",
+            missing_credentials.to_str().unwrap(),
+        )],
+    );
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "not_authenticated");
+    assert_eq!(stderr["operation"]["method"], "POST");
+    assert_eq!(stderr["operation"]["path"], "/search");
+}
+
+#[test]
+fn chunked_contents_live_without_credential_keeps_operation_context() {
+    let dir = temp_path("contents-chunked-no-credential");
+    let missing_credentials = dir.join("missing-credentials.json");
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://a.test",
+            "https://b.test",
+            "--chunk-size",
+            "1",
+            "--compact",
+        ],
+        &[(
+            "EXA_AGENT_CREDENTIALS",
+            missing_credentials.to_str().unwrap(),
+        )],
+    );
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "not_authenticated");
+    assert_eq!(stderr["operation"]["method"], "POST");
+    assert_eq!(stderr["operation"]["path"], "/contents");
+}
+
+#[test]
 fn set_overflow_path_returns_structured_error_not_panic() {
     let output = run(&[
         "search",
@@ -786,8 +840,102 @@ fn set_overflow_path_returns_structured_error_not_panic() {
 }
 
 #[test]
+fn contents_dry_run_builds_urls_and_ids_bodies() {
+    let urls = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "https://docs.exa.ai",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(urls["schema"], "exa.cli.response.v1");
+    assert_eq!(urls["command"], "contents");
+    assert_eq!(urls["data"]["request"]["method"], "POST");
+    assert_eq!(urls["data"]["request"]["path"], "/contents");
+    assert_eq!(
+        urls["data"]["request"]["body"]["urls"],
+        serde_json::json!(["https://exa.ai", "https://docs.exa.ai"])
+    );
+
+    let ids = run_ok_json(&[
+        "contents",
+        "--ids",
+        "id-one",
+        "id-two",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(ids["command"], "contents");
+    assert_eq!(
+        ids["data"]["request"]["body"]["ids"],
+        serde_json::json!(["id-one", "id-two"])
+    );
+}
+
+#[test]
+fn contents_chunk_size_dry_run_emits_one_envelope_per_chunk() {
+    let output = run(&[
+        "contents",
+        "https://a.test",
+        "https://b.test",
+        "--chunk-size",
+        "1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "stdout:\n{stdout}");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(
+        first["data"]["request"]["body"]["urls"],
+        serde_json::json!(["https://a.test"])
+    );
+    assert_eq!(
+        second["data"]["request"]["body"]["urls"],
+        serde_json::json!(["https://b.test"])
+    );
+}
+
+#[test]
+fn contents_rejects_more_than_one_hundred_inputs_without_chunk_size() {
+    let mut args = vec!["contents".to_string()];
+    for n in 0..101 {
+        args.push(format!("https://example.test/{n}"));
+    }
+    args.push("--dry-run".to_string());
+    args.push("--compact".to_string());
+
+    let output = run_owned(&args);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert_eq!(stderr["operation"]["method"], "POST");
+    assert_eq!(stderr["operation"]["path"], "/contents");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--chunk-size 100"));
+}
+
+#[test]
 fn recognized_unimplemented_commands_return_structured_error() {
-    let output = run(&["contents", "https://exa.ai", "--compact"]);
+    let output = run(&["answer", "What is Exa?", "--compact"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
@@ -797,7 +945,7 @@ fn recognized_unimplemented_commands_return_structured_error() {
     assert!(stderr["error"]["message"]
         .as_str()
         .unwrap_or_default()
-        .contains("contents"));
+        .contains("answer"));
 }
 
 #[test]
@@ -834,6 +982,61 @@ fn parse_contents_answer_context_similar() {
     assert_path(&["answer", "What is Exa?"], "answer");
     assert_path(&["context", "rust async patterns"], "context");
     assert_path(&["similar", "https://exa.ai"], "similar");
+}
+
+#[test]
+fn parse_contents_requires_exactly_one_input_kind() {
+    assert_eq!(
+        parse_err(&["contents"]).kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+    assert_eq!(
+        parse_err(&["contents", "https://exa.ai", "--ids", "id1"]).kind(),
+        clap::error::ErrorKind::ArgumentConflict
+    );
+}
+
+#[test]
+fn parse_contents_accepts_urls_only_and_ids_only() {
+    let cli = parses(&[
+        "contents",
+        "https://exa.ai/docs",
+        "https://docs.exa.ai/reference/search",
+        "--chunk-size",
+        "100",
+    ]);
+    let Command::Contents(args) = cli.command else {
+        panic!("expected contents command");
+    };
+    assert_eq!(
+        args.urls,
+        vec![
+            "https://exa.ai/docs".to_string(),
+            "https://docs.exa.ai/reference/search".to_string()
+        ]
+    );
+    assert!(args.ids.is_empty());
+    assert_eq!(args.chunk_size, Some(100));
+
+    let cli = parses(&["contents", "--ids", "doc_1", "doc_2"]);
+    let Command::Contents(args) = cli.command else {
+        panic!("expected contents command");
+    };
+    assert!(args.urls.is_empty());
+    assert_eq!(args.ids, vec!["doc_1".to_string(), "doc_2".to_string()]);
+    assert_eq!(args.chunk_size, None);
+}
+
+#[test]
+fn parse_contents_rejects_zero_chunk_size() {
+    assert_eq!(
+        parse_err(&["contents", "https://exa.ai", "--chunk-size", "0"]).kind(),
+        clap::error::ErrorKind::ValueValidation
+    );
+    assert_eq!(
+        parse_err(&["contents", "https://exa.ai", "--chunk-size", "101"]).kind(),
+        clap::error::ErrorKind::ValueValidation
+    );
 }
 
 #[test]

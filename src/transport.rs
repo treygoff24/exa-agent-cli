@@ -541,12 +541,34 @@ pub fn primary_count(data: &Value) -> Option<u64> {
     if let Some(items) = data.as_array() {
         return Some(items.len() as u64);
     }
-    for key in ["results", "items", "data", "runs", "websets"] {
+    for key in ["results", "items", "data", "runs", "websets", "statuses"] {
         if let Some(items) = data.get(key).and_then(Value::as_array) {
             return Some(items.len() as u64);
         }
     }
     None
+}
+
+/// `/contents` may return HTTP 200 with per-item failures in `statuses[]` (contracts §11).
+/// Mixed success/error batches exit 10 after the success envelope is emitted.
+pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
+    let Some(statuses) = data.get("statuses").and_then(Value::as_array) else {
+        return 0;
+    };
+    let mut saw_success = false;
+    let mut saw_error = false;
+    for entry in statuses {
+        match entry.get("status").and_then(Value::as_str) {
+            Some("success") => saw_success = true,
+            Some("error") => saw_error = true,
+            _ => {}
+        }
+    }
+    if saw_success && saw_error {
+        10
+    } else {
+        0
+    }
 }
 
 /// Execute a live `raw` command through the supplied transport.
@@ -765,5 +787,66 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(retries, 1);
         assert_eq!(fake.recorded_requests().len(), 2);
+    }
+
+    #[test]
+    fn execute_contents_posts_urls_body() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(
+            200,
+            r#"{"results":[],"statuses":[{"id":"https://example.test","status":"success"}]}"#,
+        );
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            "test-key-12345678",
+            "raw",
+            "POST",
+            "/contents",
+        ])
+        .unwrap();
+        let cred = auth::resolve_api_credential(
+            &auth::CredentialInput {
+                explicit: Some("test-key-12345678".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        let result = execute_raw(
+            &fake,
+            "POST",
+            "/contents",
+            &[],
+            serde_json::json!({"urls": ["https://example.test"]}),
+            &cli.globals,
+            &cred,
+        )
+        .unwrap();
+        assert_eq!(result.response.status, 200);
+        let recorded = &fake.recorded_requests()[0];
+        assert!(recorded.url.ends_with("/contents"));
+        assert_eq!(recorded.method, "POST");
+    }
+
+    #[test]
+    fn contents_mixed_statuses_exit_partial() {
+        let mixed = serde_json::json!({
+            "statuses": [
+                { "id": "https://a.test", "status": "success" },
+                { "id": "https://b.test", "status": "error" }
+            ]
+        });
+        assert_eq!(contents_mixed_status_exit_code(&mixed), 10);
+
+        let all_ok = serde_json::json!({
+            "statuses": [{ "id": "https://a.test", "status": "success" }]
+        });
+        assert_eq!(contents_mixed_status_exit_code(&all_ok), 0);
+
+        let all_err = serde_json::json!({
+            "statuses": [{ "id": "https://a.test", "status": "error" }]
+        });
+        assert_eq!(contents_mixed_status_exit_code(&all_err), 0);
     }
 }

@@ -353,3 +353,13 @@ kind = "str"
 flag = "category"
 body_path = "category"
 kind = "str"
+
+[[operations."getContents".fields]]
+flag = "urls"
+body_path = "urls"
+kind = "str_array"
+
+[[operations."getContents".fields]]
+flag = "ids"
+body_path = "ids"
+kind = "str_array"

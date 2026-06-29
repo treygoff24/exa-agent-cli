@@ -51,6 +51,11 @@ pub fn emit_stdout(value: &serde_json::Value, pretty: bool) {
     println!("{s}");
 }
 
+/// Emit one compact JSON value as an NDJSON line.
+pub fn emit_ndjson(value: &serde_json::Value) {
+    println!("{}", serde_json::to_string(value).unwrap_or_default());
+}
+
 /// Emit exact upstream response bytes (`--raw`, contracts §2).
 pub fn emit_raw(body: &[u8]) -> std::io::Result<()> {
     let mut out = std::io::stdout().lock();

@@ -227,7 +227,7 @@ fn ci() -> Result<()> {
 fn phase_gate(n: Option<&str>) -> Result<()> {
     let n = n.unwrap_or("1");
     run("cargo", &["test", "--workspace", "--locked"])?;
-    if n == "1" {
+    if matches!(n, "1" | "2") {
         run_json(
             "cargo",
             &[
@@ -328,6 +328,41 @@ fn phase_gate(n: Option<&str>) -> Result<()> {
                 "--",
                 "search",
                 "agents",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+    }
+    if n == "2" {
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "contents",
+                "https://example.com",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "contents",
+                "--ids",
+                "doc-id-1",
                 "--dry-run",
                 "--print-request",
                 "--compact",

@@ -82,6 +82,16 @@ pub fn build_body(
     build_request(op, flag_values, RequestOverrides::default())
 }
 
+/// Encode repeated typed parser values for a `FieldKind::StrArray` registry field.
+///
+/// `build_request` intentionally accepts stringly flag values because it is shared
+/// with generic overlay metadata. Encoding arrays as JSON avoids comma-splitting
+/// URLs or ids that happen to contain commas, while remaining local to request
+/// construction and not changing any CLI surface.
+pub fn encode_str_array(values: &[String]) -> String {
+    serde_json::to_string(values).expect("Vec<String> always serializes")
+}
+
 fn build_flag_body(
     op: &'static OperationDef,
     flag_values: &[(&str, Option<String>)],
@@ -324,13 +334,29 @@ fn coerce(kind: FieldKind, s: &str) -> Result<Value, CliError> {
             s.to_ascii_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
         )),
-        FieldKind::StrArray => Value::Array(
-            s.split(',')
-                .map(|x| Value::String(x.trim().to_string()))
-                .collect(),
-        ),
+        FieldKind::StrArray => coerce_str_array(s)?,
         FieldKind::Json => serde_json::from_str(s).map_err(|_| bad("JSON"))?,
     })
+}
+
+fn coerce_str_array(s: &str) -> Result<Value, CliError> {
+    if s.trim_start().starts_with('[') {
+        let parsed: Vec<String> = serde_json::from_str(s).map_err(|_| {
+            CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("`{s}` is not a valid string array"),
+            ))
+        })?;
+        return Ok(Value::Array(
+            parsed.into_iter().map(Value::String).collect(),
+        ));
+    }
+
+    Ok(Value::Array(
+        s.split(',')
+            .map(|x| Value::String(x.trim().to_string()))
+            .collect(),
+    ))
 }
 
 fn usage(code: &str, message: impl Into<String>) -> CliError {

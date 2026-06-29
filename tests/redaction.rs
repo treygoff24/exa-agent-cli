@@ -90,6 +90,10 @@ fn scrubs_secret_shaped_values_in_text_and_json_values() {
     let uuid_secret = "11111111-2222-3333-4444-555555555555";
     assert_eq!(scrub_text(uuid_secret), "<redacted>");
     assert_eq!(
+        scrub_text("exa-agent contents <inputs> --chunk-size 100"),
+        "exa-agent contents <inputs> --chunk-size 100"
+    );
+    assert_eq!(
         scrub_text("bad https://exa-secret-url-1234/path"),
         "bad https://<redacted>/path"
     );

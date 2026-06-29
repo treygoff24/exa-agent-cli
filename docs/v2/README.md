@@ -14,6 +14,7 @@ v1 was a language-agnostic research/design pass. v2 commits to **Rust, a single 
 3. **[commands.md](commands.md)** — the full command tree (~20 namespaces, ~100 leaf commands), consolidated flag taxonomy, per-command reference, deprecations, macros.
 4. **[architecture.md](architecture.md)** — the Rust build-shape: crate layout, dependencies, build-time registry codegen, request builder, transport chokepoint, clap surface, output module, auth/config, doctor, error model.
 5. **[implementation-plan.md](implementation-plan.md)** — phased build (raw-first), testing strategy (insta goldens + live smoke + spec-drift conformance), CI, release/distribution, crate bring-up checklist.
+6. **[autonomous-implementation-plan.md](autonomous-implementation-plan.md)** — execution overlay for a long `/goal` run using native implementation subagents, Delegate Cursor work lanes, and required native + GLM review gates.
 
 ## The locked decisions at a glance
 

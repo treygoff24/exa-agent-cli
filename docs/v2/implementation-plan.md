@@ -21,6 +21,8 @@ cargo xtask smoke --budget "$EXA_E2E_BUDGET"   # opt-in live Exa; never part of 
 
 `cargo xtask ci` is the single source of truth for "is the build green," and it is **offline** (`EXA_E2E` unset → the smoke suite is `#[ignore]`d). `clippy` runs `--all-targets --all-features` so the keyring-gated path and the `xtask`/test code are linted too; `cargo deny check` + `cargo audit` (committed `deny.toml`) scan for RUSTSEC advisories and license/ban policy on the graph that ships to every agent over TLS (a custom `cargo tree -i` ban-list enforces the *architecture* decisions — D14/D21 — but does not scan for CVEs, so both are needed). Every phase's **Gate:** line below names `phase-gate N`; the named tests it runs are enumerated in the [Invariant regression matrix](#invariant-regression-matrix).
 
+For a long autonomous `/goal` run, use [`autonomous-implementation-plan.md`](autonomous-implementation-plan.md) as the execution overlay. It preserves the phases below but adds wave decomposition, native subagent and Delegate Cursor implementation lanes, mandatory native + GLM review gates, and final local completion criteria.
+
 ---
 
 ## Phase 0 — Pre-build gate (one blocker, then confirmations)

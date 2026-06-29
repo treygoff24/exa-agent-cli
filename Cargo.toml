@@ -1,0 +1,60 @@
+[package]
+name = "exa-agent-cli"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Agent-first CLI over the full Exa API surface (single static binary)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/treygoff/exa-agent-cli"
+readme = "README.md"
+keywords = ["exa", "cli", "agent", "search", "ai"]
+categories = ["command-line-utilities"]
+# build.rs regenerates the registry from these committed inputs, so they are real
+# package inputs — a missing overlay.toml makes a published build fail (plan → publish checklist).
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "openapi/exa-openapi.json",
+    "openapi/team-management.json",
+    "openapi/overlay.toml",
+    "README.md",
+    "LICENSE-*",
+]
+
+[[bin]]
+name = "exa-agent"
+path = "src/main.rs"
+
+[lib]
+name = "exa_agent_cli"
+path = "src/lib.rs"
+
+[features]
+default = ["keyring"]
+# keyring: OS secret store (Keychain/secret-service/Win cred mgr). Off for musl artifacts (D15).
+keyring = []
+# musl-set: the feature set the Linux static binaries ship with (no keyring) (D15).
+musl-set = []
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+anyhow = "1"
+
+[dev-dependencies]
+# assert_cmd / predicates / insta land with the Phase-1 test matrix.
+
+[workspace]
+members = ["xtask"]
+
+[profile.release]
+strip = true
+lto = "thin"

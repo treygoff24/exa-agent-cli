@@ -1,0 +1,355 @@
+# overlay.toml — curated CLI metadata keyed by operationId (D17/D22).
+# Build input merged with the vendored OpenAPI specs by build.rs into the
+# operation registry. Vanilla OpenAPI cannot express cli_path / dangerous /
+# idempotency_sensitive / cursor fields / namespace, so they live here.
+# Generated once from docs/v2/commands.md; committed and reviewed thereafter.
+#
+# namespace: "api" => EXA_API_KEY + api host; "service" => EXA_SERVICE_KEY + admin host (D4).
+# idempotency_sensitive: create-POST subject to the no-auto-retry rule (D7/contracts §7).
+# dangerous: requires --yes/--confirm before executing (contracts §9).
+# cursor: when set, the command is cursor-paginated with this nextCursor field (contracts §10).
+
+[operations."cancelAgentRun"]
+cli_path = "agent runs cancel"
+namespace = "api"
+
+[operations."createAgentRun"]
+cli_path = "agent runs create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."deleteAgentRun"]
+cli_path = "agent runs delete"
+namespace = "api"
+dangerous = true
+
+[operations."listAgentRunEvents"]
+cli_path = "agent runs events"
+namespace = "api"
+
+[operations."getAgentRun"]
+cli_path = "agent runs get"
+namespace = "api"
+
+[operations."listAgentRuns"]
+cli_path = "agent runs list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."answer"]
+cli_path = "answer"
+namespace = "api"
+
+[operations."getContents"]
+cli_path = "contents"
+namespace = "api"
+
+[operations."batchMonitors"]
+cli_path = "monitor batch"
+namespace = "api"
+
+[operations."createMonitor"]
+cli_path = "monitor create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."deleteMonitor"]
+cli_path = "monitor delete"
+namespace = "api"
+dangerous = true
+
+[operations."getMonitor"]
+cli_path = "monitor get"
+namespace = "api"
+
+[operations."listMonitors"]
+cli_path = "monitor list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."getRun"]
+cli_path = "monitor runs get"
+namespace = "api"
+
+[operations."listRuns"]
+cli_path = "monitor runs list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."triggerMonitor"]
+cli_path = "monitor trigger"
+namespace = "api"
+
+[operations."updateMonitor"]
+cli_path = "monitor update"
+namespace = "api"
+
+[operations."ResearchController_createResearch"]
+cli_path = "research create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."ResearchController_getResearch"]
+cli_path = "research get"
+namespace = "api"
+
+[operations."ResearchController_listResearch"]
+cli_path = "research list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."search"]
+cli_path = "search"
+namespace = "api"
+
+[operations."findSimilar"]
+cli_path = "similar"
+namespace = "api"
+
+[operations."teams-me-get"]
+cli_path = "team info"
+namespace = "api"
+
+[operations."websets-cancel"]
+cli_path = "websets cancel"
+namespace = "api"
+dangerous = true
+
+[operations."websets-create"]
+cli_path = "websets create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."websets-delete"]
+cli_path = "websets delete"
+namespace = "api"
+dangerous = true
+
+[operations."websets-enrichments-cancel"]
+cli_path = "websets enrichments cancel"
+namespace = "api"
+dangerous = true
+
+[operations."websets-enrichments-create"]
+cli_path = "websets enrichments create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."websets-enrichments-delete"]
+cli_path = "websets enrichments delete"
+namespace = "api"
+dangerous = true
+
+[operations."websets-enrichments-get"]
+cli_path = "websets enrichments get"
+namespace = "api"
+
+[operations."websets-enrichments-update"]
+cli_path = "websets enrichments update"
+namespace = "api"
+
+[operations."events-get"]
+cli_path = "websets events get"
+namespace = "api"
+
+[operations."events-list"]
+cli_path = "websets events list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."websets-get"]
+cli_path = "websets get"
+namespace = "api"
+
+[operations."imports-create"]
+cli_path = "websets imports create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."imports-delete"]
+cli_path = "websets imports delete"
+namespace = "api"
+dangerous = true
+
+[operations."imports-get"]
+cli_path = "websets imports get"
+namespace = "api"
+
+[operations."imports-list"]
+cli_path = "websets imports list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."imports-update"]
+cli_path = "websets imports update"
+namespace = "api"
+
+[operations."websets-items-delete"]
+cli_path = "websets items delete"
+namespace = "api"
+dangerous = true
+
+[operations."websets-items-get"]
+cli_path = "websets items get"
+namespace = "api"
+
+[operations."websets-items-list"]
+cli_path = "websets items list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."websets-list"]
+cli_path = "websets list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."monitors-create"]
+cli_path = "websets monitors create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."monitors-delete"]
+cli_path = "websets monitors delete"
+namespace = "api"
+dangerous = true
+
+[operations."monitors-get"]
+cli_path = "websets monitors get"
+namespace = "api"
+
+[operations."monitors-list"]
+cli_path = "websets monitors list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."monitors-runs-get"]
+cli_path = "websets monitors runs get"
+namespace = "api"
+
+[operations."monitors-runs-list"]
+cli_path = "websets monitors runs list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."monitors-update"]
+cli_path = "websets monitors update"
+namespace = "api"
+
+[operations."websets-preview"]
+cli_path = "websets preview"
+namespace = "api"
+
+[operations."websets-searches-cancel"]
+cli_path = "websets searches cancel"
+namespace = "api"
+
+[operations."websets-searches-create"]
+cli_path = "websets searches create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."websets-searches-get"]
+cli_path = "websets searches get"
+namespace = "api"
+
+[operations."websets-update"]
+cli_path = "websets update"
+namespace = "api"
+
+[operations."webhooks-attempts-list"]
+cli_path = "websets webhooks attempts list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."webhooks-create"]
+cli_path = "websets webhooks create"
+namespace = "api"
+idempotency_sensitive = true
+
+[operations."webhooks-delete"]
+cli_path = "websets webhooks delete"
+namespace = "api"
+dangerous = true
+
+[operations."webhooks-get"]
+cli_path = "websets webhooks get"
+namespace = "api"
+
+[operations."webhooks-list"]
+cli_path = "websets webhooks list"
+namespace = "api"
+cursor = "cursor"
+
+[operations."webhooks-update"]
+cli_path = "websets webhooks update"
+namespace = "api"
+
+[operations."create-api-key"]
+cli_path = "admin keys create"
+namespace = "service"
+idempotency_sensitive = true
+
+[operations."delete-api-key"]
+cli_path = "admin keys delete"
+namespace = "service"
+dangerous = true
+
+[operations."get-api-key"]
+cli_path = "admin keys get"
+namespace = "service"
+
+[operations."list-api-keys"]
+cli_path = "admin keys list"
+namespace = "service"
+
+[operations."update-api-key"]
+cli_path = "admin keys update"
+namespace = "service"
+
+[operations."get-api-key-usage"]
+cli_path = "admin keys usage"
+namespace = "service"
+
+# --- Overlay-defined operations (docs-only; absent from the OpenAPI, D22) ---
+[operations."context"]
+cli_path = "context"
+namespace = "api"
+defined_by_overlay = true
+method = "POST"
+api_path = "/context"
+source = "exa-docs:context"
+source_version = "docs-2026-06-29"
+
+# Request fields for overlay-defined /context (flag <-> body-path map).
+[[operations."context".fields]]
+flag = "query"
+body_path = "query"
+kind = "str"
+required = true
+
+[[operations."context".fields]]
+flag = "tokens"
+body_path = "tokensNum"
+kind = "int"
+
+# --- Request-field maps for spec-derived ops (Phase 1 seeds `search`; rest land per-phase) ---
+[[operations."search".fields]]
+flag = "query"
+body_path = "query"
+kind = "str"
+required = true
+
+[[operations."search".fields]]
+flag = "num-results"
+body_path = "numResults"
+kind = "int"
+
+[[operations."search".fields]]
+flag = "type"
+body_path = "type"
+kind = "str"
+
+[[operations."search".fields]]
+flag = "category"
+body_path = "category"
+kind = "str"

@@ -54,6 +54,46 @@ pub enum FieldKind {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConstValue {
+    Str(&'static str),
+    Bool(bool),
+    Int(i64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmProtocol {
+    Yes,
+    EchoId,
+    YesPlusEcho(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Capability {
+    SecretCapture {
+        response_field: &'static str,
+        output_flag: &'static str,
+        required: bool,
+    },
+    Chunked {
+        input_fields: &'static [&'static str],
+        max: u32,
+    },
+    Macro {
+        expands_to: &'static str,
+    },
+    Confirm(ConfirmProtocol),
+    QueryFromBody {
+        rules: &'static [(&'static str, &'static str)],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderId {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidatorId {}
+
 /// One named flag ⇄ request-body-field mapping (arch §4).
 #[derive(Debug, Clone, Copy)]
 pub struct FieldDef {
@@ -61,6 +101,10 @@ pub struct FieldDef {
     pub body_path: &'static str,
     pub kind: FieldKind,
     pub required: bool,
+    pub co_fields: &'static [(&'static str, ConstValue)],
+    pub item_template: Option<&'static str>,
+    pub enum_values: &'static [&'static str],
+    pub range: Option<(f64, f64)>,
 }
 
 /// One Exa operation. Carries exactly what the contracts surface plus the internal
@@ -81,6 +125,10 @@ pub struct OperationDef {
     pub source: &'static str,
     pub source_version: &'static str,
     pub fields: &'static [FieldDef],
+    pub capabilities: &'static [Capability],
+    pub body_builder: Option<BuilderId>,
+    pub validators: &'static [ValidatorId],
+    pub mixed_status_exit: bool,
 }
 
 impl OperationDef {

@@ -244,7 +244,8 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
     for f in &r.fields {
         write!(
             fields,
-            "FieldDef {{ flag: {:?}, body_path: {:?}, kind: {}, required: {} }}, ",
+            "FieldDef {{ flag: {:?}, body_path: {:?}, kind: {}, required: {}, \
+             co_fields: &[], item_template: None, enum_values: &[], range: None }}, ",
             f.flag,
             f.body_path,
             field_kind_variant(&f.kind)?,
@@ -256,7 +257,8 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         "    OperationDef {{ cli_path: &[{cli_path}], operation_id: {oid:?}, method: {method}, \
          api_path: {api_path:?}, read_only: {read_only}, streaming: {streaming}, pagination: {pagination}, \
          dangerous: {dangerous}, namespace: Namespace::{ns}, idempotency_sensitive: {idem}, \
-         deprecated: {dep}, source: {source:?}, source_version: {sver:?}, fields: &[{fields}] }},",
+         deprecated: {dep}, source: {source:?}, source_version: {sver:?}, fields: &[{fields}], \
+         capabilities: &[], body_builder: None, validators: &[], mixed_status_exit: false }},",
         oid = r.operation_id,
         api_path = r.api_path,
         read_only = r.read_only,

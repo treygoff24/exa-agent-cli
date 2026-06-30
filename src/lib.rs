@@ -6845,6 +6845,10 @@ mod tests {
         source: "test",
         source_version: "0",
         fields: &[] as &[FieldDef],
+        capabilities: &[],
+        body_builder: None,
+        validators: &[],
+        mixed_status_exit: false,
     };
 
     struct PendingPathGuard;

@@ -449,12 +449,20 @@ mod tests {
             body_path: "query",
             kind: FieldKind::Str,
             required: true,
+            co_fields: &[],
+            item_template: None,
+            enum_values: &[],
+            range: None,
         },
         crate::registry::FieldDef {
             flag: "text",
             body_path: "contents.text",
             kind: FieldKind::Bool,
             required: false,
+            co_fields: &[],
+            item_template: None,
+            enum_values: &[],
+            range: None,
         },
     ];
 
@@ -473,6 +481,10 @@ mod tests {
         source: "test",
         source_version: "0",
         fields: NESTED_FIELDS,
+        capabilities: &[],
+        body_builder: None,
+        validators: &[],
+        mixed_status_exit: false,
     };
 
     #[test]

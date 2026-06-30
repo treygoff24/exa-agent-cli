@@ -359,9 +359,57 @@ fn schema_commands_work_offline() {
     assert_eq!(export["target"], "openapi");
     assert!(!export["operations"].as_array().unwrap().is_empty());
 
-    let validate = run_ok_json(&["schema", "validate-input", "search", "--compact"]);
+    let validate = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--compact",
+    ]);
     assert_eq!(validate["schema"], "exa.cli.schema_validate_input.v1");
     assert_eq!(validate["valid"], true);
+
+    let missing_query = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        r#"{"numResults":5}"#,
+        "--compact",
+    ]);
+    assert_eq!(missing_query["valid"], false);
+    assert_eq!(missing_query["details"]["field"], "query");
+    assert!(missing_query["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("--num-results 5"));
+
+    let invalid_type = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        r#"{"query":"x","type":"bogus"}"#,
+        "--compact",
+    ]);
+    assert_eq!(invalid_type["valid"], false);
+    assert_eq!(invalid_type["details"]["field"], "type");
+    assert_eq!(invalid_type["details"]["issue"], "invalid_enum_value");
+
+    let unsupported = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "team info",
+        "--body",
+        "{}",
+        "--compact",
+    ]);
+    assert!(unsupported["valid"].is_null());
+    assert!(unsupported["note"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported"));
 
     let refresh = run_ok_json(&["schema", "refresh", "--check", "--compact"]);
     assert_eq!(refresh["schema"], "exa.cli.schema_refresh.v1");
@@ -419,6 +467,7 @@ fn parse_config_commands() {
 #[test]
 fn parse_auth_commands() {
     assert_path(&["auth", "status"], "auth status");
+    assert_path(&["auth", "test"], "auth test");
     assert_path(&["auth", "login"], "auth login");
     assert_path(&["auth", "logout"], "auth logout");
     assert_eq!(
@@ -429,6 +478,93 @@ fn parse_auth_commands() {
         parse_err(&["--api-key-stdin", "--service-key-stdin", "auth", "status"]).kind(),
         clap::error::ErrorKind::ArgumentConflict
     );
+}
+
+#[test]
+fn auth_help_does_not_claim_keyring_storage() {
+    let output = run(&["auth", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !help.to_ascii_lowercase().contains("keyring"),
+        "auth help should not claim OS keyring storage: {help}"
+    );
+    assert!(help.contains("credentials file"));
+}
+
+#[test]
+fn auth_test_without_credential_is_not_authenticated() {
+    let dir = temp_path("auth-test-no-credential");
+    let missing_credentials = dir.join("missing-credentials.json");
+    let output = run_with_env(
+        &["auth", "test", "--compact"],
+        &[(
+            "EXA_AGENT_CREDENTIALS",
+            missing_credentials.to_str().unwrap(),
+        )],
+    );
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "not_authenticated");
+}
+
+#[test]
+fn auth_test_dry_run_previews_without_touching_network() {
+    // A live probe must still honor --dry-run: no network, just a preview. A fake key
+    // would 404 against real Exa if the network were hit; the gate runs before that.
+    let output = run_with_env(
+        &["auth", "test", "--dry-run", "--print-request", "--compact"],
+        &[("EXA_API_KEY", "test-fake-key")],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["dryRun"], true);
+    assert_eq!(stdout["endpoint"], "/v0/teams/me");
+    // Proof it never reached the network: no upstream HTTP status / HTML body leaked in.
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(!raw.contains("httpStatus") && !raw.contains("DOCTYPE"));
+}
+
+#[test]
+fn validate_input_rejects_wrong_type_and_out_of_range() {
+    // Registry FieldKind type check: numResults is Int, a string fails.
+    let wrong_type = run(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        "{\"query\":\"x\",\"numResults\":\"five\"}",
+        "--compact",
+    ]);
+    let v: serde_json::Value = serde_json::from_slice(&wrong_type.stdout).unwrap();
+    assert_eq!(v["valid"], false);
+    assert_eq!(v["details"]["issue"], "invalid_field_type");
+
+    // Reuses the live range validator: 500 is out of the 1..=100 range.
+    let out_of_range = run(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        "{\"query\":\"x\",\"numResults\":500}",
+        "--compact",
+    ]);
+    let v: serde_json::Value = serde_json::from_slice(&out_of_range.stdout).unwrap();
+    assert_eq!(v["valid"], false);
+
+    // A structurally valid, in-range body still passes.
+    let ok = run(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        "{\"query\":\"x\",\"numResults\":5}",
+        "--compact",
+    ]);
+    let v: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(v["valid"], true);
 }
 
 #[test]

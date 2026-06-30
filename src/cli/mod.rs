@@ -58,6 +58,15 @@ impl SearchType {
     }
 }
 
+pub const SEARCH_TYPE_VALUES: &[&str] = &[
+    "auto",
+    "fast",
+    "instant",
+    "deep-lite",
+    "deep",
+    "deep-reasoning",
+];
+
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchCategory {
     Company,
@@ -1165,9 +1174,9 @@ pub enum AuthCmd {
     Status,
     /// Network auth probe.
     Test,
-    /// Store key in OS keyring (reads stdin).
+    /// Store API key in the credentials file (reads stdin; mode 0600, plaintext on disk).
     Login,
-    /// Clear keyring entry for active profile.
+    /// Clear the credentials file for the active profile.
     Logout,
 }
 

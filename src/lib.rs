@@ -31,6 +31,7 @@ use cli::{
     WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
     WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
     WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    SEARCH_TYPE_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -210,7 +211,7 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             emit_stdout(&capabilities(), pretty);
             Ok(0)
         }
-        Command::Schema { sub } => dispatch_schema(sub, pretty),
+        Command::Schema { sub } => dispatch_schema(sub, &cli.globals, pretty),
         Command::RobotDocs { sub } => dispatch_robot_docs(sub, pretty),
         Command::Doctor(args) => {
             let checks = parse_checks(&args.check);
@@ -5764,14 +5765,66 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
             );
             Ok(0)
         }
-        AuthCmd::Test => Err(not_implemented(
-            "auth test",
-            "network auth probe lands with transport",
-        )),
+        AuthCmd::Test => dispatch_auth_test(globals, pretty),
     }
 }
 
-fn dispatch_schema(sub: &SchemaCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["team", "info"]).expect("team info is in the registry");
+    // Honor the universal contract: --dry-run/--print-request never touch the network.
+    // `auth test` makes a live probe, so a preview just describes the request it would send.
+    if globals.print_request || globals.dry_run {
+        emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.auth_test.v1",
+                "ok": true,
+                "dryRun": true,
+                "method": op.method.as_str(),
+                "endpoint": op.api_path,
+                "note": "auth test makes a live authenticated request to verify the credential; run without --dry-run to probe.",
+            }),
+            pretty,
+        );
+        return Ok(0);
+    }
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    reject_mismatched_credential_scope(&credential)?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
+    let transport = UreqTransport::new(timeout);
+    let request_id = transport::new_request_id();
+    let result = execute_raw_with_request_id(
+        &transport,
+        RawExecuteParams {
+            method: op.method.as_str(),
+            path: op.api_path,
+            query_raw: &[],
+            body: serde_json::Value::Null,
+            globals,
+            credential: &credential,
+            request_id: request_id.clone(),
+        },
+    )?;
+    let mut data = transport::parse_response_data(&result.response.body);
+    redaction::redact_json_value(&mut data);
+    emit_stdout(
+        &serde_json::json!({
+            "schema": "exa.cli.auth_test.v1",
+            "ok": true,
+            "authenticated": true,
+            "source": credential.source.label(),
+            "profile": credential.profile,
+            "endpoint": op.api_path,
+            "team": data,
+        }),
+        pretty,
+    );
+    Ok(0)
+}
+
+fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         SchemaCmd::List => {
             let list = schema_operations();
@@ -5837,13 +5890,17 @@ fn dispatch_schema(sub: &SchemaCmd, pretty: bool) -> Result<i32, CliError> {
                     .with_suggestion("exa-agent schema list"),
                 )
             })?;
+            let body = read_validate_input_body(globals)?;
+            let validation = validate_registry_input(op, &body);
             emit_stdout(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_validate_input.v1",
                     "ok": true,
-                    "valid": true,
                     "command": op.command(),
-                    "note": "offline structural validation is limited to known command discovery in this phase",
+                    "valid": validation.valid,
+                    "details": validation.details,
+                    "suggestedCommand": validation.suggested_command,
+                    "note": validation.note,
                 }),
                 pretty,
             );
@@ -5912,7 +5969,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "examples": [
                     "exa-agent capabilities --compact",
                     "exa-agent search \"AI infrastructure news\" --dry-run --print-request --compact",
-                    "exa-agent raw GET /websets/v0/teams/me --compact"
+                    "exa-agent team info --dry-run --print-request --compact"
                 ],
             }),
             pretty,
@@ -5958,6 +6015,260 @@ fn operation_schema(op: &registry::OperationDef) -> serde_json::Value {
             "required": field.required,
         })).collect::<Vec<_>>(),
     })
+}
+
+struct ValidateInputOutcome {
+    valid: serde_json::Value,
+    details: Option<serde_json::Value>,
+    suggested_command: Option<String>,
+    note: Option<String>,
+}
+
+fn read_validate_input_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
+    let Some(raw) = globals.body.as_deref() else {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "`schema validate-input` requires `--body` with a JSON object to validate",
+            )
+            .with_suggestion(
+                "exa-agent schema validate-input search --body '{\"query\":\"example\"}'",
+            ),
+        ));
+    };
+    let source = request::parse_body_source(raw)?;
+    let body = request::read_body_source(source)?;
+    if !body.is_object() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`schema validate-input --body` must be a JSON object",
+            )
+            .with_suggestion(
+                "exa-agent schema validate-input search --body '{\"query\":\"example\"}'",
+            ),
+        ));
+    }
+    Ok(body)
+}
+
+fn validate_registry_input(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+) -> ValidateInputOutcome {
+    if op.fields.is_empty() {
+        return ValidateInputOutcome {
+            valid: serde_json::Value::Null,
+            details: None,
+            suggested_command: None,
+            note: Some(format!(
+                "structural validation is unsupported for `{}` because no request fields are modeled in the registry",
+                op.command()
+            )),
+        };
+    }
+
+    for field in op.fields {
+        if field.required && !body_field_present(body, field.body_path) {
+            return ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(serde_json::json!({
+                    "issue": "missing_required_field",
+                    "field": field.body_path,
+                    "flag": field.flag,
+                })),
+                suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                note: None,
+            };
+        }
+    }
+
+    // Type check every modeled field actually present, keyed off the registry's
+    // FieldKind — so validate-input is genuinely registry-driven, not just a
+    // required-presence + two-enum check. Catches e.g. numResults:"five".
+    for field in op.fields {
+        if let Some(value) = body_value_at_path(body, field.body_path) {
+            if let Some(issue) = validate_field_kind(field, value) {
+                return ValidateInputOutcome {
+                    valid: serde_json::Value::Bool(false),
+                    details: Some(issue),
+                    suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                    note: None,
+                };
+            }
+        }
+    }
+
+    for field in op.fields {
+        if let Some(value) = body_value_at_path(body, field.body_path) {
+            if let Some(issue) = validate_enum_field(op, field, value) {
+                return ValidateInputOutcome {
+                    valid: serde_json::Value::Bool(false),
+                    details: Some(issue),
+                    suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                    note: None,
+                };
+            }
+        }
+    }
+
+    // Reuse the live command's own value-range validator so validate-input never
+    // reports `valid:true` for a body the command would reject (e.g. numResults:500).
+    if op.command() == "search" {
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("your query");
+        if let Err(err) = validate_search_num_results_body(body, query) {
+            let diag = err.diag();
+            return ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(serde_json::json!({
+                    "issue": "invalid_value",
+                    "field": "numResults",
+                    "message": diag.message,
+                })),
+                suggested_command: diag.suggested_command.clone(),
+                note: None,
+            };
+        }
+    }
+
+    ValidateInputOutcome {
+        valid: serde_json::Value::Bool(true),
+        details: None,
+        suggested_command: None,
+        note: None,
+    }
+}
+
+fn validate_field_kind(
+    field: &registry::FieldDef,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    use registry::FieldKind;
+    if value.is_null() {
+        return None; // absence is the required-check's job, not a type error
+    }
+    let (ok, expected) = match field.kind {
+        FieldKind::Str => (value.is_string(), "string"),
+        FieldKind::Int => (value.is_i64() || value.is_u64(), "integer"),
+        FieldKind::Num => (value.is_number(), "number"),
+        FieldKind::Bool => (value.is_boolean(), "boolean"),
+        FieldKind::StrArray => (
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().all(serde_json::Value::is_string)),
+            "array of strings",
+        ),
+        FieldKind::Json => (true, "json"),
+    };
+    if ok {
+        return None;
+    }
+    Some(serde_json::json!({
+        "issue": "invalid_field_type",
+        "field": field.body_path,
+        "flag": field.flag,
+        "expected": expected,
+    }))
+}
+
+fn body_field_present(body: &serde_json::Value, path: &str) -> bool {
+    body_value_at_path(body, path).is_some_and(|value| !value.is_null())
+}
+
+fn body_value_at_path<'a>(
+    body: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    if path.is_empty() || path.split('.').any(str::is_empty) {
+        return None;
+    }
+    let mut current = body;
+    for segment in path.split('.') {
+        current = if segment.bytes().all(|b| b.is_ascii_digit()) {
+            let idx = segment.parse::<usize>().ok()?;
+            current.as_array()?.get(idx)?
+        } else {
+            current.as_object()?.get(segment)?
+        };
+    }
+    Some(current)
+}
+
+fn validate_enum_field(
+    op: &registry::OperationDef,
+    field: &registry::FieldDef,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let raw = value.as_str()?;
+    let allowed = enum_values_for_field(op, field)?;
+    let normalized = raw.trim().to_ascii_lowercase();
+    if allowed
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "issue": "invalid_enum_value",
+        "field": field.body_path,
+        "flag": field.flag,
+        "value": raw,
+        "allowed": allowed,
+    }))
+}
+
+fn enum_values_for_field(
+    op: &registry::OperationDef,
+    field: &registry::FieldDef,
+) -> Option<&'static [&'static str]> {
+    if op.command() != "search" {
+        return None;
+    }
+    match field.flag {
+        "type" => Some(SEARCH_TYPE_VALUES),
+        "category" => Some(SEARCH_CATEGORY_VALUES),
+        _ => None,
+    }
+}
+
+fn suggested_validate_input_command(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+    field: &registry::FieldDef,
+) -> String {
+    if op.command() == "search" {
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("your query");
+        if field.flag == "type" {
+            return format!("exa-agent search {} --type auto", shell_quote(query));
+        }
+        if field.flag == "category" {
+            return format!("exa-agent search {} --category company", shell_quote(query));
+        }
+        if field.body_path == "query" {
+            let mut command = format!("exa-agent search {} --compact", shell_quote("your query"));
+            if let Some(num_results) = body.get("numResults").and_then(serde_json::Value::as_i64) {
+                command = format!(
+                    "exa-agent search {} --num-results {num_results}",
+                    shell_quote("your query")
+                );
+            }
+            return command;
+        }
+        return format!(
+            "exa-agent search {} --body '{}'",
+            shell_quote(query),
+            shell_quote(&body.to_string())
+        );
+    }
+
+    format!("exa-agent schema show {} --compact", op.command())
 }
 
 fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
@@ -6477,16 +6788,6 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
             Ok(serde_json::json!({ "name": name, "value": value }))
         })
         .collect()
-}
-
-fn not_implemented(cmd: &str, detail: &str) -> CliError {
-    CliError::Usage(
-        Diag::new(
-            "not_implemented",
-            format!("`{cmd}` is recognized but not yet wired in this build: {detail}"),
-        )
-        .with_suggestion("exa-agent capabilities".to_string()),
-    )
 }
 
 /// Pretty when `--pretty`, or in a TTY without `--compact`. JSON envelope is the default in a pipe.

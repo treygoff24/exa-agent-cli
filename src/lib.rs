@@ -21,12 +21,14 @@ use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
 
 use cli::{
-    command_path, websets_command_path, AgentCmd, AgentRunArgs, AgentRunsCmd, AgentRunsEventsArgs,
-    AnswerArgs, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs,
-    FetchArgs, GlobalArgs, MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs,
-    MonitorRunsCmd, PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd,
-    SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
-    WebsetsImportsCmd, WebsetsListArgs, WebsetsPreviewArgs,
+    command_path, AgentCmd, AgentRunArgs, AgentRunsCmd, AgentRunsEventsArgs, AnswerArgs, AuthCmd,
+    Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs,
+    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
+    PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs,
+    SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
+    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
+    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -873,6 +875,15 @@ fn dispatch_monitor_create(
                 &extra_warnings,
             );
         }
+        if globals.raw {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`--raw` cannot be combined with `monitor create`; create responses can include one-time webhook secrets",
+                )
+                .with_suggestion("Use `--secret-output FILE` and the default JSON envelope."),
+            ));
+        }
         let secret_output = args
             .secret_output
             .as_deref()
@@ -998,7 +1009,7 @@ fn dispatch_monitor_create_live(
     let request_id = transport::new_request_id();
     let mut warnings = typed_command_warnings(spec.op);
     warnings.extend(extra_warnings);
-    let result = execute_raw_with_request_id(
+    let result = match execute_raw_with_request_id(
         &transport,
         RawExecuteParams {
             method: spec.op.method.as_str(),
@@ -1009,7 +1020,18 @@ fn dispatch_monitor_create_live(
             credential: &credential,
             request_id: request_id.clone(),
         },
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(maybe_record_pending_run_on_create_failure(
+                err,
+                &spec,
+                globals,
+                &request_id,
+                spec.op.api_path,
+            ));
+        }
+    };
     let mut data = transport::parse_response_data(&result.response.body);
     if let Some(output) = secret_output {
         let secret = data
@@ -1489,12 +1511,9 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
         WebsetsCmd::Searches { sub } => dispatch_websets_searches(sub, globals, pretty),
         WebsetsCmd::Enrichments { sub } => dispatch_websets_enrichments(sub, globals, pretty),
         WebsetsCmd::Imports { sub } => dispatch_websets_imports(sub, globals, pretty),
-        WebsetsCmd::Monitors { .. } | WebsetsCmd::Events { .. } | WebsetsCmd::Webhooks { .. } => {
-            Err(not_implemented(
-                &websets_command_path(sub),
-                "Wave 4C; monitors/events/webhooks are not wired in this wave",
-            ))
-        }
+        WebsetsCmd::Monitors { sub } => dispatch_websets_monitors(sub, globals, pretty),
+        WebsetsCmd::Events { sub } => dispatch_websets_events(sub, globals, pretty),
+        WebsetsCmd::Webhooks { sub } => dispatch_websets_webhooks(sub, globals, pretty),
     }
 }
 
@@ -2432,6 +2451,886 @@ fn dispatch_websets_imports_delete(
         let path = substitute_path(op.api_path, &[("id", import_id)]);
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
+}
+
+fn insert_monitor_behavior_config_field(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+) {
+    let behavior = body
+        .entry("behavior".to_string())
+        .or_insert_with(|| serde_json::json!({ "type": "search", "config": {} }));
+    if let Some(behavior_obj) = behavior.as_object_mut() {
+        if behavior_obj.get("type").is_none() {
+            behavior_obj.insert("type".to_string(), serde_json::json!("search"));
+        }
+        let config = behavior_obj
+            .entry("config".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(config_obj) = config.as_object_mut() {
+            config_obj.insert(key.to_string(), value);
+        }
+    }
+}
+
+fn build_websets_monitors_create_named_body(args: &WebsetsMonitorsCreateArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(webset_id) = &args.webset_id {
+        body.insert(
+            "websetId".to_string(),
+            serde_json::Value::String(webset_id.clone()),
+        );
+    }
+    if args.cron.is_some() || args.timezone.is_some() {
+        let mut cadence = serde_json::Map::new();
+        if let Some(cron) = &args.cron {
+            cadence.insert("cron".to_string(), serde_json::Value::String(cron.clone()));
+        }
+        if let Some(timezone) = &args.timezone {
+            cadence.insert(
+                "timezone".to_string(),
+                serde_json::Value::String(timezone.clone()),
+            );
+        }
+        body.insert("cadence".to_string(), serde_json::Value::Object(cadence));
+    }
+    if let Some(query) = &args.query {
+        insert_monitor_behavior_config_field(
+            &mut body,
+            "query",
+            serde_json::Value::String(query.clone()),
+        );
+    }
+    if let Some(count) = args.count {
+        insert_monitor_behavior_config_field(&mut body, "count", serde_json::json!(count));
+    }
+    if !args.criteria.is_empty() {
+        let criteria: Vec<serde_json::Value> = args
+            .criteria
+            .iter()
+            .map(|description| serde_json::json!({ "description": description }))
+            .collect();
+        insert_monitor_behavior_config_field(
+            &mut body,
+            "criteria",
+            serde_json::Value::Array(criteria),
+        );
+    }
+    if let Some(behavior) = args.search_behavior {
+        insert_monitor_behavior_config_field(
+            &mut body,
+            "behavior",
+            serde_json::Value::String(behavior.as_str().to_string()),
+        );
+    }
+    serde_json::Value::Object(body)
+}
+
+fn monitor_behavior_count_is_valid(body: &serde_json::Value) -> bool {
+    body.pointer("/behavior/config/count")
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|count| count.is_finite() && count >= 1.0)
+}
+
+fn websets_monitor_create_has_required_fields(body: &serde_json::Value) -> bool {
+    let has_webset_id = body
+        .get("websetId")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty());
+    let has_cron = body
+        .pointer("/cadence/cron")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty());
+    let has_behavior_type = body
+        .get("behavior")
+        .and_then(|value| value.get("type"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .is_some();
+    has_webset_id && has_cron && has_behavior_type && monitor_behavior_count_is_valid(body)
+}
+
+fn validate_websets_monitor_create_body(body: &serde_json::Value) -> Result<(), CliError> {
+    if !websets_monitor_create_has_required_fields(body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets monitors create requires websetId, cadence.cron, behavior.type, and behavior.config.count >= 1 (via named flags, --body, or --set)",
+            )
+            .with_suggestion(
+                "exa-agent websets monitors create --webset-id ws_abc --cron '0 9 * * 1' --count 10 --query \"new items\"",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn build_websets_monitors_create_spec(
+    args: &WebsetsMonitorsCreateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "create"])
+        .expect("websets monitors create is in registry");
+    let body = build_websets_monitors_create_named_body(args);
+    let body = apply_request_overrides(body, globals)?;
+    validate_websets_monitor_create_body(&body)?;
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_websets_monitors_create(
+    args: &WebsetsMonitorsCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "create"])
+        .expect("websets monitors create is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_monitors_create_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn websets_monitors_list_static_query(args: &WebsetsMonitorsListArgs) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    if let Some(webset_id) = &args.webset_id {
+        query.push(("websetId".to_string(), webset_id.clone()));
+    }
+    query
+}
+
+fn dispatch_websets_monitors_list(
+    args: &WebsetsMonitorsListArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "list"])
+        .expect("websets monitors list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(&args.pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let static_query = websets_monitors_list_static_query(args);
+        let query = merge_static_and_pagination_query(&static_query, &args.pagination);
+        if args.pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                &args.pagination,
+                None,
+                &static_query,
+            )
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn dispatch_websets_monitors_get(
+    monitor_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "get"])
+        .expect("websets monitors get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn build_websets_monitors_update_named_body(args: &WebsetsMonitorsUpdateArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(status) = args.status {
+        body.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.as_str().to_string()),
+        );
+    }
+    if args.cron.is_some() || args.timezone.is_some() {
+        let mut cadence = serde_json::Map::new();
+        if let Some(cron) = &args.cron {
+            cadence.insert("cron".to_string(), serde_json::Value::String(cron.clone()));
+        }
+        if let Some(timezone) = &args.timezone {
+            cadence.insert(
+                "timezone".to_string(),
+                serde_json::Value::String(timezone.clone()),
+            );
+        }
+        body.insert("cadence".to_string(), serde_json::Value::Object(cadence));
+    }
+    if let Some(query) = &args.query {
+        insert_monitor_behavior_config_field(
+            &mut body,
+            "query",
+            serde_json::Value::String(query.clone()),
+        );
+    }
+    if let Some(count) = args.count {
+        insert_monitor_behavior_config_field(&mut body, "count", serde_json::json!(count));
+    }
+    if let Some(behavior) = args.search_behavior {
+        insert_monitor_behavior_config_field(
+            &mut body,
+            "behavior",
+            serde_json::Value::String(behavior.as_str().to_string()),
+        );
+    }
+    serde_json::Value::Object(body)
+}
+
+fn validate_websets_monitor_update_body(body: &serde_json::Value) -> Result<(), CliError> {
+    if body.as_object().is_some_and(|object| object.is_empty()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "websets monitors update requires at least one field via named flags, --body, or --set",
+            )
+            .with_suggestion(
+                "exa-agent websets monitors update <id> --status disabled --cron '0 14 * * *'",
+            ),
+        ));
+    }
+    if body.get("behavior").is_some() {
+        let behavior = body
+            .get("behavior")
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| {
+                CliError::Usage(Diag::new(
+                    "invalid_value",
+                    "websets monitors update behavior must be an object when provided",
+                ))
+            })?;
+        if behavior
+            .get("type")
+            .and_then(|value| value.as_str())
+            .is_none_or(|value| value.is_empty())
+        {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "websets monitors update behavior.type must be non-empty when behavior is provided",
+            )));
+        }
+        if !monitor_behavior_count_is_valid(body) {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "websets monitors update behavior.config.count must be a number >= 1 when behavior is provided",
+            )));
+        }
+    }
+    if body.get("cadence").is_some() {
+        let cadence = body
+            .get("cadence")
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| {
+                CliError::Usage(Diag::new(
+                    "invalid_value",
+                    "websets monitors update cadence must be an object when provided",
+                ))
+            })?;
+        if cadence
+            .get("cron")
+            .and_then(|value| value.as_str())
+            .is_none_or(|value| value.is_empty())
+        {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "websets monitors update cadence.cron must be non-empty when cadence is provided",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_websets_monitors_update_spec(
+    args: &WebsetsMonitorsUpdateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "update"])
+        .expect("websets monitors update is in registry");
+    let body = build_websets_monitors_update_named_body(args);
+    let body = apply_request_overrides(body, globals)?;
+    validate_websets_monitor_update_body(&body)?;
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_websets_monitors_update(
+    monitor_id: &str,
+    args: &WebsetsMonitorsUpdateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "update"])
+        .expect("websets monitors update is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_monitors_update_spec(args, globals)?;
+        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_monitors_delete(
+    monitor_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "delete"])
+        .expect("websets monitors delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!(
+                "Refusing to delete monitor `{monitor_id}` without `--yes`; preview first with `websets monitors get`"
+            ),
+            format!("exa-agent websets monitors delete {monitor_id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_monitors_runs_list(
+    monitor_id: &str,
+    pagination: &PaginationArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "runs", "list"])
+        .expect("websets monitors runs list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("monitor", monitor_id)]);
+        let query = pagination_query(pagination);
+        if pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                pagination,
+                Some(path.as_str()),
+                &[],
+            )
+        } else {
+            dispatch_typed_command_routed(
+                spec,
+                globals,
+                pretty,
+                Some(path.as_str()),
+                &query,
+                false,
+                None,
+            )
+        }
+    })
+}
+
+fn dispatch_websets_monitors_runs_get(
+    monitor_id: &str,
+    run_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "monitors", "runs", "get"])
+        .expect("websets monitors runs get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("monitor", monitor_id), ("id", run_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_monitors(
+    sub: &cli::WebsetsMonitorsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    use cli::WebsetsMonitorsCmd;
+    match sub {
+        WebsetsMonitorsCmd::Create(args) => dispatch_websets_monitors_create(args, globals, pretty),
+        WebsetsMonitorsCmd::List(args) => dispatch_websets_monitors_list(args, globals, pretty),
+        WebsetsMonitorsCmd::Get { monitor_id } => {
+            dispatch_websets_monitors_get(monitor_id, globals, pretty)
+        }
+        WebsetsMonitorsCmd::Update { monitor_id, args } => {
+            dispatch_websets_monitors_update(monitor_id, args, globals, pretty)
+        }
+        WebsetsMonitorsCmd::Delete { monitor_id } => {
+            dispatch_websets_monitors_delete(monitor_id, globals, pretty)
+        }
+        WebsetsMonitorsCmd::Runs { sub } => match sub {
+            cli::WebsetsMonitorRunsCmd::List {
+                monitor_id,
+                pagination,
+            } => dispatch_websets_monitors_runs_list(monitor_id, pagination, globals, pretty),
+            cli::WebsetsMonitorRunsCmd::Get { monitor_id, run_id } => {
+                dispatch_websets_monitors_runs_get(monitor_id, run_id, globals, pretty)
+            }
+        },
+    }
+}
+
+fn websets_events_list_static_query(args: &WebsetsEventsListArgs) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    for event_type in &args.types {
+        query.push(("types".to_string(), event_type.clone()));
+    }
+    if let Some(created_before) = &args.created_before {
+        query.push(("createdBefore".to_string(), created_before.clone()));
+    }
+    if let Some(created_after) = &args.created_after {
+        query.push(("createdAfter".to_string(), created_after.clone()));
+    }
+    query
+}
+
+fn dispatch_websets_events_list(
+    args: &WebsetsEventsListArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "events", "list"])
+        .expect("websets events list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(&args.pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let static_query = websets_events_list_static_query(args);
+        let query = merge_static_and_pagination_query(&static_query, &args.pagination);
+        if args.pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                &args.pagination,
+                None,
+                &static_query,
+            )
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn dispatch_websets_events_get(
+    event_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "events", "get"])
+        .expect("websets events get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", event_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_events(
+    sub: &cli::WebsetsEventsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    use cli::WebsetsEventsCmd;
+    match sub {
+        WebsetsEventsCmd::List(args) => dispatch_websets_events_list(args, globals, pretty),
+        WebsetsEventsCmd::Get { event_id } => {
+            dispatch_websets_events_get(event_id, globals, pretty)
+        }
+    }
+}
+
+fn build_websets_webhooks_create_named_body(args: &WebsetsWebhooksCreateArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(url) = &args.url {
+        body.insert("url".to_string(), serde_json::Value::String(url.clone()));
+    }
+    if !args.events.is_empty() {
+        body.insert(
+            "events".to_string(),
+            serde_json::Value::Array(
+                args.events
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::Value::Object(body)
+}
+
+fn websets_webhooks_create_has_required_fields(body: &serde_json::Value) -> bool {
+    let has_url = body
+        .get("url")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty());
+    let has_events = websets_webhook_events_are_valid(body);
+    has_url && has_events
+}
+
+fn websets_webhook_events_are_valid(body: &serde_json::Value) -> bool {
+    body.get("events")
+        .and_then(|value| value.as_array())
+        .is_some_and(|events| {
+            !events.is_empty()
+                && events
+                    .iter()
+                    .all(|event| event.as_str().is_some_and(|event| !event.is_empty()))
+        })
+}
+
+fn build_websets_webhooks_create_spec(
+    args: &WebsetsWebhooksCreateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "create"])
+        .expect("websets webhooks create is in registry");
+    let body = build_websets_webhooks_create_named_body(args);
+    let body = apply_request_overrides(body, globals)?;
+    if !websets_webhooks_create_has_required_fields(&body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets webhooks create requires url and a non-empty events array (via --url/--event, --body, or --set)",
+            )
+            .with_suggestion(
+                "exa-agent websets webhooks create --url https://example.com/hook --event webset.item.created",
+            ),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn websets_webhook_secret_warnings(args: &WebsetsWebhooksCreateArgs) -> Vec<serde_json::Value> {
+    if args.secret_output.is_none() {
+        vec![serde_json::json!({
+            "code": "webhook_secret_ephemeral",
+            "message": "Create responses include secret once; use --secret-output FILE to capture it or it will be lost.",
+            "replacement": "exa-agent websets webhooks create --url https://example.com/hook --event webset.item.created --secret-output ./webhook.secret"
+        })]
+    } else {
+        Vec::new()
+    }
+}
+
+fn dispatch_websets_webhooks_create_live(
+    spec: request::RequestSpec,
+    secret_output: Option<SecretOutputReservation>,
+    globals: &GlobalArgs,
+    pretty: bool,
+    extra_warnings: Vec<serde_json::Value>,
+) -> Result<i32, CliError> {
+    parse_user_headers(&globals.headers)?;
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg);
+    let transport = UreqTransport::new(timeout);
+    let request_id = transport::new_request_id();
+    let mut warnings = typed_command_warnings(spec.op);
+    warnings.extend(extra_warnings);
+    let result = match execute_raw_with_request_id(
+        &transport,
+        RawExecuteParams {
+            method: spec.op.method.as_str(),
+            path: spec.op.api_path,
+            query_raw: &[],
+            body: typed_wire_body(&spec),
+            globals,
+            credential: &credential,
+            request_id: request_id.clone(),
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(maybe_record_pending_run_on_create_failure(
+                err,
+                &spec,
+                globals,
+                &request_id,
+                spec.op.api_path,
+            ));
+        }
+    };
+    let mut data = transport::parse_response_data(&result.response.body);
+    if let Some(output) = secret_output {
+        let secret = data.get("secret").and_then(|value| value.as_str()).ok_or_else(|| {
+            CliError::Upstream(
+                Diag::new(
+                    "upstream_malformed",
+                    "websets webhooks create response did not include string `secret`; reserved --secret-output file was not written",
+                )
+                .with_suggestion("exa-agent websets webhooks list --limit 10"),
+            )
+        })?;
+        output.commit(secret)?;
+    }
+    redaction::redact_json_value(&mut data);
+    let count = transport::primary_count(&data);
+    let hash = transport::data_hash(&data);
+    let envelope = response_envelope(ResponseEnvelopeArgs {
+        command: &spec.op.command(),
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+        warnings: &warnings,
+    });
+    if globals.ndjson {
+        emit_ndjson(&envelope);
+    } else {
+        emit_stdout(&envelope, pretty);
+    }
+    Ok(0)
+}
+
+fn dispatch_websets_webhooks_create(
+    args: &WebsetsWebhooksCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "create"])
+        .expect("websets webhooks create is in registry");
+    with_typed_error_context(op, globals, || {
+        if args.secret_output.as_deref() == Some("-") {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "Refusing to write webhook secret to stdout; use a file path for --secret-output",
+            )));
+        }
+        let spec = build_websets_webhooks_create_spec(args, globals)?;
+        let extra_warnings = websets_webhook_secret_warnings(args);
+        if globals.print_request || globals.dry_run {
+            return dispatch_typed_preview_with_warnings(
+                spec,
+                globals,
+                pretty,
+                TypedDispatchOptions::default(),
+                &extra_warnings,
+            );
+        }
+        if globals.raw {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`--raw` cannot be combined with `websets webhooks create`; create responses can include one-time webhook secrets",
+                )
+                .with_suggestion("Use `--secret-output FILE` and the default JSON envelope."),
+            ));
+        }
+        let secret_output = args
+            .secret_output
+            .as_deref()
+            .map(reserve_webhook_secret_file)
+            .transpose()?;
+        dispatch_websets_webhooks_create_live(spec, secret_output, globals, pretty, extra_warnings)
+    })
+}
+
+fn dispatch_websets_webhooks_list(
+    pagination: &PaginationArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "list"])
+        .expect("websets webhooks list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let query = pagination_query(pagination);
+        if pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None, &[])
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn dispatch_websets_webhooks_get(
+    webhook_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "get"])
+        .expect("websets webhooks get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn build_websets_webhooks_update_named_body(args: &WebsetsWebhooksUpdateArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(url) = &args.url {
+        body.insert("url".to_string(), serde_json::Value::String(url.clone()));
+    }
+    if !args.events.is_empty() {
+        body.insert(
+            "events".to_string(),
+            serde_json::Value::Array(
+                args.events
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::Value::Object(body)
+}
+
+fn build_websets_webhooks_update_spec(
+    args: &WebsetsWebhooksUpdateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "update"])
+        .expect("websets webhooks update is in registry");
+    let body = build_websets_webhooks_update_named_body(args);
+    let body = apply_request_overrides(body, globals)?;
+    if body.as_object().is_some_and(|object| object.is_empty()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "websets webhooks update requires at least one field via --url/--event, --body, or --set",
+            )
+            .with_suggestion(
+                "exa-agent websets webhooks update <id> --url https://example.com/new-hook",
+            ),
+        ));
+    }
+    if body.get("events").is_some() && !websets_webhook_events_are_valid(&body) {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            "websets webhooks update events must be a non-empty array of non-empty strings when provided",
+        )));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_websets_webhooks_update(
+    webhook_id: &str,
+    args: &WebsetsWebhooksUpdateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "update"])
+        .expect("websets webhooks update is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_webhooks_update_spec(args, globals)?;
+        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_webhooks_delete(
+    webhook_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "delete"])
+        .expect("websets webhooks delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!(
+                "Refusing to delete webhook `{webhook_id}` without `--yes`; preview first with `websets webhooks get`"
+            ),
+            format!("exa-agent websets webhooks delete {webhook_id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn websets_webhook_attempts_list_static_query(
+    args: &WebsetsWebhookAttemptsListArgs,
+) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    if let Some(event_type) = &args.event_type {
+        query.push(("eventType".to_string(), event_type.clone()));
+    }
+    if let Some(successful) = args.successful {
+        query.push(("successful".to_string(), successful.to_string()));
+    }
+    query
+}
+
+fn dispatch_websets_webhook_attempts_list(
+    webhook_id: &str,
+    args: &WebsetsWebhookAttemptsListArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "webhooks", "attempts", "list"])
+        .expect("websets webhooks attempts list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(&args.pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        let static_query = websets_webhook_attempts_list_static_query(args);
+        let query = merge_static_and_pagination_query(&static_query, &args.pagination);
+        if args.pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                &args.pagination,
+                Some(path.as_str()),
+                &static_query,
+            )
+        } else {
+            dispatch_typed_command_routed(
+                spec,
+                globals,
+                pretty,
+                Some(path.as_str()),
+                &query,
+                false,
+                None,
+            )
+        }
+    })
+}
+
+fn dispatch_websets_webhooks(
+    sub: &cli::WebsetsWebhooksCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    use cli::WebsetsWebhooksCmd;
+    match sub {
+        WebsetsWebhooksCmd::Create(args) => dispatch_websets_webhooks_create(args, globals, pretty),
+        WebsetsWebhooksCmd::List(pagination) => {
+            dispatch_websets_webhooks_list(pagination, globals, pretty)
+        }
+        WebsetsWebhooksCmd::Get { webhook_id } => {
+            dispatch_websets_webhooks_get(webhook_id, globals, pretty)
+        }
+        WebsetsWebhooksCmd::Update { webhook_id, args } => {
+            dispatch_websets_webhooks_update(webhook_id, args, globals, pretty)
+        }
+        WebsetsWebhooksCmd::Delete { webhook_id } => {
+            dispatch_websets_webhooks_delete(webhook_id, globals, pretty)
+        }
+        WebsetsWebhooksCmd::Attempts { sub } => match sub {
+            cli::WebsetsWebhookAttemptsCmd::List { webhook_id, args } => {
+                dispatch_websets_webhook_attempts_list(webhook_id, args, globals, pretty)
+            }
+        },
+    }
 }
 
 fn dispatch_typed_preview_with_warnings(

@@ -771,16 +771,94 @@ pub enum WebsetsImportsCmd {
     Delete { import_id: String },
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetMonitorSearchBehavior {
+    Override,
+    Append,
+}
+
+impl WebsetMonitorSearchBehavior {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetMonitorSearchBehavior::Override => "override",
+            WebsetMonitorSearchBehavior::Append => "append",
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetMonitorStatus {
+    Enabled,
+    Disabled,
+}
+
+impl WebsetMonitorStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetMonitorStatus::Enabled => "enabled",
+            WebsetMonitorStatus::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WebsetsMonitorsCreateArgs {
+    #[arg(long = "webset-id")]
+    pub webset_id: Option<String>,
+    #[arg(long)]
+    pub cron: Option<String>,
+    #[arg(long)]
+    pub timezone: Option<String>,
+    #[arg(long)]
+    pub query: Option<String>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub count: Option<u32>,
+    #[arg(long)]
+    pub criteria: Vec<String>,
+    #[arg(long = "search-behavior", value_enum, ignore_case = true)]
+    pub search_behavior: Option<WebsetMonitorSearchBehavior>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WebsetsMonitorsListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    #[arg(long = "webset-id")]
+    pub webset_id: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WebsetsMonitorsUpdateArgs {
+    #[arg(long, value_enum, ignore_case = true)]
+    pub status: Option<WebsetMonitorStatus>,
+    #[arg(long)]
+    pub cron: Option<String>,
+    #[arg(long)]
+    pub timezone: Option<String>,
+    #[arg(long)]
+    pub query: Option<String>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub count: Option<u32>,
+    #[arg(long = "search-behavior", value_enum, ignore_case = true)]
+    pub search_behavior: Option<WebsetMonitorSearchBehavior>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum WebsetsMonitorsCmd {
     /// POST /v0/monitors [create-POST].
-    Create,
+    Create(WebsetsMonitorsCreateArgs),
     /// GET /v0/monitors.
-    List(PaginationArgs),
+    List(WebsetsMonitorsListArgs),
     /// GET /v0/monitors/{id}.
     Get { monitor_id: String },
     /// PATCH /v0/monitors/{id}.
-    Update { monitor_id: String },
+    Update {
+        monitor_id: String,
+        #[command(flatten)]
+        args: WebsetsMonitorsUpdateArgs,
+    },
     /// DELETE /v0/monitors/{id}.
     Delete { monitor_id: String },
     /// Monitor runs under Websets monitors.
@@ -802,31 +880,68 @@ pub enum WebsetsMonitorRunsCmd {
     Get { monitor_id: String, run_id: String },
 }
 
+#[derive(Args, Debug, Default)]
+pub struct WebsetsEventsListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    #[arg(long = "type")]
+    pub types: Vec<String>,
+    #[arg(long = "created-before")]
+    pub created_before: Option<String>,
+    #[arg(long = "created-after")]
+    pub created_after: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum WebsetsEventsCmd {
     /// GET /v0/events.
-    List(PaginationArgs),
+    List(WebsetsEventsListArgs),
     /// GET /v0/events/{id}.
     Get { event_id: String },
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WebsetsWebhooksCreateArgs {
+    #[arg(long)]
+    pub url: Option<String>,
+    #[arg(long = "event")]
+    pub events: Vec<String>,
+    #[arg(long)]
+    pub secret_output: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WebsetsWebhooksUpdateArgs {
+    #[arg(long)]
+    pub url: Option<String>,
+    #[arg(long = "event")]
+    pub events: Vec<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WebsetsWebhookAttemptsListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    #[arg(long = "event-type")]
+    pub event_type: Option<String>,
+    #[arg(long)]
+    pub successful: Option<bool>,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsWebhooksCmd {
     /// POST /v0/webhooks [create-POST].
-    Create {
-        #[arg(long)]
-        url: Option<String>,
-        #[arg(long)]
-        event: Option<String>,
-        #[arg(long)]
-        secret_output: Option<String>,
-    },
+    Create(WebsetsWebhooksCreateArgs),
     /// GET /v0/webhooks.
     List(PaginationArgs),
     /// GET /v0/webhooks/{id}.
     Get { webhook_id: String },
     /// PATCH /v0/webhooks/{id}.
-    Update { webhook_id: String },
+    Update {
+        webhook_id: String,
+        #[command(flatten)]
+        args: WebsetsWebhooksUpdateArgs,
+    },
     /// DELETE /v0/webhooks/{id}.
     Delete { webhook_id: String },
     /// Webhook delivery attempts.
@@ -842,7 +957,7 @@ pub enum WebsetsWebhookAttemptsCmd {
     List {
         webhook_id: String,
         #[command(flatten)]
-        pagination: PaginationArgs,
+        args: WebsetsWebhookAttemptsListArgs,
     },
 }
 
@@ -1152,7 +1267,7 @@ pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
             WebsetsImportsCmd::Delete { .. } => "websets imports delete".to_string(),
         },
         WebsetsCmd::Monitors { sub } => match sub {
-            WebsetsMonitorsCmd::Create => "websets monitors create".to_string(),
+            WebsetsMonitorsCmd::Create(_) => "websets monitors create".to_string(),
             WebsetsMonitorsCmd::List(_) => "websets monitors list".to_string(),
             WebsetsMonitorsCmd::Get { .. } => "websets monitors get".to_string(),
             WebsetsMonitorsCmd::Update { .. } => "websets monitors update".to_string(),

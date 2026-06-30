@@ -109,6 +109,13 @@ fn temp_path(name: &str) -> PathBuf {
     dir
 }
 
+fn closed_local_base_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}")
+}
+
 fn http_request_lengths(buf: &[u8]) -> Option<(usize, usize)> {
     let header_end = buf.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
     let headers = String::from_utf8_lossy(&buf[..header_end]);
@@ -2482,6 +2489,68 @@ fn monitor_create_secret_output_refuses_stdout() {
 }
 
 #[test]
+fn monitor_create_raw_is_rejected_for_secret_safety() {
+    let output = run(&[
+        "monitor",
+        "create",
+        "--query",
+        "AI news",
+        "--webhook-url",
+        "https://example.com/hook",
+        "--raw",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+}
+
+fn assert_pending_record(path: &std::path::Path, command: &str, api_path: &str) {
+    let raw = fs::read_to_string(path).expect("pending run file");
+    let lines: Vec<_> = raw.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let record: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(record["schema"], "exa.cli.pending_run.v1");
+    assert_eq!(record["command"], command);
+    assert_eq!(record["apiPath"], api_path);
+    assert!(record["requestId"]
+        .as_str()
+        .is_some_and(|request_id| request_id.starts_with("req_")));
+    assert_eq!(
+        record["recoveryCommand"],
+        format!("exa-agent {command} --idempotency-key <stable-key>")
+    );
+}
+
+#[test]
+fn monitor_create_ambiguous_failure_records_pending_run() {
+    let dir = temp_path("monitor-create-pending");
+    let pending_path = dir.join("pending-runs.jsonl");
+    let pending_path_string = pending_path.to_string_lossy().into_owned();
+    let base_url = closed_local_base_url();
+    let output = run_with_env(
+        &[
+            "monitor",
+            "create",
+            "--query",
+            "pending recovery",
+            "--webhook-url",
+            "https://example.com/hook",
+            "--base-url",
+            base_url.as_str(),
+            "--api-key",
+            "test-key-abcdef12",
+            "--compact",
+        ],
+        &[("EXA_AGENT_PENDING_RUNS", pending_path_string.as_str())],
+    );
+    assert!(!output.status.success());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
+    assert_pending_record(&pending_path, "monitor create", "/monitors");
+}
+
+#[test]
 fn parse_websets_representative_nested() {
     assert_path(
         &[
@@ -3207,10 +3276,738 @@ fn websets_monitors_remain_distinct_from_top_level_monitor() {
     let top_level = run_ok_json(&["monitor", "list", "--dry-run", "--compact"]);
     assert_eq!(top_level["data"]["request"]["path"], "/monitors");
 
-    let websets_monitors = run(&["websets", "monitors", "list", "--dry-run", "--compact"]);
-    assert_eq!(websets_monitors.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&websets_monitors.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "not_implemented");
+    let websets_monitors = run_ok_json(&["websets", "monitors", "list", "--dry-run", "--compact"]);
+    assert_eq!(websets_monitors["command"], "websets monitors list");
+    assert_eq!(websets_monitors["data"]["request"]["path"], "/v0/monitors");
+}
+
+#[test]
+fn websets_monitors_create_update_dry_run_and_validation() {
+    let create = run_ok_json(&[
+        "websets",
+        "monitors",
+        "create",
+        "--webset-id",
+        "ws_abc",
+        "--cron",
+        "0 9 * * 1",
+        "--timezone",
+        "America/New_York",
+        "--query",
+        "new companies",
+        "--count",
+        "10",
+        "--criteria",
+        "must be technical",
+        "--search-behavior",
+        "append",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets monitors create");
+    assert_eq!(create["data"]["request"]["path"], "/v0/monitors");
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["websetId"], "ws_abc");
+    assert_eq!(body["cadence"]["cron"], "0 9 * * 1");
+    assert_eq!(body["cadence"]["timezone"], "America/New_York");
+    assert_eq!(body["behavior"]["type"], "search");
+    assert_eq!(body["behavior"]["config"]["count"], 10);
+    assert_eq!(body["behavior"]["config"]["query"], "new companies");
+    assert_eq!(body["behavior"]["config"]["behavior"], "append");
+    assert_eq!(
+        body["behavior"]["config"]["criteria"][0]["description"],
+        "must be technical"
+    );
+
+    let missing = run(&[
+        "websets",
+        "monitors",
+        "create",
+        "--webset-id",
+        "ws_abc",
+        "--cron",
+        "0 9 * * 1",
+        "--compact",
+    ]);
+    assert_eq!(missing.status.code(), Some(11));
+    let stderr: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let bad_count = run(&[
+        "websets",
+        "monitors",
+        "create",
+        "--webset-id",
+        "ws_abc",
+        "--cron",
+        "0 9 * * 1",
+        "--count",
+        "0",
+        "--compact",
+    ]);
+    assert_eq!(bad_count.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&bad_count.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let body_missing_behavior_type = run(&[
+        "websets",
+        "monitors",
+        "create",
+        "--body",
+        r#"{"websetId":"ws_abc","cadence":{"cron":"0 9 * * 1"},"behavior":{"config":{"count":1}}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(body_missing_behavior_type.status.code(), Some(11));
+    let stderr: serde_json::Value =
+        serde_json::from_slice(&body_missing_behavior_type.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let body_empty_behavior_type = run(&[
+        "websets",
+        "monitors",
+        "create",
+        "--body",
+        r#"{"websetId":"ws_abc","cadence":{"cron":"0 9 * * 1"},"behavior":{"type":"","config":{"count":1}}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(body_empty_behavior_type.status.code(), Some(11));
+    let stderr: serde_json::Value =
+        serde_json::from_slice(&body_empty_behavior_type.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let update = run_ok_json(&[
+        "websets",
+        "monitors",
+        "update",
+        "mon_abc",
+        "--status",
+        "disabled",
+        "--cron",
+        "0 14 * * *",
+        "--count",
+        "5",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(update["command"], "websets monitors update");
+    assert_eq!(update["data"]["request"]["path"], "/v0/monitors/mon_abc");
+    let body = &update["data"]["request"]["body"];
+    assert_eq!(body["status"], "disabled");
+    assert_eq!(body["cadence"]["cron"], "0 14 * * *");
+    assert_eq!(body["behavior"]["config"]["count"], 5);
+
+    let empty_update = run(&["websets", "monitors", "update", "mon_abc", "--compact"]);
+    assert_eq!(empty_update.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&empty_update.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let behavior_without_count = run(&[
+        "websets",
+        "monitors",
+        "update",
+        "mon_abc",
+        "--query",
+        "fresh companies",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(behavior_without_count.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&behavior_without_count.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let cadence_without_cron = run(&[
+        "websets",
+        "monitors",
+        "update",
+        "mon_abc",
+        "--timezone",
+        "America/New_York",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(cadence_without_cron.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&cadence_without_cron.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let delete_live = run(&["websets", "monitors", "delete", "mon_abc", "--compact"]);
+    assert_eq!(delete_live.status.code(), Some(9));
+
+    let runs_list = run_ok_json(&[
+        "websets",
+        "monitors",
+        "runs",
+        "list",
+        "mon_abc",
+        "--limit",
+        "5",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(runs_list["command"], "websets monitors runs list");
+    assert_eq!(
+        runs_list["data"]["request"]["path"],
+        "/v0/monitors/mon_abc/runs"
+    );
+    assert_eq!(
+        runs_list["data"]["request"]["query"],
+        serde_json::json!([{"name": "limit", "value": "5"}])
+    );
+
+    let runs_get = run_ok_json(&[
+        "websets",
+        "monitors",
+        "runs",
+        "get",
+        "mon_abc",
+        "run_xyz",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        runs_get["data"]["request"]["path"],
+        "/v0/monitors/mon_abc/runs/run_xyz"
+    );
+}
+
+#[test]
+fn websets_events_list_filters_dry_run() {
+    let list = run_ok_json(&[
+        "websets",
+        "events",
+        "list",
+        "--limit",
+        "10",
+        "--type",
+        "webset.created",
+        "--type",
+        "monitor.created",
+        "--created-before",
+        "2026-06-01T00:00:00Z",
+        "--created-after",
+        "2026-05-01T00:00:00Z",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "websets events list");
+    assert_eq!(list["data"]["request"]["path"], "/v0/events");
+    let query = list["data"]["request"]["query"].as_array().unwrap();
+    assert!(query
+        .iter()
+        .any(|entry| { entry["name"] == "types" && entry["value"] == "webset.created" }));
+    assert!(query
+        .iter()
+        .any(|entry| { entry["name"] == "types" && entry["value"] == "monitor.created" }));
+    assert!(query.iter().any(|entry| {
+        entry["name"] == "createdBefore" && entry["value"] == "2026-06-01T00:00:00Z"
+    }));
+    assert!(query.iter().any(|entry| {
+        entry["name"] == "createdAfter" && entry["value"] == "2026-05-01T00:00:00Z"
+    }));
+    assert!(query
+        .iter()
+        .any(|entry| entry["name"] == "limit" && entry["value"] == "10"));
+
+    let get = run_ok_json(&[
+        "websets",
+        "events",
+        "get",
+        "evt_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(get["data"]["request"]["path"], "/v0/events/evt_abc");
+}
+
+fn local_paginated_websets_events_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"evt_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"evt_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => {
+                        panic!("failed to accept local events pagination test request: {err}")
+                    }
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with(
+                        "GET /v0/events?types=webset.created&createdAfter=2026-01-01&limit=1 "
+                    ),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with(
+                        "GET /v0/events?types=webset.created&createdAfter=2026-01-01&limit=1&cursor=cur2 "
+                    ),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn websets_events_list_all_preserves_filters_across_pages() {
+    let (base_url, server) = local_paginated_websets_events_server();
+    let output = run_owned(&[
+        "websets".into(),
+        "events".into(),
+        "list".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--type".into(),
+        "webset.created".into(),
+        "--created-after".into(),
+        "2026-01-01".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets events pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn local_paginated_websets_monitors_list_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"mon_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"mon_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => {
+                        panic!("failed to accept local monitors pagination test request: {err}")
+                    }
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with("GET /v0/monitors?websetId=ws_abc&limit=1 "),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with("GET /v0/monitors?websetId=ws_abc&limit=1&cursor=cur2 "),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn websets_monitors_list_all_preserves_webset_id_filter_across_pages() {
+    let (base_url, server) = local_paginated_websets_monitors_list_server();
+    let output = run_owned(&[
+        "websets".into(),
+        "monitors".into(),
+        "list".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--webset-id".into(),
+        "ws_abc".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets monitors pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn websets_webhooks_create_update_delete_dry_run_and_secret_output() {
+    let create = run_ok_json(&[
+        "websets",
+        "webhooks",
+        "create",
+        "--url",
+        "https://example.com/hook",
+        "--event",
+        "webset.item.created",
+        "--event",
+        "monitor.created",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets webhooks create");
+    assert_eq!(create["data"]["request"]["path"], "/v0/webhooks");
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["url"], "https://example.com/hook");
+    assert_eq!(body["events"][0], "webset.item.created");
+    assert_eq!(body["events"][1], "monitor.created");
+    assert!(create["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "webhook_secret_ephemeral"));
+
+    let missing = run(&[
+        "websets",
+        "webhooks",
+        "create",
+        "--url",
+        "https://example.com/hook",
+        "--compact",
+    ]);
+    assert_eq!(missing.status.code(), Some(11));
+
+    let empty_events_body = run(&[
+        "websets",
+        "webhooks",
+        "create",
+        "--body",
+        r#"{"url":"https://example.com/hook","events":[]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(empty_events_body.status.code(), Some(11));
+
+    let update = run_ok_json(&[
+        "websets",
+        "webhooks",
+        "update",
+        "wh_abc",
+        "--url",
+        "https://example.com/new-hook",
+        "--event",
+        "webset.created",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(update["data"]["request"]["path"], "/v0/webhooks/wh_abc");
+    assert_eq!(
+        update["data"]["request"]["body"]["url"],
+        "https://example.com/new-hook"
+    );
+
+    let empty_update_events = run(&[
+        "websets",
+        "webhooks",
+        "update",
+        "wh_abc",
+        "--body",
+        r#"{"events":[]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(empty_update_events.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&empty_update_events.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let delete_live = run(&["websets", "webhooks", "delete", "wh_abc", "--compact"]);
+    assert_eq!(delete_live.status.code(), Some(9));
+
+    let attempts = run_ok_json(&[
+        "websets",
+        "webhooks",
+        "attempts",
+        "list",
+        "wh_abc",
+        "--limit",
+        "5",
+        "--event-type",
+        "webset.created",
+        "--successful",
+        "true",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        attempts["data"]["request"]["path"],
+        "/v0/webhooks/wh_abc/attempts"
+    );
+    let query = attempts["data"]["request"]["query"].as_array().unwrap();
+    assert!(query
+        .iter()
+        .any(|entry| { entry["name"] == "eventType" && entry["value"] == "webset.created" }));
+    assert!(query
+        .iter()
+        .any(|entry| { entry["name"] == "successful" && entry["value"] == "true" }));
+}
+
+fn local_paginated_websets_webhook_attempts_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"attempt_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"attempt_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => {
+                        panic!(
+                            "failed to accept local webhook attempts pagination test request: {err}"
+                        )
+                    }
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with(
+                        "GET /v0/webhooks/wh_abc/attempts?eventType=webset.created&successful=false&limit=1 "
+                    ),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with(
+                        "GET /v0/webhooks/wh_abc/attempts?eventType=webset.created&successful=false&limit=1&cursor=cur2 "
+                    ),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn websets_webhook_attempts_list_all_preserves_filters_across_pages() {
+    let (base_url, server) = local_paginated_websets_webhook_attempts_server();
+    let output = run_owned(&[
+        "websets".into(),
+        "webhooks".into(),
+        "attempts".into(),
+        "list".into(),
+        "wh_abc".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--event-type".into(),
+        "webset.created".into(),
+        "--successful".into(),
+        "false".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets webhook attempts pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn websets_webhooks_create_live_captures_secret_and_redacts_stdout() {
+    let response = br#"{"id":"wh_test","secret":"whsec_websets_capture_12345"}"#;
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /v0/webhooks "));
+        },
+        response,
+    );
+    let secret_path = temp_path("websets-webhook-secret").join("secret.txt");
+    let output = run_owned(&[
+        "websets".into(),
+        "webhooks".into(),
+        "create".into(),
+        "--url".into(),
+        "https://example.com/hook".into(),
+        "--event".into(),
+        "webset.item.created".into(),
+        "--secret-output".into(),
+        secret_path.to_string_lossy().into_owned(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets webhook create server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(!stdout.contains("whsec_websets_capture_12345"));
+    assert!(stdout.contains("<redacted>"));
+    let secret = fs::read_to_string(&secret_path).expect("secret file");
+    assert_eq!(secret, "whsec_websets_capture_12345");
+}
+
+#[test]
+fn websets_webhooks_create_secret_output_requires_secret_field() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /v0/webhooks "));
+        },
+        br#"{"id":"wh_test"}"#,
+    );
+    let secret_path = temp_path("websets-webhook-secret-missing").join("secret.txt");
+    let output = run_owned(&[
+        "websets".into(),
+        "webhooks".into(),
+        "create".into(),
+        "--url".into(),
+        "https://example.com/hook".into(),
+        "--event".into(),
+        "webset.item.created".into(),
+        "--secret-output".into(),
+        secret_path.to_string_lossy().into_owned(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets webhook create server panicked");
+    assert!(!output.status.success());
+    assert!(!secret_path.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("secret"));
+}
+
+#[test]
+fn websets_webhooks_create_raw_is_rejected_for_secret_safety() {
+    let output = run(&[
+        "websets",
+        "webhooks",
+        "create",
+        "--url",
+        "https://example.com/hook",
+        "--event",
+        "webset.item.created",
+        "--raw",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+}
+
+#[test]
+fn websets_webhooks_create_ambiguous_failure_records_pending_run() {
+    let dir = temp_path("websets-webhook-create-pending");
+    let pending_path = dir.join("pending-runs.jsonl");
+    let pending_path_string = pending_path.to_string_lossy().into_owned();
+    let base_url = closed_local_base_url();
+    let output = run_with_env(
+        &[
+            "websets",
+            "webhooks",
+            "create",
+            "--url",
+            "https://example.com/hook",
+            "--event",
+            "webset.item.created",
+            "--base-url",
+            base_url.as_str(),
+            "--api-key",
+            "test-key-abcdef12",
+            "--compact",
+        ],
+        &[("EXA_AGENT_PENDING_RUNS", pending_path_string.as_str())],
+    );
+    assert!(!output.status.success());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
+    assert_pending_record(&pending_path, "websets webhooks create", "/v0/webhooks");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 4B complete; next wave is 4C websets webhooks/events/closeout.
+Status: Wave 4C complete; next wave is 5 Admin keys.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint before Wave 4B was `5ca5f18`.
+  `70ac1ad`; latest committed checkpoint before Wave 4C was `498e34d`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -51,6 +51,10 @@ Codex owns updates.
   Websets core/items/searches/enrichments/imports dispatch, OpenAPI-aligned
   preview/search/import request shaping, destructive Websets safety guards,
   filter-preserving Websets pagination, and Phase 4 Websets gate coverage.
+  Wave 4C adds Websets monitors/events/webhooks/attempts dispatch, Websets
+  monitor body validation, event/webhook-attempt filter-preserving pagination,
+  webhook secret capture, pending-run recovery and raw-output safety for
+  secret-capturing creates, and Phase 4 Websets closeout.
 
 ## Pre-run checklist
 
@@ -80,7 +84,7 @@ Codex owns updates.
 | 3B SSE/SIGINT/pagination | complete | native SSE/interrupt lane + Delegate Cursor Composer mechanical gate/test lane + parent integration | native found Phase 3 lock gaps, partial-id resume bug, NDJSON write-failure gap; fixed; final re-review clean | Delegate Cursor safe found callback/write-failure resume bug; fixed; Delegate Grok safe returned only a progress line and was replaced per updated lane policy | `cargo xtask phase-gate 3` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 4A Monitors | complete | native checklist + Delegate Cursor Composer implementation + parent integration | found/fixed secret-output preflight, final-path reservation, post-write deletion, missing-secret, and narrow refactor issues; final reviews clean | Delegate Grok safe found/fixed non-boolean batch `dry_run` bypass and confirmed final fixes; one post-CI Grok run returned only progress output | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 4B Websets core | complete in working tree | native checklist + Delegate Cursor Composer implementation + parent integration; Grok xtask lane no-op | found/fixed preview `search=true`, imports update fixture, item pagination test gap, and count range validation; final re-review approved | Delegate Grok safe review returned only progress output; recorded as partial/no-op under current lane policy | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; tracked/diff secret scan pass |
-| 4C Websets webhooks/events/closeout | not started | - | - | - | - |
+| 4C Websets webhooks/events/closeout | complete in working tree | native checklist + Delegate Cursor Composer implementation + parent integration; Grok review lanes no-op/partial | found/fixed monitor create `behavior.type` validation; final re-reviews approved | Claude phase review found/fixed secret-create pending-run recovery, raw rejection, and pagination test gaps; Delegate Grok returned progress/cancelled output | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; tracked/diff secret scan pass |
 | 5 Admin keys | not started | - | - | - | - |
 | 6 Ergonomics/smoke/release | not started | - | - | - | - |
 
@@ -160,6 +164,11 @@ Record every review finding that is not immediately fixed.
 | 4B | native review | low | `websets items list --all --source-id` did not have filter-preserving pagination coverage | fixed | Added local two-page HTTP regression asserting `sourceId` remains on every cursor request. |
 | 4B | native re-review | low | Websets `--count` flags accepted OpenAPI-invalid ranges | fixed | Added clap range parsers for create/searches count `>=1` and preview count `1..=10`; invalid-count regressions assert structured `invalid_value`. |
 | 4B | Delegate Grok safe | low | Wave 4B Grok review returned only progress output | accepted for now | Native re-review approved after fixes and all local gates passed; progress-only Grok result recorded under current lane policy. |
+| 4C | native review | medium | `websets monitors create --body` accepted missing/empty `behavior.type` even though the final body contract requires it | fixed | Removed implicit default fallback from final-body validation and added missing/empty `behavior.type` regressions. |
+| 4C | Claude phase review | medium | Secret-capturing create paths bypassed pending-run recovery on ambiguous POST failures | fixed | Wrapped both `monitor create` and `websets webhooks create` custom live paths with `maybe_record_pending_run_on_create_failure`; added pending-run CLI regressions. |
+| 4C | Claude phase review | low | Secret-capturing create paths silently ignored live `--raw` | fixed | Reject live `--raw` with `invalid_flag_combination` for `monitor create` and `websets webhooks create`; regressions added. |
+| 4C | Claude phase review | low | Events and webhook-attempt `--all` static filters lacked direct across-page regressions | fixed | Added local two-page tests for events `types`/`createdAfter` and attempts `eventType`/`successful`. |
+| 4C | Delegate Grok safe | low | Grok review lanes returned progress-only/cancelled output after tool errors | accepted for now | Native and Claude reviews found/fixed actionable issues; final native re-review and gates pass. |
 
 ## Gate log
 
@@ -259,6 +268,16 @@ Record every review finding that is not immediately fixed.
 | 2026-06-30 | `cargo xtask phase-gate 4` | pass | Full workspace tests plus monitor and Websets dry-run smokes; monitor slice 17 tests, Websets slice 10 tests |
 | 2026-06-30 | `cargo xtask ci` | pass | Wave 4B final gate: fmt, clippy, full workspace tests |
 | 2026-06-30 | non-printing tracked/diff secret scan | pass | Stored API key absent from tracked files and working diff |
+| 2026-06-30 | native Wave 4C checklist (`019f1657...`) | pass | Mapped monitors/events/webhooks/attempts contract, secret field, query names, and pagination/safety traps |
+| 2026-06-30 | Delegate Cursor Composer worktree (`cursor-16`) | pass | Implemented initial Wave 4C Websets monitors/events/webhooks diff in isolated worktree; parent reviewed, hardened, and integrated |
+| 2026-06-30 | Delegate Grok Wave 4C safe reviews (`grok-11`, `grok-12`) | partial | Returned progress-only/cancelled output after tool errors; no actionable review signal |
+| 2026-06-30 | native Wave 4C reviews (`019f1660...`) | findings fixed | Found/fixed monitor create `behavior.type` validation; final re-reviews approved Claude-finding fixes |
+| 2026-06-30 | Claude Wave 4C phase review (`claude`) | findings fixed | Found/fixed pending-run recovery and raw rejection for secret-capturing creates plus direct pagination test gaps |
+| 2026-06-30 | `cargo test --test cli monitor_create_ -- --nocapture` | pass | 10 monitor-create tests including pending-run and raw-rejection regressions |
+| 2026-06-30 | `cargo test --test cli websets_ -- --nocapture` | pass | 20 Websets tests covering Wave 4C monitors/events/webhooks/attempts, secret capture, pending-run, and static-filter pagination |
+| 2026-06-30 | `cargo xtask phase-gate 4` | pass | Full workspace tests plus monitor/Websets Phase 4 smokes; monitor slice 21 tests, Websets slice 20 tests |
+| 2026-06-30 | `cargo xtask ci` | fail then pass | Initial clippy `nonminimal_bool` failure fixed; final fmt, clippy, and full workspace tests pass |
+| 2026-06-30 | `delegate worktree remove cursor-16 --discard-uncommitted` | pass | Integrated Cursor worktree removed through Delegate manager; no present Delegate worktrees |
 
 ## Local commit log
 
@@ -275,7 +294,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `45d1860` | Wave 3A Agent run lifecycle, rich Agent create body fields, event replay validation, delete confirmation, and pending-run JSONL recovery contract | `cargo xtask ci`; `cargo xtask phase-gate 3`; native + GLM final-final reviews clean; branch-wide secret scan pass |
 | 2026-06-30 | `b707df5` | Wave 3B blocking SSE streaming, SIGINT/resume metadata, raw/NDJSON/human progressive stream output, Agent pagination and pending-run locks, and updated lane policy | `cargo xtask phase-gate 3`; `cargo xtask ci`; native + Delegate Cursor reviews clean; branch-wide secret scan pass |
 | 2026-06-30 | `5ca5f18` | Wave 4A top-level monitor command family, webhook secret capture, filter-preserving monitor pagination, batch/delete safety, and Phase 4 monitor gate | `cargo xtask phase-gate 4`; `cargo xtask ci`; native + Delegate Grok reviews clean/recorded; branch-wide secret scan pass |
-| 2026-06-30 | this commit | Wave 4B Websets core/items/searches/enrichments/imports, preview activation, Websets pagination, import validation, safety gates, and Phase 4 Websets gate | `cargo xtask phase-gate 4`; `cargo xtask ci`; native review approved; Delegate Grok progress-only recorded; tracked/diff secret scan pass |
+| 2026-06-30 | `498e34d` | Wave 4B Websets core/items/searches/enrichments/imports, preview activation, Websets pagination, import validation, safety gates, and Phase 4 Websets gate | `cargo xtask phase-gate 4`; `cargo xtask ci`; native review approved; Delegate Grok progress-only recorded; tracked/diff secret scan pass |
+| 2026-06-30 | this commit | Wave 4C Websets monitors/events/webhooks/attempts, webhook secret capture, secret-create pending-run recovery/raw safety, and Phase 4 closeout | `cargo xtask phase-gate 4`; `cargo xtask ci`; native + Claude reviews clean; Delegate Grok partial/no-op recorded; tracked/diff secret scan pass |
 
 ## Final completion checklist
 

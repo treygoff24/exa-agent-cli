@@ -1,0 +1,51 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "websets searches create",
+  "operation": {
+    "method": "POST",
+    "path": "/v0/websets/webset_abc123/searches",
+    "operationId": "websets-searches-create",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/v0/websets/webset_abc123/searches",
+      "query": [],
+      "body": {
+        "query": "founders",
+        "count": 25,
+        "criteria": [
+          {
+            "description": "has email"
+          }
+        ]
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:7d5b74ea1ddd62620070cece0467cfebd214a03579336545695e70fafadcba6c",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

@@ -1,0 +1,43 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "monitor trigger",
+  "operation": {
+    "method": "POST",
+    "path": "/monitors/monitor_abc123/trigger",
+    "operationId": "triggerMonitor",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/monitors/monitor_abc123/trigger",
+      "query": [],
+      "body": {}
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:ee25f785c4fdb09d3da008b493b19b185acafa4942353f5b23c5b79e9d22c776",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

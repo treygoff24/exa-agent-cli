@@ -1,0 +1,43 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "admin keys get",
+  "operation": {
+    "method": "GET",
+    "path": "/api-keys/api_key_abc123",
+    "operationId": "get-api-key",
+    "source": "team-management.json",
+    "sourceVersion": "1.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "GET",
+      "path": "/api-keys/api_key_abc123",
+      "query": [],
+      "body": null
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:9fd49ebc4f93eef4ed6a0075bd3d8599af380403188027e9b9d76442ff9ad06c",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

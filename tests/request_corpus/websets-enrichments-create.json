@@ -1,0 +1,46 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "websets enrichments create",
+  "operation": {
+    "method": "POST",
+    "path": "/v0/websets/webset_abc123/enrichments",
+    "operationId": "websets-enrichments-create",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/v0/websets/webset_abc123/enrichments",
+      "query": [],
+      "body": {
+        "description": "Company size",
+        "format": "number"
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:e22d0307b1e0267cadcd8023e11bd2f0e899b3ddaf4b6ce3804a268d6415b2f2",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

@@ -1,0 +1,52 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "websets monitors list",
+  "operation": {
+    "method": "GET",
+    "path": "/v0/monitors",
+    "operationId": "monitors-list",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "GET",
+      "path": "/v0/monitors",
+      "query": [
+        {
+          "name": "websetId",
+          "value": "webset_abc123"
+        },
+        {
+          "name": "limit",
+          "value": "5"
+        }
+      ],
+      "body": null
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:34b4834d48ec9b557247e6e21e8005a0e7b67aa71940e6c88150a8ef53db8b1a",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

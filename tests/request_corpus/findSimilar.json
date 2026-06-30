@@ -1,0 +1,52 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "similar",
+  "operation": {
+    "method": "POST",
+    "path": "/findSimilar",
+    "operationId": "findSimilar",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/findSimilar",
+      "query": [],
+      "body": {
+        "url": "https://example.com",
+        "numResults": 3
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:8b907bd59a309a979691f74787e18465091b5c2993366862137b012a1bc4b710",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [
+    {
+      "code": "deprecated_upstream",
+      "message": "POST /findSimilar is deprecated upstream; prefer exa-agent search with a query describing the source URL.",
+      "replacement": "exa-agent search \"pages similar to <url>\" --num-results N"
+    }
+  ],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

@@ -1,0 +1,15 @@
+# Predeclared request-corpus golden diffs.
+#
+# Add one entry only when a later refactor intentionally changes a request shape:
+#
+# [[diffs]]
+# operationId = "search"
+# json_pointer = "/data/request/body/numResults"
+# phase = "phase-1"
+# reason = "registry builder now canonicalizes the default explicitly"
+# after = 10          # MANDATORY: pins the exact new value (an allowance with no `after` is
+#                     #   rejected at load time — a value-blind wildcard is forbidden, and a
+#                     #   pinned `after` auto-expires the moment the value changes again).
+# before = 5          # optional: when given, must equal the exact prior value.
+#
+# Empty by design: Phase 0b accepts zero request-shape drift.

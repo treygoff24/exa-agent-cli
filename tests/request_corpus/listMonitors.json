@@ -1,0 +1,52 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "monitor list",
+  "operation": {
+    "method": "GET",
+    "path": "/monitors",
+    "operationId": "listMonitors",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "GET",
+      "path": "/monitors",
+      "query": [
+        {
+          "name": "status",
+          "value": "active"
+        },
+        {
+          "name": "limit",
+          "value": "5"
+        }
+      ],
+      "body": null
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:e401eca767025ef699be31237858528a9e251a0f46ffc94c531286e4a72ee179",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

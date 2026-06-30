@@ -1,0 +1,207 @@
+# Frozen request-preview corpus manifest.
+# Each argv is the canonical operation-specific vector; tests append --dry-run --print-request.
+# Values are generated from the current typed handlers and use realistic non-placeholder ids.
+
+[ops.cancelAgentRun]
+argv = ["agent", "runs", "cancel", "run_abc123"]
+
+[ops.createAgentRun]
+argv = ["agent", "runs", "create", "Research AI regulations", "--effort", "low"]
+
+[ops.deleteAgentRun]
+argv = ["agent", "runs", "delete", "run_abc123", "--yes"]
+
+[ops.listAgentRunEvents]
+argv = ["agent", "runs", "events", "run_abc123", "--limit", "5"]
+
+[ops.getAgentRun]
+argv = ["agent", "runs", "get", "run_abc123"]
+
+[ops.listAgentRuns]
+argv = ["agent", "runs", "list", "--limit", "5"]
+
+[ops.answer]
+argv = ["answer", "What is Exa?", "--text"]
+
+[ops.getContents]
+argv = ["contents", "https://example.com", "--text"]
+
+[ops.context]
+argv = ["context", "Rust CLI request previews", "--tokens", "1000"]
+
+[ops.batchMonitors]
+argv = ["monitor", "batch", "--body", "{\"action\":\"pause\",\"filter\":{\"status\":\"active\"}}"]
+
+[ops.createMonitor]
+argv = ["monitor", "create", "--name", "daily-ai", "--query", "AI news", "--schedule", "0 9 * * *", "--webhook-url", "https://example.com/hook"]
+
+[ops.deleteMonitor]
+argv = ["monitor", "delete", "monitor_abc123", "--yes"]
+
+[ops.getMonitor]
+argv = ["monitor", "get", "monitor_abc123"]
+
+[ops.listMonitors]
+argv = ["monitor", "list", "--limit", "5", "--status", "active"]
+
+[ops.getRun]
+argv = ["monitor", "runs", "get", "monitor_abc123", "run_abc123"]
+
+[ops.listRuns]
+argv = ["monitor", "runs", "list", "monitor_abc123", "--limit", "5"]
+
+[ops.triggerMonitor]
+argv = ["monitor", "trigger", "monitor_abc123"]
+
+[ops.updateMonitor]
+argv = ["monitor", "update", "monitor_abc123", "--status", "paused"]
+
+[ops.ResearchController_createResearch]
+argv = ["research", "create", "Analyze AI news"]
+
+[ops.ResearchController_getResearch]
+argv = ["research", "get", "research_abc123"]
+
+[ops.ResearchController_listResearch]
+argv = ["research", "list", "--limit", "5"]
+
+[ops.search]
+argv = ["search", "hello world", "--num-results", "5"]
+
+[ops.findSimilar]
+argv = ["similar", "https://example.com", "--num-results", "3"]
+
+[ops.teams-me-get]
+argv = ["team", "info"]
+
+[ops.websets-cancel]
+argv = ["websets", "cancel", "webset_abc123", "--yes"]
+
+[ops.websets-create]
+argv = ["websets", "create", "--query", "SF startups", "--count", "5"]
+
+[ops.websets-delete]
+argv = ["websets", "delete", "webset_abc123", "--yes"]
+
+[ops.websets-enrichments-cancel]
+argv = ["websets", "enrichments", "cancel", "webset_abc123", "enrichment_abc123", "--yes"]
+
+[ops.websets-enrichments-create]
+argv = ["websets", "enrichments", "create", "webset_abc123", "--description", "Company size", "--enrichment-format", "number"]
+
+[ops.websets-enrichments-delete]
+argv = ["websets", "enrichments", "delete", "webset_abc123", "enrichment_abc123", "--yes"]
+
+[ops.websets-enrichments-get]
+argv = ["websets", "enrichments", "get", "webset_abc123", "enrichment_abc123"]
+
+[ops.websets-enrichments-update]
+argv = ["websets", "enrichments", "update", "webset_abc123", "enrichment_abc123", "--description", "Updated company size"]
+
+[ops.events-get]
+argv = ["websets", "events", "get", "event_abc123"]
+
+[ops.events-list]
+argv = ["websets", "events", "list", "--limit", "5", "--type", "webset.created"]
+
+[ops.websets-get]
+argv = ["websets", "get", "webset_abc123"]
+
+[ops.imports-create]
+argv = ["websets", "imports", "create", "--source", "csv", "--body", "{\"size\":1024,\"count\":10,\"entity\":{\"type\":\"company\"}}"]
+
+[ops.imports-delete]
+argv = ["websets", "imports", "delete", "import_abc123", "--yes"]
+
+[ops.imports-get]
+argv = ["websets", "imports", "get", "import_abc123"]
+
+[ops.imports-list]
+argv = ["websets", "imports", "list", "--limit", "5"]
+
+[ops.imports-update]
+argv = ["websets", "imports", "update", "import_abc123", "--set", "title=Updated import"]
+
+[ops.websets-items-delete]
+argv = ["websets", "items", "delete", "webset_abc123", "item_abc123", "--yes"]
+
+[ops.websets-items-get]
+argv = ["websets", "items", "get", "webset_abc123", "item_abc123"]
+
+[ops.websets-items-list]
+argv = ["websets", "items", "list", "webset_abc123", "--limit", "5", "--source-id", "source_abc123"]
+
+[ops.websets-list]
+argv = ["websets", "list", "--limit", "5", "--search", "AI"]
+
+[ops.monitors-create]
+argv = ["websets", "monitors", "create", "--webset-id", "webset_abc123", "--cron", "0 9 * * *", "--timezone", "UTC", "--query", "new AI companies", "--count", "10"]
+
+[ops.monitors-delete]
+argv = ["websets", "monitors", "delete", "monitor_abc123", "--yes"]
+
+[ops.monitors-get]
+argv = ["websets", "monitors", "get", "monitor_abc123"]
+
+[ops.monitors-list]
+argv = ["websets", "monitors", "list", "--limit", "5", "--webset-id", "webset_abc123"]
+
+[ops.monitors-runs-get]
+argv = ["websets", "monitors", "runs", "get", "monitor_abc123", "run_abc123"]
+
+[ops.monitors-runs-list]
+argv = ["websets", "monitors", "runs", "list", "monitor_abc123", "--limit", "5"]
+
+[ops.monitors-update]
+argv = ["websets", "monitors", "update", "monitor_abc123", "--status", "disabled"]
+
+[ops.websets-preview]
+argv = ["websets", "preview", "--query", "AI tools", "--count", "3"]
+
+[ops.websets-searches-cancel]
+argv = ["websets", "searches", "cancel", "webset_abc123", "search_abc123"]
+
+[ops.websets-searches-create]
+argv = ["websets", "searches", "create", "webset_abc123", "--query", "founders", "--count", "25", "--criteria", "has email"]
+
+[ops.websets-searches-get]
+argv = ["websets", "searches", "get", "webset_abc123", "search_abc123"]
+
+[ops.websets-update]
+argv = ["websets", "update", "webset_abc123", "--set", "title=Updated Webset"]
+
+[ops.webhooks-attempts-list]
+argv = ["websets", "webhooks", "attempts", "list", "webhook_abc123", "--limit", "5", "--event-type", "webset.item.created", "--successful", "true"]
+
+[ops.webhooks-create]
+argv = ["websets", "webhooks", "create", "--url", "https://example.com/hook", "--event", "webset.item.created"]
+
+[ops.webhooks-delete]
+argv = ["websets", "webhooks", "delete", "webhook_abc123", "--yes"]
+
+[ops.webhooks-get]
+argv = ["websets", "webhooks", "get", "webhook_abc123"]
+
+[ops.webhooks-list]
+argv = ["websets", "webhooks", "list", "--limit", "5"]
+
+[ops.webhooks-update]
+argv = ["websets", "webhooks", "update", "webhook_abc123", "--url", "https://example.com/new-hook"]
+
+[ops.create-api-key]
+argv = ["admin", "keys", "create", "--name", "ci", "--rate-limit", "100", "--budget-cents", "5000"]
+
+[ops.delete-api-key]
+argv = ["admin", "keys", "delete", "api_key_abc123", "--confirm", "api_key_abc123"]
+
+[ops.get-api-key]
+argv = ["admin", "keys", "get", "api_key_abc123"]
+
+[ops.list-api-keys]
+argv = ["admin", "keys", "list"]
+
+[ops.update-api-key]
+argv = ["admin", "keys", "update", "api_key_abc123", "--name", "ci-renamed"]
+
+[ops.get-api-key-usage]
+argv = ["admin", "keys", "usage", "api_key_abc123"]

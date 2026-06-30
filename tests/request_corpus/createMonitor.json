@@ -1,0 +1,61 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "monitor create",
+  "operation": {
+    "method": "POST",
+    "path": "/monitors",
+    "operationId": "createMonitor",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/monitors",
+      "query": [],
+      "body": {
+        "name": "daily-ai",
+        "search": {
+          "query": "AI news"
+        },
+        "trigger": {
+          "type": "interval",
+          "period": "0 9 * * *"
+        },
+        "webhook": {
+          "url": "https://example.com/hook"
+        }
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:53fad6bdcfbafa8def8c16cad4ea825a3c82dc4009fafd0e629718adf1d33356",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [
+    {
+      "code": "webhook_secret_ephemeral",
+      "message": "Create responses include webhookSecret once; use --secret-output FILE to capture it or it will be lost.",
+      "replacement": "exa-agent monitor create --query \"...\" --webhook-url https://example.com/hook --secret-output ./webhook.secret"
+    }
+  ],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

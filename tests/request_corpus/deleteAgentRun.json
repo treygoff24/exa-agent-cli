@@ -1,0 +1,43 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "agent runs delete",
+  "operation": {
+    "method": "DELETE",
+    "path": "/agent/runs/run_abc123",
+    "operationId": "deleteAgentRun",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "DELETE",
+      "path": "/agent/runs/run_abc123",
+      "query": [],
+      "body": null
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:016f81e4a2e89d81812910aea7cdda6bb0194d96564700293a08b92c14e2c24e",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

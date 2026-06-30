@@ -1,0 +1,43 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "agent runs cancel",
+  "operation": {
+    "method": "POST",
+    "path": "/agent/runs/run_abc123/cancel",
+    "operationId": "cancelAgentRun",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/agent/runs/run_abc123/cancel",
+      "query": [],
+      "body": {}
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:34a94c3fae88063c171e04b638ba97d3190a3f46f5cf1de5477eb202cf877ff9",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

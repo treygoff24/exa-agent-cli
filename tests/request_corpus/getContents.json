@@ -1,0 +1,48 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "contents",
+  "operation": {
+    "method": "POST",
+    "path": "/contents",
+    "operationId": "getContents",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/contents",
+      "query": [],
+      "body": {
+        "urls": [
+          "https://example.com"
+        ],
+        "text": true
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:1e8e809200f60473b9e20ad31de2ef7bb62c9f34492769c9fceb27f82beeaf45",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

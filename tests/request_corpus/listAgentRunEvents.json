@@ -1,0 +1,48 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "agent runs events",
+  "operation": {
+    "method": "GET",
+    "path": "/agent/runs/run_abc123/events",
+    "operationId": "listAgentRunEvents",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "GET",
+      "path": "/agent/runs/run_abc123/events",
+      "query": [
+        {
+          "name": "limit",
+          "value": "5"
+        }
+      ],
+      "body": null
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:165892dd6ad102e738cffa6f4f26f063d1fe071691ba82f1cf13704d29abc5d6",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

@@ -1,0 +1,46 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "context",
+  "operation": {
+    "method": "POST",
+    "path": "/context",
+    "operationId": "context",
+    "source": "exa-docs:context",
+    "sourceVersion": "docs-2026-06-29"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/context",
+      "query": [],
+      "body": {
+        "query": "Rust CLI request previews",
+        "tokensNum": 1000
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:fb4a429ef734148f6c54e6e4c6a7dff910af257a3172e64898a8237dc744a6a8",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

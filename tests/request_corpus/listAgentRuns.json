@@ -1,0 +1,48 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "agent runs list",
+  "operation": {
+    "method": "GET",
+    "path": "/agent/runs",
+    "operationId": "listAgentRuns",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "GET",
+      "path": "/agent/runs",
+      "query": [
+        {
+          "name": "limit",
+          "value": "5"
+        }
+      ],
+      "body": null
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:b14345f67914fb5f976c958ae878eb81a798e24f418267a5aa012dd5e793e496",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

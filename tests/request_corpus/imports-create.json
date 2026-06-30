@@ -1,0 +1,50 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "websets imports create",
+  "operation": {
+    "method": "POST",
+    "path": "/v0/imports",
+    "operationId": "imports-create",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "upstreamRequestId": null,
+    "correlationId": null,
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/v0/imports",
+      "query": [],
+      "body": {
+        "format": "csv",
+        "size": 1024,
+        "count": 10,
+        "entity": {
+          "type": "company"
+        }
+      }
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:919642922bae2903bf630be33a98aed6c60bda2613328f951788fbcba89003ec",
+  "pagination": null,
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false,
+  "dataPath": null,
+  "bytes": null
+}

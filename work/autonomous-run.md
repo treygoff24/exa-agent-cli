@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 3A complete; next wave is 3B SSE/SIGINT/pagination.
+Status: Wave 3B complete; next wave is 4A monitor family.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint `fa09849`.
+  `70ac1ad`; latest committed checkpoint before Wave 3B was `45d1860`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -20,6 +20,11 @@ Codex owns updates.
   `delegate --json models`.
 - Delegate Cursor Composer work mode verified after local command collision fix;
   smoke artifact: `work/delegate-cursor-composer-smoke.md`.
+- Current implementation/review lane policy: use native Codex subagents,
+  Delegate Cursor Composer, and Delegate Grok Composer for implementation;
+  use Delegate Cursor/Grok safe review as the non-native small-wave review lane
+  and reserve Claude code reviews for larger wave/phase reviews. GLM/Droid is no
+  longer a required per-wave review lane.
 - Live smoke credential available from
   `~/.config/exa-agent-cli/credentials.json` (last4 `927c`; do not print full
   key). Latest live probe still returns upstream 401/`reauth_required`.
@@ -36,7 +41,10 @@ Codex owns updates.
   Wave 3A adds the Agent run lifecycle (`agent run` / `agent runs
   create|list|get|events|cancel|delete`), rich Agent create request fields,
   event replay-vs-pagination validation, destructive delete confirmation, and
-  contract-shaped pending-run JSONL recovery records.
+  contract-shaped pending-run JSONL recovery records. Wave 3B adds true
+  blocking SSE streaming, raw/NDJSON/human progressive stream output, SIGINT
+  interruption with resume metadata, Last-Event-ID replay, Agent pagination
+  goldens, and Phase 3 gate coverage.
 
 ## Pre-run checklist
 
@@ -52,7 +60,7 @@ Codex owns updates.
 
 ## Wave ledger
 
-| Wave | Status | Implementation lanes | Native review | GLM review | Gate |
+| Wave | Status | Implementation lanes | Native review | Second-lane review | Gate |
 |---|---|---|---|---|---|
 | 0 Baseline/spec audit | complete | parent + native map | n/a | n/a | `cargo xtask vendor-spec --check` pass |
 | 1A Registry/parser/envelope | complete | Delegate Cursor Composer + parent integration | native reviewer found `raw --query` preview omission; fixed; re-review clean | GLM review clean; P3 redaction hardening fixed | `cargo xtask ci` pass |
@@ -62,8 +70,8 @@ Codex owns updates.
 | 2A Search/contents | complete in working tree | native request/chunk lane + Delegate Cursor Composer executor lane + parent integration | native found no-op `--chunk-size`, then chunked error-context gaps; fixed; final approval clean | GLM found clippy/context P3s; fixed; final approval clean | `cargo xtask phase-gate 2` pass; `cargo clippy --workspace --locked -- -D warnings` pass |
 | 2B Answer/context/similar/streaming | complete in working tree | native answer/context/similar lane + Delegate Cursor Composer stream lane + parent integration | native found stream output-mode, terminal data shape, helper-only test, then context override bypass; fixed; final approval clean | GLM found context length guard and generic deprecation warning P3s; fixed; final approval clean | `cargo xtask ci` pass; `cargo xtask phase-gate 2` pass; branch-wide secret scan pass |
 | 2C Team/macros/deprecations | complete | native baseline macro lane + Delegate Cursor Composer team/research lane + parent integration | initial/re-review findings fixed; final narrow re-review clean with only low-risk notes | initial findings fixed; final GLM re-review clean with accepted P3 residuals | `cargo xtask phase-gate 2` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
-| 3A Agent/research lifecycle | complete in working tree | native pending-run helper lane + Delegate Cursor Composer Agent lifecycle lane + parent integration | initial findings fixed; final/final-final re-reviews clean | GLM found pending schema P1 and P3 dead-input cleanup; fixed; final-final GLM clean | `cargo xtask ci` pass; `cargo xtask phase-gate 3` pass; branch-wide secret scan pass |
-| 3B SSE/SIGINT/pagination | not started | - | - | - | - |
+| 3A Agent/research lifecycle | complete | native pending-run helper lane + Delegate Cursor Composer Agent lifecycle lane + parent integration | initial findings fixed; final/final-final re-reviews clean | GLM found pending schema P1 and P3 dead-input cleanup; fixed; final-final GLM clean | `cargo xtask ci` pass; `cargo xtask phase-gate 3` pass; branch-wide secret scan pass |
+| 3B SSE/SIGINT/pagination | complete | native SSE/interrupt lane + Delegate Cursor Composer mechanical gate/test lane + parent integration | native found Phase 3 lock gaps, partial-id resume bug, NDJSON write-failure gap; fixed; final re-review clean | Delegate Cursor safe found callback/write-failure resume bug; fixed; Delegate Grok safe returned only a progress line and was replaced per updated lane policy | `cargo xtask phase-gate 3` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 4A Monitors | not started | - | - | - | - |
 | 4B Websets core | not started | - | - | - | - |
 | 4C Websets webhooks/events/closeout | not started | - | - | - | - |
@@ -125,6 +133,12 @@ Record every review finding that is not immediately fixed.
 | 3A | native/GLM review | medium | `agent runs events --last-event-id` was accepted without `--stream`, and stream mode could mix cursor pagination flags | fixed | Added `validate_agent_runs_events_mode` to reject replay-without-stream and stream+pagination combinations; added CLI regressions. |
 | 3A | GLM review | P1 | Pending-run JSONL record used helper field names (`operation`, `path`, `createdAt`, nested `suggestedCommand`) instead of frozen `exa.cli.pending_run.v1` fields | fixed | Record now serializes `attemptedAt`, `operationId`, `apiPath`, `requestId`, `idempotencyKey`, and `recoveryCommand`; docs and tests updated. |
 | 3A | GLM review | P3 | Pending-run helper still accepted unused method/correlation/request-body inputs after schema correction | fixed | Removed dead inputs, renamed public helper fields to contract names, and asserted exact pending-record keys. |
+| 3B | native review | medium | Phase 3 gate initially omitted pending-run and paginated-list lock coverage | fixed | Added `golden_pending_run_record`, `golden_paginated_all_ndjson`, and Phase 3 gate entries for both plus stalled-stream SIGINT. |
+| 3B | native review | high | Resume metadata could advance to a partial `id:` line before the SSE frame was completed/emitted | fixed | `SseDecoder` only advances `last_event_id` on frame flush, and live transport reports the last fully emitted frame id. |
+| 3B | Delegate Cursor safe | high | Callback/raw stream write failures after a prior frame could drop `details.lastEventId` | fixed | Wrapped interrupted callback errors with the previous emitted event id and added `send_sse_callback_error_reports_previous_emitted_event_id`. |
+| 3B | native review | high | NDJSON streaming wrote with infallible `println!`, so broken stdout could bypass the callback-error wrapper | fixed | Added fallible `write_ndjson`, streaming NDJSON writer helper, and output-boundary regression for write failure. |
+| 3B | parent | medium | Human TTY `--stream` path was not progressive despite contracts §8 | fixed | Added minimal progressive human frame writes with fallible error mapping and helper regressions. |
+| 3B | Delegate Cursor safe | low | Interrupted-stream envelope lock is an integration assertion, not an insta snapshot; SIGINT test is Unix-only | accepted for now | The black-box test asserts exit 12 and stderr envelope `details.lastEventId`; this local run targets macOS/Unix. Cross-platform signal harness can be added with CI platform work. |
 
 ## Gate log
 
@@ -193,6 +207,14 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | Delegate GLM Wave 3A final-final re-review (`droid-26`) | pass | No blocking findings; confirmed pending cleanup and dispatch signatures |
 | 2026-06-29 | non-printing tracked/diff/history secret scan | pass | Stored API key fingerprint `927c` absent from tracked files, working diff, and reachable branch blobs |
 | 2026-06-29 | `delegate worktree remove cursor-11 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager; no Delegate worktrees remain present |
+| 2026-06-30 | focused Wave 3B stream tests | pass | `stream_event_*`, callback resume-token, stream decoder, stalled SIGINT, and streaming NDJSON transport checks |
+| 2026-06-30 | Delegate Grok safe Wave 3B review (`grok`) | partial | Returned only a progress line; replaced by Delegate Cursor safe review under updated lane policy |
+| 2026-06-30 | Delegate Cursor safe Wave 3B review (`cursor-13`) | findings fixed | Found callback/raw stream write-failure resume-token gap; fixed and regression-covered |
+| 2026-06-30 | native Wave 3B reviews (`019f1611...`, `019f1619...`, `019f161a...`) | pass | Found/fixed NDJSON write-failure gap; final narrow re-reviews clean |
+| 2026-06-30 | `cargo xtask phase-gate 3` | pass | Full workspace tests plus Agent dry-run smokes, pending-run, paginated-list, and stalled-SIGINT checks |
+| 2026-06-30 | `cargo xtask ci` | pass | fmt, clippy, and full workspace tests after all Wave 3B review fixes |
+| 2026-06-30 | non-printing tracked/diff secret scan | pass | Stored API key fingerprint `927c` absent from tracked files and working diff |
+| 2026-06-30 | `delegate worktree list` | pass | All Delegate worktrees are removed; none present with unreviewed edits |
 
 ## Local commit log
 
@@ -206,7 +228,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `6f12e42` | Wave 2A typed `search`/`contents`, `/contents` chunking, redaction suggestion fix, and Phase 2 gate | `cargo xtask phase-gate 2`; `cargo clippy --workspace --locked -- -D warnings`; native + GLM final reviews clean |
 | 2026-06-29 | `b771a5b` | Wave 2B typed `answer`/`context`/`similar`, SSE stream envelope shaping, context query validation, and Phase 2 stream gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
 | 2026-06-29 | `fa09849` | Wave 2C typed `team info`, legacy research create/list/get with cursor pagination, `ask`/`fetch` macro aliases, and Phase 2 team/research gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
-| 2026-06-29 | this commit | Wave 3A Agent run lifecycle, rich Agent create body fields, event replay validation, delete confirmation, and pending-run JSONL recovery contract | `cargo xtask ci`; `cargo xtask phase-gate 3`; native + GLM final-final reviews clean; branch-wide secret scan pass |
+| 2026-06-29 | `45d1860` | Wave 3A Agent run lifecycle, rich Agent create body fields, event replay validation, delete confirmation, and pending-run JSONL recovery contract | `cargo xtask ci`; `cargo xtask phase-gate 3`; native + GLM final-final reviews clean; branch-wide secret scan pass |
+| 2026-06-30 | this commit | Wave 3B blocking SSE streaming, SIGINT/resume metadata, raw/NDJSON/human progressive stream output, Agent pagination and pending-run locks, and updated lane policy | `cargo xtask phase-gate 3`; `cargo xtask ci`; native + Delegate Cursor reviews clean; branch-wide secret scan pass |
 
 ## Final completion checklist
 
@@ -222,6 +245,7 @@ Record every review finding that is not immediately fixed.
 - [ ] `cargo run -- search "test query" --dry-run --print-request --json`
 - [ ] `cargo run -- raw GET /websets/v0/teams/me --dry-run --print-request --json`
 - [ ] final native review clean
-- [ ] final GLM review clean
+- [ ] final required native/second-lane review clean
+- [ ] final large-wave Claude review clean
 - [ ] no unreviewed Delegate worktrees
 - [ ] final git tree clean or intentional artifacts documented

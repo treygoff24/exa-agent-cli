@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::io::Read;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -57,11 +58,48 @@ pub struct RawExecuteParams<'a> {
 
 pub trait Transport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError>;
+
+    fn send_sse<F>(
+        &self,
+        req: &HttpRequest,
+        options: &SendOptions,
+        on_item: &mut F,
+    ) -> Result<(StreamOutcome, u32), CliError>
+    where
+        F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
+        Self: Sized,
+    {
+        let (response, retries) = send_with_retry(self, req, options)?;
+        let frames = parse_sse(&response.body);
+        let mut last_event_id = None;
+        on_item(StreamItem::Bytes(&response.body))
+            .map_err(|err| stream_callback_error(err, last_event_id.as_deref()))?;
+        for frame in frames {
+            let frame_id = frame.id.clone();
+            on_item(StreamItem::Frame(frame))
+                .map_err(|err| stream_callback_error(err, last_event_id.as_deref()))?;
+            if frame_id.is_some() {
+                last_event_id = frame_id;
+            }
+        }
+        Ok((StreamOutcome { last_event_id }, retries))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamOutcome {
+    pub last_event_id: Option<String>,
+}
+
+pub enum StreamItem<'a> {
+    Bytes(&'a [u8]),
+    Frame(SseFrame),
 }
 
 /// Live transport backed by ureq + rustls (D14).
 pub struct UreqTransport {
     agent: ureq::Agent,
+    sse_agent: ureq::Agent,
 }
 
 impl UreqTransport {
@@ -70,8 +108,14 @@ impl UreqTransport {
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .build();
+        let sse_config = ureq::config::Config::builder()
+            .timeout_global(Some(timeout))
+            .timeout_recv_body(Some(crate::stream::SSE_READ_TIMEOUT))
+            .http_status_as_error(false)
+            .build();
         Self {
             agent: config.into(),
+            sse_agent: sse_config.into(),
         }
     }
 
@@ -82,79 +126,243 @@ impl UreqTransport {
 
 impl Transport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
-        let response = if let Some(body) = &req.body {
-            macro_rules! send_body {
-                ($builder:expr) => {{
-                    let mut builder = $builder;
-                    for (name, value) in &req.headers {
-                        builder = builder.header(name.as_str(), value.as_str());
-                    }
-                    if !has_header(&req.headers, "content-type") {
-                        builder = builder.header("Content-Type", "application/json");
-                    }
-                    builder.send(body.as_slice())
-                }};
-            }
-            match req.method.as_str() {
-                "GET" => send_body!(self.agent.get(&req.url).force_send_body()),
-                "POST" => send_body!(self.agent.post(&req.url)),
-                "PUT" => send_body!(self.agent.put(&req.url)),
-                "PATCH" => send_body!(self.agent.patch(&req.url)),
-                "DELETE" => send_body!(self.agent.delete(&req.url).force_send_body()),
-                "OPTIONS" => send_body!(self.agent.options(&req.url).force_send_body()),
-                other => {
-                    return Err(CliError::Usage(Diag::new(
-                        "invalid_value",
-                        format!("unsupported HTTP method `{other}` with body"),
-                    )));
-                }
-            }
-        } else {
-            let mut builder = match req.method.as_str() {
-                "GET" => self.agent.get(&req.url),
-                "DELETE" => self.agent.delete(&req.url),
-                "HEAD" => self.agent.head(&req.url),
-                "OPTIONS" => self.agent.options(&req.url),
-                "POST" | "PUT" | "PATCH" => {
-                    return Err(CliError::Usage(Diag::new(
-                        "invalid_value",
-                        format!(
-                            "{} requires a JSON body (use `--body` or `--set`)",
-                            req.method
-                        ),
-                    )));
-                }
-                other => {
-                    return Err(CliError::Usage(Diag::new(
-                        "invalid_value",
-                        format!("unsupported HTTP method `{other}`"),
-                    )));
-                }
-            };
-            for (name, value) in &req.headers {
-                builder = builder.header(name.as_str(), value.as_str());
-            }
-            builder.call()
-        }
-        .map_err(map_ureq_error)?;
+        let response = send_ureq_request(&self.agent, req)?;
 
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|v| (name.as_str().to_string(), v.to_string()))
-            })
-            .collect();
+        let headers = response_headers(&response);
         let body = response.into_body().read_to_vec().map_err(map_ureq_error)?;
         Ok(HttpResponse {
             status,
             headers,
             body,
         })
+    }
+
+    fn send_sse<F>(
+        &self,
+        req: &HttpRequest,
+        options: &SendOptions,
+        on_item: &mut F,
+    ) -> Result<(StreamOutcome, u32), CliError>
+    where
+        F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
+    {
+        crate::stream::install_sigint_handler()?;
+        crate::stream::reset_interrupt();
+        let max_retries = options.retry;
+        let mut attempt = 0u32;
+        loop {
+            match self.send_sse_once(req, on_item) {
+                Ok(outcome) => return Ok((outcome, attempt)),
+                Err(err) => {
+                    if should_retry(
+                        &req.method,
+                        options.idempotency_key.as_deref(),
+                        &err,
+                        attempt,
+                        max_retries,
+                    ) {
+                        attempt += 1;
+                        if let Some(ms) = retry_delay_ms_from_error(&err, options.retry_after) {
+                            std::thread::sleep(Duration::from_millis(ms));
+                        } else {
+                            std::thread::sleep(Duration::from_millis(100 * u64::from(attempt)));
+                        }
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+}
+
+impl UreqTransport {
+    fn send_sse_once<F>(
+        &self,
+        req: &HttpRequest,
+        on_item: &mut F,
+    ) -> Result<StreamOutcome, CliError>
+    where
+        F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
+    {
+        let mut response = send_ureq_request(&self.sse_agent, req)?;
+        let status = response.status().as_u16();
+        let headers = response_headers(&response);
+        if !(200..300).contains(&status) {
+            let body = response.body_mut().read_to_vec().map_err(map_ureq_error)?;
+            return Err(classify_http_status(status, &body, &headers));
+        }
+
+        let mut decoder = crate::stream::SseDecoder::new();
+        let mut last_emitted_event_id: Option<String> = None;
+        let mut buf = [0u8; 8192];
+        let mut saw_body = false;
+        let mut reader = response.body_mut().as_reader();
+        loop {
+            if crate::stream::interrupted() {
+                return Err(crate::stream::interrupted_stream_error(
+                    last_emitted_event_id.as_deref(),
+                ));
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    saw_body = true;
+                    let chunk = &buf[..n];
+                    on_item(StreamItem::Bytes(chunk)).map_err(|err| {
+                        stream_callback_error(err, last_emitted_event_id.as_deref())
+                    })?;
+                    for frame in decoder.push(chunk) {
+                        let frame_id = frame.id.clone();
+                        on_item(StreamItem::Frame(frame)).map_err(|err| {
+                            stream_callback_error(err, last_emitted_event_id.as_deref())
+                        })?;
+                        if frame_id.is_some() {
+                            last_emitted_event_id = frame_id;
+                        }
+                    }
+                }
+                Err(err) if crate::stream::is_poll_timeout(&err) => continue,
+                Err(err) => {
+                    if saw_body {
+                        return Err(crate::stream::interrupted_stream_error(
+                            last_emitted_event_id.as_deref(),
+                        ));
+                    }
+                    let mut diag = Diag::new("network_error", err.to_string());
+                    diag.retryable = true;
+                    return Err(CliError::Network(diag));
+                }
+            }
+        }
+        for frame in decoder.finish() {
+            let frame_id = frame.id.clone();
+            on_item(StreamItem::Frame(frame))
+                .map_err(|err| stream_callback_error(err, last_emitted_event_id.as_deref()))?;
+            if frame_id.is_some() {
+                last_emitted_event_id = frame_id;
+            }
+        }
+        Ok(StreamOutcome {
+            last_event_id: last_emitted_event_id,
+        })
+    }
+}
+
+fn stream_callback_error(err: CliError, last_event_id: Option<&str>) -> CliError {
+    let Some(last_event_id) = last_event_id else {
+        return err;
+    };
+    match err {
+        CliError::Interrupted(mut diag) => {
+            let mut details = diag
+                .details
+                .take()
+                .map(|value| *value)
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+            match &mut details {
+                serde_json::Value::Object(map) => {
+                    map.entry("lastEventId".to_string())
+                        .or_insert_with(|| serde_json::Value::String(last_event_id.to_string()));
+                }
+                other => {
+                    let cause = std::mem::take(other);
+                    *other = serde_json::json!({
+                        "lastEventId": last_event_id,
+                        "cause": cause,
+                    });
+                }
+            }
+            diag.details = Some(Box::new(details));
+            CliError::Interrupted(diag)
+        }
+        other => other,
+    }
+}
+
+fn send_ureq_request(
+    agent: &ureq::Agent,
+    req: &HttpRequest,
+) -> Result<ureq::http::Response<ureq::Body>, CliError> {
+    if let Some(body) = &req.body {
+        macro_rules! send_body {
+            ($builder:expr) => {{
+                let mut builder = $builder;
+                for (name, value) in &req.headers {
+                    builder = builder.header(name.as_str(), value.as_str());
+                }
+                if !has_header(&req.headers, "content-type") {
+                    builder = builder.header("Content-Type", "application/json");
+                }
+                builder.send(body.as_slice()).map_err(map_ureq_error)
+            }};
+        }
+        match req.method.as_str() {
+            "GET" => send_body!(agent.get(&req.url).force_send_body()),
+            "POST" => send_body!(agent.post(&req.url)),
+            "PUT" => send_body!(agent.put(&req.url)),
+            "PATCH" => send_body!(agent.patch(&req.url)),
+            "DELETE" => send_body!(agent.delete(&req.url).force_send_body()),
+            "OPTIONS" => send_body!(agent.options(&req.url).force_send_body()),
+            other => Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("unsupported HTTP method `{other}` with body"),
+            ))),
+        }
+    } else {
+        let mut builder = match req.method.as_str() {
+            "GET" => agent.get(&req.url),
+            "DELETE" => agent.delete(&req.url),
+            "HEAD" => agent.head(&req.url),
+            "OPTIONS" => agent.options(&req.url),
+            "POST" | "PUT" | "PATCH" => {
+                return Err(CliError::Usage(Diag::new(
+                    "invalid_value",
+                    format!(
+                        "{} requires a JSON body (use `--body` or `--set`)",
+                        req.method
+                    ),
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(Diag::new(
+                    "invalid_value",
+                    format!("unsupported HTTP method `{other}`"),
+                )));
+            }
+        };
+        for (name, value) in &req.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        builder.call().map_err(map_ureq_error)
+    }
+}
+
+fn response_headers(response: &ureq::http::Response<ureq::Body>) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+fn retry_delay_ms_from_error(err: &CliError, retry_after: bool) -> Option<u64> {
+    if !retry_after {
+        return None;
+    }
+    match err {
+        CliError::RateLimit(diag) => diag
+            .details
+            .as_deref()
+            .and_then(|value| value.get("retryAfterMs"))
+            .and_then(serde_json::Value::as_u64),
+        _ => None,
     }
 }
 
@@ -738,6 +946,76 @@ pub fn execute_raw_with_request_id<T: Transport>(
     transport: &T,
     params: RawExecuteParams<'_>,
 ) -> Result<RawExecuteResult, CliError> {
+    let prepared = prepare_raw_request(&params)?;
+    let (response, retries) = send_with_retry(transport, &prepared.req, &prepared.send_opts)?;
+
+    Ok(RawExecuteResult {
+        request_id: prepared.request_id,
+        method: prepared.method,
+        path: prepared.path,
+        profile: prepared.profile,
+        correlation_id: prepared.correlation_id,
+        response,
+        retries,
+    })
+}
+
+pub fn execute_raw_stream_with_request_id<T, F>(
+    transport: &T,
+    params: RawExecuteParams<'_>,
+    on_item: &mut F,
+) -> Result<(RawExecuteResult, Vec<SseFrame>), CliError>
+where
+    T: Transport,
+    F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
+{
+    let prepared = prepare_raw_request(&params)?;
+    let mut body = Vec::new();
+    let mut frames = Vec::new();
+    let mut callback = |item: StreamItem<'_>| -> Result<(), CliError> {
+        match item {
+            StreamItem::Bytes(bytes) => {
+                body.extend_from_slice(bytes);
+                on_item(StreamItem::Bytes(bytes))
+            }
+            StreamItem::Frame(frame) => {
+                frames.push(frame.clone());
+                on_item(StreamItem::Frame(frame))
+            }
+        }
+    };
+    let (_outcome, retries) =
+        transport.send_sse(&prepared.req, &prepared.send_opts, &mut callback)?;
+
+    Ok((
+        RawExecuteResult {
+            request_id: prepared.request_id,
+            method: prepared.method,
+            path: prepared.path,
+            profile: prepared.profile,
+            correlation_id: prepared.correlation_id,
+            response: HttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                body,
+            },
+            retries,
+        },
+        frames,
+    ))
+}
+
+struct PreparedRawRequest {
+    req: HttpRequest,
+    send_opts: SendOptions,
+    request_id: String,
+    method: String,
+    path: String,
+    profile: String,
+    correlation_id: Option<String>,
+}
+
+fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawRequest, CliError> {
     let cfg = Config::load()?;
     let method = params.method.to_ascii_uppercase();
     let query = parse_raw_query(params.query_raw)?;
@@ -779,16 +1057,14 @@ pub fn execute_raw_with_request_id<T: Transport>(
         retry_after: params.globals.retry_after,
         idempotency_key: params.globals.idempotency_key.clone(),
     };
-    let (response, retries) = send_with_retry(transport, &req, &send_opts)?;
-
-    Ok(RawExecuteResult {
-        request_id: params.request_id,
+    Ok(PreparedRawRequest {
+        req,
+        send_opts,
+        request_id: params.request_id.clone(),
         method,
         path: params.path.to_string(),
         profile: params.credential.profile.clone(),
         correlation_id: params.globals.correlation_id.clone(),
-        response,
-        retries,
     })
 }
 
@@ -1052,5 +1328,40 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k.eq_ignore_ascii_case("accept") && v == "text/event-stream"));
+    }
+
+    #[test]
+    fn send_sse_callback_error_reports_previous_emitted_event_id() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(
+            200,
+            "id: evt-1\ndata: {\"seq\":1}\n\nid: evt-2\ndata: {\"seq\":2}\n\n",
+        );
+        let req = HttpRequest {
+            method: "GET".into(),
+            url: "https://example.test/events".into(),
+            headers: vec![],
+            body: None,
+        };
+        let opts = SendOptions {
+            retry: 0,
+            retry_after: false,
+            idempotency_key: None,
+        };
+        let mut callback = |item: StreamItem<'_>| -> Result<(), CliError> {
+            if let StreamItem::Frame(frame) = item {
+                if frame.id.as_deref() == Some("evt-2") {
+                    return Err(CliError::Interrupted(Diag::new(
+                        "interrupted",
+                        "stdout closed",
+                    )));
+                }
+            }
+            Ok(())
+        };
+
+        let err = fake.send_sse(&req, &opts, &mut callback).unwrap_err();
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().details.as_ref().unwrap()["lastEventId"], "evt-1");
     }
 }

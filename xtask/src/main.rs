@@ -610,6 +610,41 @@ fn phase_gate(n: Option<&str>) -> Result<()> {
             ],
             "exa.cli.response.v1",
         )?;
+        run(
+            "cargo",
+            &[
+                "test",
+                "--quiet",
+                "--lib",
+                "tests::golden_pending_run_record",
+                "--",
+                "--exact",
+            ],
+        )?;
+        run(
+            "cargo",
+            &[
+                "test",
+                "--quiet",
+                "--test",
+                "cli",
+                "golden_paginated_all_ndjson",
+                "--",
+                "--exact",
+            ],
+        )?;
+        run(
+            "cargo",
+            &[
+                "test",
+                "--quiet",
+                "--test",
+                "cli",
+                "sse_sigint_stalled_stream_exits_12_with_last_event_id",
+                "--",
+                "--exact",
+            ],
+        )?;
     }
     println!("phase-gate {n}: OK");
     Ok(())

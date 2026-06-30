@@ -34,16 +34,28 @@ Implementation lanes:
   delegate cursor work --isolation worktree --forbid-commit "<bounded prompt>"
   ```
 
+- **Delegate Grok Composer** for bounded implementation tasks when Cursor is not
+  speed-critical or to balance Composer subscriptions:
+
+  ```bash
+  delegate grok work --isolation worktree --forbid-commit "<bounded prompt>"
+  ```
+
 Review lanes at the end of every wave:
 
 - **Native Codex code-review subagent**.
-- **Delegate GLM review**:
+- **Second-lane review** through Delegate Cursor/Grok safe mode when a small
+  wave needs an external check, or **Claude code review** at large wave/phase
+  boundaries.
 
   ```bash
-  delegate droid glm safe "<review prompt>"
+  delegate cursor safe "<review prompt>"
+  delegate grok safe "<review prompt>"
   ```
 
-Do not use `delegate codex`; use native subagents for Codex-on-Codex work.
+Do not use `delegate codex`; use native subagents for Codex-on-Codex work. GLM
+and other Droid lanes are backup implementation/review lanes only when the
+primary lanes are unavailable or there is a specific model-diversity reason.
 
 ## Non-negotiable guardrails
 
@@ -58,7 +70,7 @@ Do not use `delegate codex`; use native subagents for Codex-on-Codex work.
   passing checkpoints. Do not push; no remote is assumed or required.
 - Secrets never appear in prompts, logs, traces, or final output. Use redacted
   examples only.
-- A phase/wave is not complete until both review lanes are clean or every
+- A phase/wave is not complete until required review lanes are clean or every
   finding is fixed or explicitly rejected with rationale in the run ledger.
 
 ## Start sequence for the `/goal` run
@@ -97,14 +109,15 @@ Every wave follows the same loop:
    in the run ledger.
 2. **Build context packs.** Each worker prompt names the docs and files it must
    read; no worker receives vague repo-wide ownership.
-3. **Spawn implementation lanes.** Use native subagents and/or Cursor Composer
-   worktrees. Keep file ownership disjoint.
+3. **Spawn implementation lanes.** Use native subagents and/or Cursor/Grok
+   Composer worktrees. Keep file ownership disjoint.
 4. **Integrate serially.** Parent Codex inspects diffs, rejects off-scope work,
    and applies or merges the minimum acceptable change.
 5. **Run targeted checks.** Run the smallest checks that prove the wave's logic.
 6. **Native review.** Ask a native review subagent for findings only.
-7. **GLM review.** Ask Delegate GLM for findings only.
-8. **Fix pass.** Use native subagents or Cursor Composer to fix accepted
+7. **Second-lane review.** Use Delegate Cursor/Grok safe review for small waves
+   when useful; use Claude code review at large wave/phase boundaries.
+8. **Fix pass.** Use native subagents or Cursor/Grok Composer to fix accepted
    findings. Parent may do tiny integration-only fixes directly.
 9. **Gate.** Parent runs the wave's gate once.
 10. **Commit checkpoint.** If the wave produced a coherent passing diff, parent
@@ -141,7 +154,7 @@ problems. Do not implement. Output findings ordered by severity with file,
 line, evidence, and suggested fix. If none, say "No blocking findings."
 ```
 
-GLM review prompt shape:
+Delegate/Claude review prompt shape:
 
 ```text
 You are in code review mode. Do not update the plan. Do not enter plan mode.
@@ -180,12 +193,12 @@ Report changed files, checks run, risks, and any follow-up needed.
 | 2B | `answer`, `context`, `similar`, streaming path | native for streaming/contracts; Cursor for command wiring | targeted stream and request goldens |
 | 2C | `team info`, `ask`, `fetch`, deprecation warnings | Cursor for mechanical surface; native for warnings/contracts | `cargo xtask phase-gate 2` |
 | 3A | Agent/research create/list/get/cancel/delete | native for idempotency/pending-run; Cursor for command breadth | targeted async lifecycle tests |
-| 3B | SSE events, SIGINT, resume, pagination | native only unless work is purely mechanical | `cargo xtask phase-gate 3` |
-| 4A | `monitor` family | Cursor for command breadth; native for confirmation safety | targeted safety/pagination tests |
-| 4B | `websets` core/items/searches/enrichments/imports | Cursor for breadth; native for conflict/idempotency tests | targeted websets tests |
-| 4C | websets monitors/events/webhooks and Phase-4 closeout | native for webhook/security docs; Cursor for command wiring | `cargo xtask phase-gate 4` |
+| 3B | SSE events, SIGINT, resume, pagination | native first; Cursor/Grok for review or mechanical tests | `cargo xtask phase-gate 3` |
+| 4A | `monitor` family | Cursor/Grok for command breadth; native for confirmation safety | targeted safety/pagination tests |
+| 4B | `websets` core/items/searches/enrichments/imports | Cursor/Grok for breadth; native for conflict/idempotency tests | targeted websets tests |
+| 4C | websets monitors/events/webhooks and Phase-4 closeout | native for webhook/security docs; Cursor/Grok for command wiring | `cargo xtask phase-gate 4` |
 | 5 | `admin keys` and service-key separation | native first; Cursor only for mechanical subcommands | `cargo xtask phase-gate 5` |
-| 6 | Ergonomics harness, robot-docs completeness, live smoke, release readiness | native reviews plus Cursor for fixture/golden churn | `cargo xtask phase-gate 6`; `cargo xtask smoke --budget "$EXA_E2E_BUDGET"` |
+| 6 | Ergonomics harness, robot-docs completeness, live smoke, release readiness | native reviews plus Cursor/Grok for fixture/golden churn; Claude big-wave review | `cargo xtask phase-gate 6`; `cargo xtask smoke --budget "$EXA_E2E_BUDGET"` |
 
 ## Completion criteria
 
@@ -209,8 +222,9 @@ The autonomous goal can be marked complete only when all are true:
   cargo run -- raw GET /v0/teams/me --dry-run --print-request --json
   ```
 
-- Both review lanes are clean on the final diff, or every remaining finding is
-  explicitly rejected with rationale.
+- Required native/second-lane reviews are clean on the final diff, and the final
+  large-wave Claude review is clean or every remaining finding is explicitly
+  rejected with rationale.
 - No Delegate worktree contains unreviewed edits.
 - The final git tree is clean except for intentionally untracked artifacts
   documented in the ledger.
@@ -223,7 +237,7 @@ blocked after all offline gates pass.
 Stop and ask Trey before continuing if:
 
 - git status contains user-owned changes that conflict with planned edits;
-- Cursor/Delegate/GLM auth is unavailable after one retry;
+- Cursor/Grok/Delegate auth is unavailable after one retry;
 - upstream Exa specs or docs contradict the vendored specs materially;
 - a phase gate fails after two focused fix passes;
 - live smoke needs credentials or spend approval not available in the session.

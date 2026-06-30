@@ -3,7 +3,7 @@
 
 pub mod envelope;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 /// Resolved output structure (contracts §2). Whitespace (pretty/compact) is orthogonal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,9 +51,32 @@ pub fn emit_stdout(value: &serde_json::Value, pretty: bool) {
     println!("{s}");
 }
 
+/// Write a JSON value plus trailing newline to a fallible writer.
+pub fn write_stdout_value(
+    out: &mut impl Write,
+    value: &serde_json::Value,
+    pretty: bool,
+) -> std::io::Result<()> {
+    let s = if pretty {
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    } else {
+        serde_json::to_string(value).unwrap_or_default()
+    };
+    out.write_all(s.as_bytes())?;
+    out.write_all(b"\n")?;
+    out.flush()
+}
+
 /// Emit one compact JSON value as an NDJSON line.
 pub fn emit_ndjson(value: &serde_json::Value) {
     println!("{}", serde_json::to_string(value).unwrap_or_default());
+}
+
+/// Write one compact JSON value as an NDJSON line to a fallible writer.
+pub fn write_ndjson(out: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
+    out.write_all(serde_json::to_string(value).unwrap_or_default().as_bytes())?;
+    out.write_all(b"\n")?;
+    out.flush()
 }
 
 /// Emit exact upstream response bytes (`--raw`, contracts §2).
@@ -74,5 +97,19 @@ mod tests {
         let mut out = Vec::new();
         super::write_raw(&mut out, b"{\"ok\":true}").unwrap();
         assert_eq!(out, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn write_ndjson_appends_one_newline() {
+        let mut out = Vec::new();
+        super::write_ndjson(&mut out, &serde_json::json!({"ok":true})).unwrap();
+        assert_eq!(out, b"{\"ok\":true}\n");
+    }
+
+    #[test]
+    fn write_stdout_value_honors_pretty_flag() {
+        let mut out = Vec::new();
+        super::write_stdout_value(&mut out, &serde_json::json!({"ok":true}), true).unwrap();
+        assert_eq!(out, b"{\n  \"ok\": true\n}\n");
     }
 }

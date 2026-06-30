@@ -4,10 +4,11 @@ use clap::Parser;
 use exa_agent_cli::cli::{command_path, Cli, Command};
 use exa_agent_cli::transport;
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -181,6 +182,118 @@ where
         )
         .unwrap();
         stream.write_all(response_body).unwrap();
+    });
+    (format!("http://{addr}"), server)
+}
+
+fn local_sse_stall_server(
+    run_id: &str,
+    event_data: &str,
+) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let run_id = run_id.to_string();
+    let event_data = event_data.to_string();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let started = Instant::now();
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(err)
+                    if err.kind() == ErrorKind::WouldBlock
+                        && started.elapsed() < Duration::from_secs(10) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("failed to accept local SSE test request: {err}"),
+            }
+        };
+        let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+        assert!(
+            request.starts_with(&format!("GET /agent/runs/{run_id}/events ")),
+            "unexpected SSE request:\n{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("accept: text/event-stream"),
+            "expected SSE Accept header:\n{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("last-event-id: evt-resume"),
+            "expected Last-Event-ID replay header:\n{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-api-key: test-key-abcdef12"),
+            "expected test API key header:\n{request}"
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\nid: evt-42\r\ndata: {event_data}\r\n\r\nid: evt-43\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let _ = stop_rx.recv_timeout(Duration::from_secs(5));
+    });
+    (format!("http://{addr}"), stop_tx, server)
+}
+
+fn local_paginated_agent_runs_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"agent_run_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"agent_run_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("failed to accept local pagination test request: {err}"),
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with("GET /agent/runs?limit=1 "),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with("GET /agent/runs?limit=1&cursor=cur2 "),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-api-key: test-key-abcdef12"),
+                "expected test API key header:\n{request}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
     });
     (format!("http://{addr}"), server)
 }
@@ -1625,6 +1738,132 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         body["metadata"],
         serde_json::json!({"ticket":"T1","owner":"ops"})
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn sse_sigint_stalled_stream_exits_12_with_last_event_id() {
+    const RUN_ID: &str = "run_sigint_test";
+    let event_data = r#"{"type":"progress","message":"partial"}"#;
+    let (base_url, stop_server, server) = local_sse_stall_server(RUN_ID, event_data);
+
+    let mut child = command(&[
+        "agent",
+        "runs",
+        "events",
+        RUN_ID,
+        "--stream",
+        "--last-event-id",
+        "evt-resume",
+        "--ndjson",
+        "--base-url",
+        base_url.as_str(),
+        "--api-key",
+        "test-key-abcdef12",
+        "--compact",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("spawn exa-agent SSE stream");
+
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut first_line = String::new();
+    reader
+        .read_line(&mut first_line)
+        .expect("read first SSE NDJSON line from stdout");
+    assert!(
+        !first_line.trim().is_empty(),
+        "expected one NDJSON event on stdout before SIGINT"
+    );
+
+    let event: serde_json::Value =
+        serde_json::from_str(first_line.trim()).expect("first stdout line was not JSON");
+    assert_eq!(event["schema"], "exa.cli.event.v1");
+    assert_eq!(event["eventId"], "evt-42");
+    assert_eq!(event["command"], "agent runs events");
+
+    let pid = child.id();
+    let kill_status = ProcessCommand::new("/bin/kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("send SIGINT to exa-agent child");
+    assert!(kill_status.success(), "kill -INT failed for pid {pid}");
+
+    let output = child
+        .wait_with_output()
+        .expect("wait for interrupted exa-agent child");
+    let _ = stop_server.send(());
+    server.join().expect("local SSE test server panicked");
+
+    assert_eq!(
+        output.status.code(),
+        Some(12),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty() || output.stdout.ends_with(b"\n"));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|e| {
+        panic!(
+            "stderr was not JSON: {e}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(stderr["schema"], "exa.cli.error.v1");
+    assert_eq!(stderr["error"]["code"], "interrupted");
+    assert_eq!(stderr["error"]["category"], "interrupted");
+    assert_eq!(stderr["error"]["details"]["lastEventId"], "evt-42");
+}
+
+#[test]
+fn golden_paginated_all_ndjson() {
+    let (base_url, server) = local_paginated_agent_runs_server();
+    let output = run_owned(&[
+        "agent".into(),
+        "runs".into(),
+        "list".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "stdout:\n{stdout}");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(first["schema"], "exa.cli.response.v1");
+    assert_eq!(first["command"], "agent runs list");
+    assert_eq!(first["data"]["data"][0]["id"], "agent_run_1");
+    assert_eq!(first["pagination"]["cursor"], serde_json::Value::Null);
+    assert_eq!(first["pagination"]["nextCursor"], "cur2");
+    assert_eq!(first["pagination"]["hasMore"], true);
+    assert_eq!(first["pagination"]["autoPaginated"], true);
+    assert_eq!(first["pagination"]["page"], 1);
+    assert_eq!(second["schema"], "exa.cli.response.v1");
+    assert_eq!(second["command"], "agent runs list");
+    assert_eq!(second["data"]["data"][0]["id"], "agent_run_2");
+    assert_eq!(second["pagination"]["cursor"], "cur2");
+    assert_eq!(second["pagination"]["nextCursor"], serde_json::Value::Null);
+    assert_eq!(second["pagination"]["hasMore"], false);
+    assert_eq!(second["pagination"]["autoPaginated"], true);
+    assert_eq!(second["pagination"]["page"], 2);
 }
 
 #[test]

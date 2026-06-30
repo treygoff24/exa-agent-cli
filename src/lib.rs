@@ -13,6 +13,7 @@ pub mod pending;
 pub mod redaction;
 pub mod registry;
 pub mod request;
+pub mod stream;
 pub mod transport;
 
 use clap::Parser;
@@ -30,11 +31,15 @@ use output::envelope::{
     capabilities, error_codes_json, event_envelope, response_envelope, ErrorEnvelope,
     EventEnvelopeArgs, ResponseEnvelopeArgs,
 };
-use output::{emit_ndjson, emit_raw, emit_stdout, resolve_mode, stdout_is_tty, OutputMode};
+use output::{
+    emit_ndjson, emit_raw, emit_stdout, resolve_mode, stdout_is_tty, write_ndjson,
+    write_stdout_value, OutputMode,
+};
 use request::RequestOverrides;
 use transport::{
-    body_wants_stream, execute_raw_with_request_id, infer_stream_event_type, parse_sse,
-    parse_user_headers, terminal_stream_data, RawExecuteParams, Transport, UreqTransport,
+    body_wants_stream, execute_raw_stream_with_request_id, execute_raw_with_request_id,
+    infer_stream_event_type, parse_user_headers, terminal_stream_data, RawExecuteParams,
+    StreamItem, Transport, UreqTransport,
 };
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
@@ -1517,12 +1522,47 @@ fn execute_typed_live<T: Transport>(
     execution: TypedExecution<'_>,
 ) -> Result<i32, CliError> {
     let body = typed_wire_body(spec);
+    let stream_requested = body_wants_stream(&body) || execution.route.sse_accept;
     let query_raw: Vec<String> = execution
         .route
         .query
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
+    let command = execution
+        .command_override
+        .map(str::to_string)
+        .unwrap_or_else(|| spec.op.command());
+    let warnings = typed_command_warnings(spec.op);
+    if stream_requested {
+        let params = RawExecuteParams {
+            method: spec.op.method.as_str(),
+            path: execution.route.path,
+            query_raw: &query_raw,
+            body,
+            globals,
+            credential,
+            request_id: execution.request_id.to_string(),
+        };
+        return match execute_streaming_live(
+            transport,
+            params,
+            &command,
+            globals,
+            execution.pretty,
+            &warnings,
+        ) {
+            Ok(code) => Ok(code),
+            Err(err) => Err(maybe_record_pending_run_on_create_failure(
+                err,
+                spec,
+                globals,
+                execution.request_id,
+                execution.route.path,
+            )),
+        };
+    }
+
     let result = match execute_raw_with_request_id(
         transport,
         RawExecuteParams {
@@ -1557,18 +1597,6 @@ fn execute_typed_live<T: Transport>(
         return Ok(0);
     }
 
-    let command = execution
-        .command_override
-        .map(str::to_string)
-        .unwrap_or_else(|| spec.op.command());
-    let warnings = typed_command_warnings(spec.op);
-
-    if (body_wants_stream(&spec.body) || execution.route.sse_accept)
-        && transport::response_is_sse(&result.response)
-    {
-        return emit_stream_typed_output(&result, &command, globals, execution.pretty, &warnings);
-    }
-
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
@@ -1596,6 +1624,167 @@ fn execute_typed_live<T: Transport>(
         emit_stdout(&envelope, execution.pretty);
     }
     Ok(exit_code)
+}
+
+fn execute_streaming_live<T: Transport>(
+    transport: &T,
+    params: RawExecuteParams<'_>,
+    command: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+    warnings: &[serde_json::Value],
+) -> Result<i32, CliError> {
+    let stream_mode = stream_output_mode(globals, stdout_is_tty());
+    let ndjson = !globals.raw && stream_mode == OutputMode::Ndjson;
+    let human = !globals.raw && stream_mode == OutputMode::Human;
+    let mut seq = 0u64;
+    let mut out = std::io::stdout().lock();
+    let mut on_item = |item: StreamItem<'_>| -> Result<(), CliError> {
+        match item {
+            StreamItem::Bytes(bytes) if globals.raw => {
+                use std::io::Write;
+                out.write_all(bytes).map_err(|err| {
+                    CliError::Interrupted(Diag::new(
+                        "interrupted",
+                        format!("failed to write raw stdout: {err}"),
+                    ))
+                })?;
+            }
+            StreamItem::Frame(frame) if ndjson => {
+                write_stream_event_ndjson(
+                    &mut out,
+                    &frame,
+                    command,
+                    &mut seq,
+                    globals.correlation_id.as_deref(),
+                )?;
+            }
+            StreamItem::Frame(frame) if human => {
+                write_stream_event_human(&mut out, &frame)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+    let (result, frames) = execute_raw_stream_with_request_id(transport, params, &mut on_item)?;
+    if globals.raw {
+        use std::io::Write;
+        out.flush()
+            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+        return Ok(0);
+    }
+
+    if frames.is_empty() {
+        let data = transport::parse_response_data(&result.response.body);
+        let envelope = response_envelope(ResponseEnvelopeArgs {
+            command,
+            method: &result.method,
+            path: &result.path,
+            request_id: &result.request_id,
+            profile: &result.profile,
+            correlation_id: result.correlation_id.as_deref(),
+            count: transport::primary_count(&data),
+            data_hash: transport::data_hash(&data),
+            data,
+            retries: result.retries,
+            warnings,
+        });
+        if ndjson {
+            write_ndjson(&mut out, &envelope).map_err(|err| stream_write_error(err, None))?;
+        } else {
+            write_stdout_value(&mut out, &envelope, pretty)
+                .map_err(|err| stream_write_error(err, None))?;
+        }
+        return Ok(0);
+    }
+
+    let terminal_data = terminal_stream_data(&frames);
+    let count = transport::primary_count(&terminal_data);
+    let hash = transport::data_hash(&terminal_data);
+    let terminal = response_envelope(ResponseEnvelopeArgs {
+        command,
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data: terminal_data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+        warnings,
+    });
+    if ndjson {
+        write_ndjson(&mut out, &terminal)
+            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+    } else if human {
+        use std::io::Write;
+        out.flush()
+            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+    } else {
+        write_stdout_value(&mut out, &terminal, pretty)
+            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+    }
+    Ok(0)
+}
+
+fn write_stream_event_ndjson(
+    out: &mut impl std::io::Write,
+    frame: &transport::SseFrame,
+    command: &str,
+    seq: &mut u64,
+    correlation_id: Option<&str>,
+) -> Result<(), CliError> {
+    for chunk in &frame.data {
+        if chunk == "[DONE]" {
+            continue;
+        }
+        let next_seq = *seq + 1;
+        let event = serde_json::from_str::<serde_json::Value>(chunk)
+            .unwrap_or_else(|_| serde_json::Value::String(chunk.clone()));
+        let envelope = event_envelope(EventEnvelopeArgs {
+            event_type: infer_stream_event_type(&event),
+            command,
+            seq: next_seq,
+            event_id: frame.id.as_deref(),
+            correlation_id,
+            event,
+        });
+        write_ndjson(out, &envelope).map_err(|err| stream_write_error(err, None))?;
+        *seq = next_seq;
+    }
+    Ok(())
+}
+
+fn write_stream_event_human(
+    out: &mut impl std::io::Write,
+    frame: &transport::SseFrame,
+) -> Result<(), CliError> {
+    for chunk in &frame.data {
+        if chunk == "[DONE]" {
+            continue;
+        }
+        out.write_all(chunk.as_bytes())
+            .and_then(|_| out.write_all(b"\n"))
+            .and_then(|_| out.flush())
+            .map_err(|err| stream_write_error(err, None))?;
+    }
+    Ok(())
+}
+
+fn stream_write_error(err: std::io::Error, last_event_id: Option<&str>) -> CliError {
+    let mut diag = Diag::new(
+        "interrupted",
+        format!("failed to write stream stdout: {err}"),
+    );
+    if let Some(last_event_id) = last_event_id {
+        diag = diag.with_details(serde_json::json!({ "lastEventId": last_event_id }));
+    }
+    CliError::Interrupted(diag)
+}
+
+fn last_frame_event_id(frames: &[transport::SseFrame]) -> Option<&str> {
+    frames.iter().rev().find_map(|frame| frame.id.as_deref())
 }
 
 fn maybe_record_pending_run_on_create_failure(
@@ -1742,42 +1931,7 @@ fn typed_wire_body(spec: &request::RequestSpec) -> serde_json::Value {
     }
 }
 
-fn emit_stream_typed_output(
-    result: &transport::RawExecuteResult,
-    command: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-    warnings: &[serde_json::Value],
-) -> Result<i32, CliError> {
-    let frames = parse_sse(&result.response.body);
-    let terminal_data = terminal_stream_data(&frames);
-    let count = transport::primary_count(&terminal_data);
-    let hash = transport::data_hash(&terminal_data);
-
-    if stream_output_mode(globals, stdout_is_tty()) == OutputMode::Ndjson {
-        for line in stream_ndjson_values(result, command, warnings, terminal_data, count, hash) {
-            emit_ndjson(&line);
-        }
-        return Ok(0);
-    }
-
-    let envelope = response_envelope(ResponseEnvelopeArgs {
-        command,
-        method: &result.method,
-        path: &result.path,
-        request_id: &result.request_id,
-        profile: &result.profile,
-        correlation_id: result.correlation_id.as_deref(),
-        data: terminal_data,
-        count,
-        data_hash: hash,
-        retries: result.retries,
-        warnings,
-    });
-    emit_stdout(&envelope, pretty);
-    Ok(0)
-}
-
+#[cfg(test)]
 fn stream_ndjson_values(
     result: &transport::RawExecuteResult,
     command: &str,
@@ -1786,7 +1940,7 @@ fn stream_ndjson_values(
     count: Option<u64>,
     hash: Option<String>,
 ) -> Vec<serde_json::Value> {
-    let frames = parse_sse(&result.response.body);
+    let frames = transport::parse_sse(&result.response.body);
     let mut values = Vec::new();
     let mut seq = 0u64;
     for frame in &frames {
@@ -2495,6 +2649,24 @@ fn dispatch_raw_inner(
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg);
     let transport = UreqTransport::new(timeout);
+    if body_wants_stream(&body) {
+        return execute_streaming_live(
+            &transport,
+            RawExecuteParams {
+                method,
+                path: &args.path,
+                query_raw: &args.query,
+                body,
+                globals,
+                credential: &credential,
+                request_id: request_id.to_string(),
+            },
+            "raw",
+            globals,
+            pretty,
+            &[],
+        );
+    }
     let result = execute_raw_with_request_id(
         &transport,
         RawExecuteParams {
@@ -2709,7 +2881,7 @@ mod tests {
             },
             retries: 0,
         };
-        let frames = parse_sse(&result.response.body);
+        let frames = transport::parse_sse(&result.response.body);
         let terminal_data = terminal_stream_data(&frames);
         let lines = stream_ndjson_values(
             &result,
@@ -2731,6 +2903,86 @@ mod tests {
             lines[2]["data"],
             serde_json::json!({"answer":"done","citations":[]})
         );
+    }
+
+    struct FailAfterWrites {
+        remaining: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailAfterWrites {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "stdout closed",
+                ));
+            }
+            self.remaining -= 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stream_event_ndjson_write_failure_returns_interrupted() {
+        let mut out = FailAfterWrites {
+            remaining: 2,
+            bytes: Vec::new(),
+        };
+        let mut seq = 0;
+        let first = transport::SseFrame {
+            id: Some("evt-1".into()),
+            data: vec![r#"{"type":"progress","message":"first"}"#.into()],
+        };
+        write_stream_event_ndjson(&mut out, &first, "agent runs events", &mut seq, None).unwrap();
+        assert_eq!(seq, 1);
+
+        let second = transport::SseFrame {
+            id: Some("evt-2".into()),
+            data: vec![r#"{"type":"progress","message":"second"}"#.into()],
+        };
+        let err = write_stream_event_ndjson(&mut out, &second, "agent runs events", &mut seq, None)
+            .unwrap_err();
+
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().code, "interrupted");
+        assert_eq!(seq, 1);
+        assert!(String::from_utf8_lossy(&out.bytes).contains("\"eventId\":\"evt-1\""));
+    }
+
+    #[test]
+    fn stream_event_human_writes_progressive_lines() {
+        let mut out = Vec::new();
+        let frame = transport::SseFrame {
+            id: Some("evt-1".into()),
+            data: vec![r#"{"message":"first"}"#.into(), "[DONE]".into()],
+        };
+
+        write_stream_event_human(&mut out, &frame).unwrap();
+
+        assert_eq!(out, b"{\"message\":\"first\"}\n");
+    }
+
+    #[test]
+    fn stream_event_human_write_failure_returns_interrupted() {
+        let mut out = FailAfterWrites {
+            remaining: 1,
+            bytes: Vec::new(),
+        };
+        let frame = transport::SseFrame {
+            id: Some("evt-1".into()),
+            data: vec![r#"{"message":"first"}"#.into()],
+        };
+
+        let err = write_stream_event_human(&mut out, &frame).unwrap_err();
+
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().code, "interrupted");
     }
 
     #[test]
@@ -2880,7 +3132,7 @@ mod tests {
     }
 
     #[test]
-    fn unkeyed_agent_create_network_failure_writes_pending_run_record() {
+    fn golden_pending_run_record() {
         let pending_path = std::env::temp_dir().join(format!(
             "exa-agent-pending-lib-{}-{}.jsonl",
             std::process::id(),

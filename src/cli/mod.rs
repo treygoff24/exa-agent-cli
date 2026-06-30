@@ -574,7 +574,7 @@ pub enum WebsetsCmd {
     /// POST /v0/websets [create-POST].
     Create(WebsetsCreateArgs),
     /// GET /v0/websets.
-    List(PaginationArgs),
+    List(WebsetsListArgs),
     /// GET /v0/websets/{id}.
     Get { id: String },
     /// POST /v0/websets/{id}.
@@ -622,11 +622,19 @@ pub enum WebsetsCmd {
     },
 }
 
+#[derive(Args, Debug, Default)]
+pub struct WebsetsListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    #[arg(long)]
+    pub search: Option<String>,
+}
+
 #[derive(Args, Debug)]
 pub struct WebsetsCreateArgs {
     #[arg(long)]
     pub query: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub count: Option<u32>,
 }
 
@@ -634,10 +642,36 @@ pub struct WebsetsCreateArgs {
 pub struct WebsetsPreviewArgs {
     #[arg(long)]
     pub query: Option<String>,
-    #[arg(long)]
-    pub criteria: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10))]
     pub count: Option<u32>,
+    #[arg(long)]
+    pub criteria: Vec<String>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetEnrichmentFormat {
+    Text,
+    Date,
+    Number,
+    Options,
+    Email,
+    Phone,
+    Url,
+}
+
+impl WebsetEnrichmentFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetEnrichmentFormat::Text => "text",
+            WebsetEnrichmentFormat::Date => "date",
+            WebsetEnrichmentFormat::Number => "number",
+            WebsetEnrichmentFormat::Options => "options",
+            WebsetEnrichmentFormat::Email => "email",
+            WebsetEnrichmentFormat::Phone => "phone",
+            WebsetEnrichmentFormat::Url => "url",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -647,6 +681,8 @@ pub enum WebsetsItemsCmd {
         webset_id: String,
         #[command(flatten)]
         pagination: PaginationArgs,
+        #[arg(long = "source-id")]
+        source_id: Option<String>,
     },
     /// GET /v0/websets/{webset}/items/{id}.
     Get { webset_id: String, item_id: String },
@@ -661,8 +697,10 @@ pub enum WebsetsSearchesCmd {
         webset_id: String,
         #[arg(long)]
         query: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         count: Option<u32>,
+        #[arg(long)]
+        criteria: Vec<String>,
     },
     /// GET /v0/websets/{webset}/searches/{id}.
     Get {
@@ -683,6 +721,8 @@ pub enum WebsetsEnrichmentsCmd {
         webset_id: String,
         #[arg(long)]
         description: Option<String>,
+        #[arg(long, value_enum, ignore_case = true)]
+        enrichment_format: Option<WebsetEnrichmentFormat>,
     },
     /// GET /v0/websets/{webset}/enrichments/{id}.
     Get {
@@ -693,6 +733,10 @@ pub enum WebsetsEnrichmentsCmd {
     Update {
         webset_id: String,
         enrichment_id: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_enum, ignore_case = true)]
+        enrichment_format: Option<WebsetEnrichmentFormat>,
     },
     /// DELETE /v0/websets/{webset}/enrichments/{id}.
     Delete {
@@ -1074,7 +1118,7 @@ pub fn command_path(command: &Command) -> String {
     }
 }
 
-fn websets_command_path(sub: &WebsetsCmd) -> String {
+pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
     match sub {
         WebsetsCmd::Create(_) => "websets create".to_string(),
         WebsetsCmd::List(_) => "websets list".to_string(),

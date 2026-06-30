@@ -2525,6 +2525,695 @@ fn parse_websets_representative_nested() {
 }
 
 #[test]
+fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
+    let create = run_ok_json(&[
+        "websets",
+        "create",
+        "--query",
+        "SF startups",
+        "--count",
+        "10",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets create");
+    assert_eq!(create["data"]["request"]["path"], "/v0/websets");
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["search"]["query"], "SF startups");
+    assert_eq!(body["search"]["count"], 10);
+
+    let default_count = run_ok_json(&[
+        "websets",
+        "create",
+        "--query",
+        "SF startups",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &default_count["data"]["request"]["body"];
+    assert_eq!(body["search"]["query"], "SF startups");
+    assert!(body["search"].get("count").is_none());
+
+    let precedence = run_ok_json(&[
+        "websets",
+        "create",
+        "--query",
+        "flag query",
+        "--count",
+        "5",
+        "--body",
+        r#"{"search":{"query":"body query","count":7}}"#,
+        "--set",
+        "search.count=12",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &precedence["data"]["request"]["body"];
+    assert_eq!(body["search"]["query"], "body query");
+    assert_eq!(body["search"]["count"], 12);
+
+    let missing_body = run(&["websets", "create", "--compact"]);
+    assert_eq!(missing_body.status.code(), Some(11));
+    let stderr: serde_json::Value = serde_json::from_slice(&missing_body.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let zero_create_count = run(&[
+        "websets",
+        "create",
+        "--query",
+        "SF startups",
+        "--count",
+        "0",
+        "--compact",
+    ]);
+    assert_eq!(zero_create_count.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&zero_create_count.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let preview = run_ok_json(&[
+        "websets",
+        "preview",
+        "--query",
+        "AI tools",
+        "--count",
+        "3",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(preview["command"], "websets preview");
+    assert_eq!(preview["data"]["request"]["path"], "/v0/websets/preview");
+    let preview_body = &preview["data"]["request"]["body"];
+    assert_eq!(preview_body["search"]["query"], "AI tools");
+    assert_eq!(preview_body["search"]["count"], 3);
+    assert!(preview_body["search"].get("criteria").is_none());
+    assert_eq!(
+        preview["data"]["request"]["query"],
+        serde_json::json!([{"name": "search", "value": "true"}])
+    );
+
+    let decomposition_only = run_ok_json(&[
+        "websets",
+        "preview",
+        "--query",
+        "AI tools",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        decomposition_only["data"]["request"]["query"],
+        serde_json::json!([])
+    );
+
+    let preview_missing_query = run(&["websets", "preview", "--count", "3", "--compact"]);
+    assert_eq!(preview_missing_query.status.code(), Some(11));
+    let stderr: serde_json::Value = serde_json::from_slice(&preview_missing_query.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let preview_count_too_high = run(&[
+        "websets",
+        "preview",
+        "--query",
+        "AI tools",
+        "--count",
+        "11",
+        "--compact",
+    ]);
+    assert_eq!(preview_count_too_high.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&preview_count_too_high.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let preview_criteria = run(&[
+        "websets",
+        "preview",
+        "--query",
+        "AI tools",
+        "--criteria",
+        "must be B2B",
+        "--compact",
+    ]);
+    assert_eq!(preview_criteria.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&preview_criteria.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+}
+
+fn local_paginated_websets_list_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"ws_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"ws_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("failed to accept local pagination test request: {err}"),
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with("GET /v0/websets?search=founders&limit=1 "),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with("GET /v0/websets?search=founders&limit=1&cursor=cur2 "),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn websets_list_all_preserves_search_filter_across_pages() {
+    let (base_url, server) = local_paginated_websets_list_server();
+    let output = run_owned(&[
+        "websets".into(),
+        "list".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--search".into(),
+        "founders".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn local_paginated_websets_items_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"item_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"item_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => {
+                        panic!("failed to accept local items pagination test request: {err}")
+                    }
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with("GET /v0/websets/ws_abc/items?sourceId=src_1&limit=1 "),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with(
+                        "GET /v0/websets/ws_abc/items?sourceId=src_1&limit=1&cursor=cur2 "
+                    ),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn websets_items_list_all_preserves_source_id_filter_across_pages() {
+    let (base_url, server) = local_paginated_websets_items_server();
+    let output = run_owned(&[
+        "websets".into(),
+        "items".into(),
+        "list".into(),
+        "ws_abc".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--source-id".into(),
+        "src_1".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local websets items pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
+    let get = run_ok_json(&["websets", "get", "ws/abc", "--dry-run", "--compact"]);
+    assert_eq!(get["command"], "websets get");
+    assert_eq!(get["data"]["request"]["path"], "/v0/websets/ws%2Fabc");
+    assert!(get["data"]["request"]["body"].is_null());
+
+    let update = run_ok_json(&[
+        "websets",
+        "update",
+        "ws_abc",
+        "--set",
+        "title=Renamed",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(update["command"], "websets update");
+    assert_eq!(update["data"]["request"]["path"], "/v0/websets/ws_abc");
+    assert_eq!(update["data"]["request"]["body"]["title"], "Renamed");
+
+    let empty_update = run(&["websets", "update", "ws_abc", "--dry-run", "--compact"]);
+    assert_eq!(empty_update.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&empty_update.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let delete_preview = run_ok_json(&["websets", "delete", "ws_abc", "--dry-run", "--compact"]);
+    assert_eq!(delete_preview["command"], "websets delete");
+    assert_eq!(
+        delete_preview["data"]["request"]["path"],
+        "/v0/websets/ws_abc"
+    );
+    assert!(delete_preview["data"]["request"]["body"].is_null());
+
+    let delete_live = run(&["websets", "delete", "ws_abc", "--compact"]);
+    assert_eq!(delete_live.status.code(), Some(9));
+
+    let cancel_preview = run_ok_json(&["websets", "cancel", "ws_abc", "--dry-run", "--compact"]);
+    assert_eq!(cancel_preview["command"], "websets cancel");
+    assert_eq!(
+        cancel_preview["data"]["request"]["path"],
+        "/v0/websets/ws_abc/cancel"
+    );
+
+    let cancel_live = run(&["websets", "cancel", "ws_abc", "--compact"]);
+    assert_eq!(cancel_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_items_paths_filters_and_delete_safety() {
+    let list = run_ok_json(&[
+        "websets",
+        "items",
+        "list",
+        "ws_abc",
+        "--source-id",
+        "src_1",
+        "--limit",
+        "5",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "websets items list");
+    assert_eq!(list["data"]["request"]["path"], "/v0/websets/ws_abc/items");
+    assert_eq!(
+        list["data"]["request"]["query"],
+        serde_json::json!([
+            {"name": "sourceId", "value": "src_1"},
+            {"name": "limit", "value": "5"}
+        ])
+    );
+
+    let get = run_ok_json(&[
+        "websets",
+        "items",
+        "get",
+        "ws_abc",
+        "item/1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/v0/websets/ws_abc/items/item%2F1"
+    );
+    assert!(get["data"]["request"]["body"].is_null());
+
+    let delete_preview = run_ok_json(&[
+        "websets",
+        "items",
+        "delete",
+        "ws_abc",
+        "item_1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(delete_preview["command"], "websets items delete");
+    assert_eq!(
+        delete_preview["data"]["request"]["path"],
+        "/v0/websets/ws_abc/items/item_1"
+    );
+
+    let delete_live = run(&[
+        "websets",
+        "items",
+        "delete",
+        "ws_abc",
+        "item_1",
+        "--compact",
+    ]);
+    assert_eq!(delete_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_searches_create_get_cancel_shapes() {
+    let create = run_ok_json(&[
+        "websets",
+        "searches",
+        "create",
+        "ws_abc",
+        "--query",
+        "founders",
+        "--count",
+        "25",
+        "--criteria",
+        "must be technical",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets searches create");
+    assert_eq!(
+        create["data"]["request"]["path"],
+        "/v0/websets/ws_abc/searches"
+    );
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["query"], "founders");
+    assert_eq!(body["count"], 25);
+    assert_eq!(
+        body["criteria"],
+        serde_json::json!([{"description": "must be technical"}])
+    );
+
+    let missing = run(&[
+        "websets",
+        "searches",
+        "create",
+        "ws_abc",
+        "--query",
+        "founders",
+        "--compact",
+    ]);
+    assert_eq!(missing.status.code(), Some(11));
+
+    let zero_count = run(&[
+        "websets",
+        "searches",
+        "create",
+        "ws_abc",
+        "--query",
+        "founders",
+        "--count",
+        "0",
+        "--compact",
+    ]);
+    assert_eq!(zero_count.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&zero_count.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let get = run_ok_json(&[
+        "websets",
+        "searches",
+        "get",
+        "ws_abc",
+        "search_1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/v0/websets/ws_abc/searches/search_1"
+    );
+
+    let cancel = run_ok_json(&[
+        "websets",
+        "searches",
+        "cancel",
+        "ws_abc",
+        "search_1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(cancel["command"], "websets searches cancel");
+    assert_eq!(
+        cancel["data"]["request"]["path"],
+        "/v0/websets/ws_abc/searches/search_1/cancel"
+    );
+
+    let cancel_live = run(&[
+        "websets",
+        "searches",
+        "cancel",
+        "ws_abc",
+        "search_1",
+        "--compact",
+    ]);
+    assert_ne!(cancel_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_enrichments_create_update_delete_cancel_shapes() {
+    let create = run_ok_json(&[
+        "websets",
+        "enrichments",
+        "create",
+        "ws_abc",
+        "--description",
+        "Company size",
+        "--enrichment-format",
+        "text",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets enrichments create");
+    assert_eq!(
+        create["data"]["request"]["path"],
+        "/v0/websets/ws_abc/enrichments"
+    );
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["description"], "Company size");
+    assert_eq!(body["format"], "text");
+
+    let update = run_ok_json(&[
+        "websets",
+        "enrichments",
+        "update",
+        "ws_abc",
+        "enr_1",
+        "--description",
+        "Updated label",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(update["command"], "websets enrichments update");
+    assert_eq!(
+        update["data"]["request"]["path"],
+        "/v0/websets/ws_abc/enrichments/enr_1"
+    );
+    assert_eq!(
+        update["data"]["request"]["body"]["description"],
+        "Updated label"
+    );
+
+    let delete_live = run(&[
+        "websets",
+        "enrichments",
+        "delete",
+        "ws_abc",
+        "enr_1",
+        "--compact",
+    ]);
+    assert_eq!(delete_live.status.code(), Some(9));
+
+    let cancel_live = run(&[
+        "websets",
+        "enrichments",
+        "cancel",
+        "ws_abc",
+        "enr_1",
+        "--compact",
+    ]);
+    assert_eq!(cancel_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_imports_body_first_create_list_get_update_delete_shapes() {
+    let create = run_ok_json(&[
+        "websets",
+        "imports",
+        "create",
+        "--source",
+        "csv",
+        "--body",
+        r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets imports create");
+    assert_eq!(create["data"]["request"]["path"], "/v0/imports");
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["format"], "csv");
+    assert_eq!(body["size"], 1024);
+    assert_eq!(body["count"], 10);
+
+    let missing_body = run(&[
+        "websets",
+        "imports",
+        "create",
+        "--source",
+        "csv",
+        "--compact",
+    ]);
+    assert_eq!(missing_body.status.code(), Some(11));
+    let stderr: serde_json::Value = serde_json::from_slice(&missing_body.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let source_err = run(&[
+        "websets",
+        "imports",
+        "create",
+        "--source",
+        "xml",
+        "--body",
+        r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#,
+        "--compact",
+    ]);
+    assert_eq!(source_err.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&source_err.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let url_err = run(&[
+        "websets",
+        "imports",
+        "create",
+        "--url",
+        "https://example.com/data.csv",
+        "--compact",
+    ]);
+    assert_eq!(url_err.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&url_err.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let csv_err = run(&[
+        "websets",
+        "imports",
+        "create",
+        "--csv",
+        "/tmp/data.csv",
+        "--compact",
+    ]);
+    assert_eq!(csv_err.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&csv_err.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "not_implemented");
+
+    let list = run_ok_json(&[
+        "websets",
+        "imports",
+        "list",
+        "--limit",
+        "10",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "websets imports list");
+    assert_eq!(list["data"]["request"]["path"], "/v0/imports");
+
+    let get = run_ok_json(&[
+        "websets",
+        "imports",
+        "get",
+        "imp_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(get["data"]["request"]["path"], "/v0/imports/imp_abc");
+
+    let update = run_ok_json(&[
+        "websets",
+        "imports",
+        "update",
+        "imp_abc",
+        "--set",
+        "title=Completed import",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        update["data"]["request"]["body"]["title"],
+        "Completed import"
+    );
+
+    let delete_live = run(&["websets", "imports", "delete", "imp_abc", "--compact"]);
+    assert_eq!(delete_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_monitors_remain_distinct_from_top_level_monitor() {
+    assert_path(&["monitor", "list"], "monitor list");
+    assert_path(&["websets", "monitors", "list"], "websets monitors list");
+
+    let top_level = run_ok_json(&["monitor", "list", "--dry-run", "--compact"]);
+    assert_eq!(top_level["data"]["request"]["path"], "/monitors");
+
+    let websets_monitors = run(&["websets", "monitors", "list", "--dry-run", "--compact"]);
+    assert_eq!(websets_monitors.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&websets_monitors.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "not_implemented");
+}
+
+#[test]
 fn parse_admin_keys_commands() {
     assert_path(
         &[

@@ -21,11 +21,12 @@ use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
 
 use cli::{
-    command_path, AgentCmd, AgentRunArgs, AgentRunsCmd, AgentRunsEventsArgs, AnswerArgs, AuthCmd,
-    Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs,
-    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
-    PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs,
-    SimilarArgs, TeamCmd,
+    command_path, websets_command_path, AgentCmd, AgentRunArgs, AgentRunsCmd, AgentRunsEventsArgs,
+    AnswerArgs, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs,
+    FetchArgs, GlobalArgs, MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs,
+    MonitorRunsCmd, PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd,
+    SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsImportsCmd, WebsetsListArgs, WebsetsPreviewArgs,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -158,6 +159,7 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Answer(args) => dispatch_answer(args, &cli.globals, pretty),
         Command::Context(args) => dispatch_context(args, &cli.globals, pretty),
         Command::Monitor { sub } => dispatch_monitor(sub, &cli.globals, pretty),
+        Command::Websets { sub } => dispatch_websets(sub, &cli.globals, pretty),
         Command::Team { sub } => dispatch_team(sub, &cli.globals, pretty),
         Command::Agent { sub } => dispatch_agent(sub, &cli.globals, pretty),
         Command::Research { sub } => dispatch_research(sub, &cli.globals, pretty),
@@ -1470,6 +1472,964 @@ fn dispatch_monitor_runs_get(
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
         let path = substitute_path(op.api_path, &[("id", monitor_id), ("runId", run_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        WebsetsCmd::Create(args) => dispatch_websets_create(args, globals, pretty),
+        WebsetsCmd::List(args) => dispatch_websets_list(args, globals, pretty),
+        WebsetsCmd::Get { id } => dispatch_websets_get(id, globals, pretty),
+        WebsetsCmd::Update { id } => dispatch_websets_update(id, globals, pretty),
+        WebsetsCmd::Delete { id } => dispatch_websets_delete(id, globals, pretty),
+        WebsetsCmd::Cancel { id } => dispatch_websets_cancel(id, globals, pretty),
+        WebsetsCmd::Preview(args) => dispatch_websets_preview(args, globals, pretty),
+        WebsetsCmd::Items { sub } => dispatch_websets_items(sub, globals, pretty),
+        WebsetsCmd::Searches { sub } => dispatch_websets_searches(sub, globals, pretty),
+        WebsetsCmd::Enrichments { sub } => dispatch_websets_enrichments(sub, globals, pretty),
+        WebsetsCmd::Imports { sub } => dispatch_websets_imports(sub, globals, pretty),
+        WebsetsCmd::Monitors { .. } | WebsetsCmd::Events { .. } | WebsetsCmd::Webhooks { .. } => {
+            Err(not_implemented(
+                &websets_command_path(sub),
+                "Wave 4C; monitors/events/webhooks are not wired in this wave",
+            ))
+        }
+    }
+}
+
+fn insert_search_field(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+) {
+    let search = body
+        .entry("search".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = search.as_object_mut() {
+        obj.insert(key.to_string(), value);
+    }
+}
+
+fn websets_body_is_non_empty_object(body: &serde_json::Value) -> bool {
+    body.as_object().is_some_and(|object| !object.is_empty())
+}
+
+fn websets_search_has_query(body: &serde_json::Value) -> bool {
+    let search = body.get("search").and_then(|value| value.as_object());
+    search
+        .and_then(|obj| obj.get("query"))
+        .and_then(|query| query.as_str())
+        .is_some_and(|query| !query.is_empty())
+}
+
+fn build_websets_create_named_body(args: &WebsetsCreateArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(query) = &args.query {
+        insert_search_field(&mut body, "query", serde_json::Value::String(query.clone()));
+    }
+    if let Some(count) = args.count {
+        insert_search_field(&mut body, "count", serde_json::json!(count));
+    }
+    serde_json::Value::Object(body)
+}
+
+fn build_websets_create_spec(
+    args: &WebsetsCreateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "create"])
+        .expect("websets create is in registry");
+    let mut body = build_websets_create_named_body(args);
+    body = apply_request_overrides(body, globals)?;
+    if !websets_body_is_non_empty_object(&body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets create requires at least one field (via --query, --body, or --set)",
+            )
+            .with_suggestion("exa-agent websets create --query \"SF startups\""),
+        ));
+    }
+    if body.get("search").is_some() && !websets_search_has_query(&body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets create search requires search.query (via --query, --body, or --set)",
+            )
+            .with_suggestion("exa-agent websets create --query \"SF startups\""),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_websets_create(
+    args: &WebsetsCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "create"])
+        .expect("websets create is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_create_spec(args, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_websets_preview_named_body(args: &WebsetsPreviewArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(query) = &args.query {
+        insert_search_field(&mut body, "query", serde_json::Value::String(query.clone()));
+    }
+    if let Some(count) = args.count {
+        insert_search_field(&mut body, "count", serde_json::json!(count));
+    }
+    serde_json::Value::Object(body)
+}
+
+fn build_websets_preview_spec(
+    args: &WebsetsPreviewArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "preview"])
+        .expect("websets preview is in registry");
+    if !args.criteria.is_empty() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`websets preview --criteria` is not supported by the current upstream preview schema",
+            )
+            .with_suggestion(
+                "Use `websets searches create ... --criteria` or pass a current schema-compatible body with --body/--set",
+            ),
+        ));
+    }
+    let body = build_websets_preview_named_body(args);
+    let body = apply_request_overrides(body, globals)?;
+    if !websets_search_has_query(&body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets preview requires search.query (via --query, --body, or --set)",
+            )
+            .with_suggestion("exa-agent websets preview --query \"AI tools\" --count 3"),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn websets_preview_query(body: &serde_json::Value) -> Vec<(String, String)> {
+    if body
+        .pointer("/search/count")
+        .is_some_and(serde_json::Value::is_number)
+    {
+        vec![("search".to_string(), "true".to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn dispatch_websets_preview(
+    args: &WebsetsPreviewArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "preview"])
+        .expect("websets preview is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_preview_spec(args, globals)?;
+        let query = websets_preview_query(&spec.body);
+        dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+    })
+}
+
+fn websets_list_static_query(args: &WebsetsListArgs) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    if let Some(search) = &args.search {
+        query.push(("search".to_string(), search.clone()));
+    }
+    query
+}
+
+fn dispatch_websets_list(
+    args: &WebsetsListArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op =
+        registry::lookup_by_segments(&["websets", "list"]).expect("websets list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(&args.pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let static_query = websets_list_static_query(args);
+        let query = merge_static_and_pagination_query(&static_query, &args.pagination);
+        if args.pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                &args.pagination,
+                None,
+                &static_query,
+            )
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn dispatch_websets_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "get"]).expect("websets get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn build_websets_update_spec(
+    op: &'static registry::OperationDef,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let body = apply_request_overrides(serde_json::json!({}), globals)?;
+    if body.as_object().is_some_and(|object| object.is_empty()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "websets update requires a request body via --body or --set",
+            )
+            .with_suggestion("exa-agent websets update <id> --set title=\"My Webset\""),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_websets_update(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "update"])
+        .expect("websets update is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_update_spec(op, globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "delete"])
+        .expect("websets delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!("Refusing to delete webset `{id}` without `--yes`; preview first with `websets get`"),
+            format!("exa-agent websets delete {id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_cancel(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "cancel"])
+        .expect("websets cancel is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!("Refusing to cancel webset `{id}` without `--yes`; preview first with `websets get`"),
+            format!("exa-agent websets cancel {id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_items(
+    sub: &cli::WebsetsItemsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    use cli::WebsetsItemsCmd;
+    match sub {
+        WebsetsItemsCmd::List {
+            webset_id,
+            pagination,
+            source_id,
+        } => dispatch_websets_items_list(
+            webset_id,
+            source_id.as_deref(),
+            pagination,
+            globals,
+            pretty,
+        ),
+        WebsetsItemsCmd::Get { webset_id, item_id } => {
+            dispatch_websets_items_get(webset_id, item_id, globals, pretty)
+        }
+        WebsetsItemsCmd::Delete { webset_id, item_id } => {
+            dispatch_websets_items_delete(webset_id, item_id, globals, pretty)
+        }
+    }
+}
+
+fn websets_items_list_static_query(source_id: Option<&str>) -> Vec<(String, String)> {
+    let mut query = Vec::new();
+    if let Some(source_id) = source_id {
+        query.push(("sourceId".to_string(), source_id.to_string()));
+    }
+    query
+}
+
+fn dispatch_websets_items_list(
+    webset_id: &str,
+    source_id: Option<&str>,
+    pagination: &PaginationArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "items", "list"])
+        .expect("websets items list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id)]);
+        let static_query = websets_items_list_static_query(source_id);
+        let query = merge_static_and_pagination_query(&static_query, pagination);
+        if pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                pagination,
+                Some(path.as_str()),
+                &static_query,
+            )
+        } else {
+            dispatch_typed_command_routed(
+                spec,
+                globals,
+                pretty,
+                Some(path.as_str()),
+                &query,
+                false,
+                None,
+            )
+        }
+    })
+}
+
+fn dispatch_websets_items_get(
+    webset_id: &str,
+    item_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "items", "get"])
+        .expect("websets items get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_items_delete(
+    webset_id: &str,
+    item_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "items", "delete"])
+        .expect("websets items delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!(
+                "Refusing to delete webset item `{item_id}` without `--yes`; preview first with `websets items get`"
+            ),
+            format!("exa-agent websets items delete {webset_id} {item_id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_searches(
+    sub: &cli::WebsetsSearchesCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    use cli::WebsetsSearchesCmd;
+    match sub {
+        WebsetsSearchesCmd::Create {
+            webset_id,
+            query,
+            count,
+            criteria,
+        } => dispatch_websets_searches_create(
+            webset_id,
+            query.as_deref(),
+            *count,
+            criteria,
+            globals,
+            pretty,
+        ),
+        WebsetsSearchesCmd::Get {
+            webset_id,
+            search_id,
+        } => dispatch_websets_searches_get(webset_id, search_id, globals, pretty),
+        WebsetsSearchesCmd::Cancel {
+            webset_id,
+            search_id,
+        } => dispatch_websets_searches_cancel(webset_id, search_id, globals, pretty),
+    }
+}
+
+fn websets_searches_create_has_query_and_count(body: &serde_json::Value) -> bool {
+    let has_query = body
+        .get("query")
+        .and_then(|query| query.as_str())
+        .is_some_and(|query| !query.is_empty());
+    let has_count = body
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .is_some();
+    has_query && has_count
+}
+
+fn build_websets_searches_create_spec(
+    webset_id: &str,
+    query: Option<&str>,
+    count: Option<u32>,
+    criteria: &[String],
+    globals: &GlobalArgs,
+) -> Result<(request::RequestSpec, String), CliError> {
+    let op = registry::lookup_by_segments(&["websets", "searches", "create"])
+        .expect("websets searches create is in registry");
+    let mut body = serde_json::Map::new();
+    if let Some(query) = query {
+        body.insert(
+            "query".to_string(),
+            serde_json::Value::String(query.to_string()),
+        );
+    }
+    if let Some(count) = count {
+        body.insert("count".to_string(), serde_json::json!(count));
+    }
+    if !criteria.is_empty() {
+        let criteria: Vec<serde_json::Value> = criteria
+            .iter()
+            .map(|description| serde_json::json!({ "description": description }))
+            .collect();
+        body.insert("criteria".to_string(), serde_json::Value::Array(criteria));
+    }
+    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
+    if !websets_searches_create_has_query_and_count(&body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets searches create requires query and count (via --query/--count, --body, or --set)",
+            )
+            .with_suggestion(
+                "exa-agent websets searches create <webset> --query \"founders\" --count 25",
+            ),
+        ));
+    }
+    let path = substitute_path(op.api_path, &[("webset", webset_id)]);
+    Ok((request::RequestSpec { op, body }, path))
+}
+
+fn dispatch_websets_searches_create(
+    webset_id: &str,
+    query: Option<&str>,
+    count: Option<u32>,
+    criteria: &[String],
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "searches", "create"])
+        .expect("websets searches create is in registry");
+    with_typed_error_context(op, globals, || {
+        let (spec, path) =
+            build_websets_searches_create_spec(webset_id, query, count, criteria, globals)?;
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_searches_get(
+    webset_id: &str,
+    search_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "searches", "get"])
+        .expect("websets searches get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", search_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_searches_cancel(
+    webset_id: &str,
+    search_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "searches", "cancel"])
+        .expect("websets searches cancel is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", search_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_enrichments(
+    sub: &cli::WebsetsEnrichmentsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    use cli::WebsetsEnrichmentsCmd;
+    match sub {
+        WebsetsEnrichmentsCmd::Create {
+            webset_id,
+            description,
+            enrichment_format,
+        } => dispatch_websets_enrichments_create(
+            webset_id,
+            description.as_deref(),
+            *enrichment_format,
+            globals,
+            pretty,
+        ),
+        WebsetsEnrichmentsCmd::Get {
+            webset_id,
+            enrichment_id,
+        } => dispatch_websets_enrichments_get(webset_id, enrichment_id, globals, pretty),
+        WebsetsEnrichmentsCmd::Update {
+            webset_id,
+            enrichment_id,
+            description,
+            enrichment_format,
+        } => dispatch_websets_enrichments_update(
+            webset_id,
+            enrichment_id,
+            description.as_deref(),
+            *enrichment_format,
+            globals,
+            pretty,
+        ),
+        WebsetsEnrichmentsCmd::Delete {
+            webset_id,
+            enrichment_id,
+        } => dispatch_websets_enrichments_delete(webset_id, enrichment_id, globals, pretty),
+        WebsetsEnrichmentsCmd::Cancel {
+            webset_id,
+            enrichment_id,
+        } => dispatch_websets_enrichments_cancel(webset_id, enrichment_id, globals, pretty),
+    }
+}
+
+fn build_websets_enrichments_create_spec(
+    webset_id: &str,
+    description: Option<&str>,
+    format: Option<WebsetEnrichmentFormat>,
+    globals: &GlobalArgs,
+) -> Result<(request::RequestSpec, String), CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "create"])
+        .expect("websets enrichments create is in registry");
+    let mut body = serde_json::Map::new();
+    if let Some(description) = description {
+        body.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.to_string()),
+        );
+    }
+    if let Some(format) = format {
+        body.insert(
+            "format".to_string(),
+            serde_json::Value::String(format.as_str().to_string()),
+        );
+    }
+    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
+    let has_description = body
+        .get("description")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty());
+    if !has_description {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "websets enrichments create requires description (via --description, --body, or --set)",
+            )
+            .with_suggestion(
+                "exa-agent websets enrichments create <webset> --description \"Company size\" --enrichment-format text",
+            ),
+        ));
+    }
+    let path = substitute_path(op.api_path, &[("webset", webset_id)]);
+    Ok((request::RequestSpec { op, body }, path))
+}
+
+fn dispatch_websets_enrichments_create(
+    webset_id: &str,
+    description: Option<&str>,
+    format: Option<WebsetEnrichmentFormat>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "create"])
+        .expect("websets enrichments create is in registry");
+    with_typed_error_context(op, globals, || {
+        let (spec, path) =
+            build_websets_enrichments_create_spec(webset_id, description, format, globals)?;
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_enrichments_get(
+    webset_id: &str,
+    enrichment_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "get"])
+        .expect("websets enrichments get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn build_websets_enrichments_update_spec(
+    webset_id: &str,
+    enrichment_id: &str,
+    description: Option<&str>,
+    format: Option<WebsetEnrichmentFormat>,
+    globals: &GlobalArgs,
+) -> Result<(request::RequestSpec, String), CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "update"])
+        .expect("websets enrichments update is in registry");
+    let mut body = serde_json::Map::new();
+    if let Some(description) = description {
+        body.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.to_string()),
+        );
+    }
+    if let Some(format) = format {
+        body.insert(
+            "format".to_string(),
+            serde_json::Value::String(format.as_str().to_string()),
+        );
+    }
+    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
+    if body.as_object().is_some_and(|object| object.is_empty()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "websets enrichments update requires at least one field via named flags, --body, or --set",
+            )
+            .with_suggestion(
+                "exa-agent websets enrichments update <webset> <id> --description \"Updated label\"",
+            ),
+        ));
+    }
+    let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+    Ok((request::RequestSpec { op, body }, path))
+}
+
+fn dispatch_websets_enrichments_update(
+    webset_id: &str,
+    enrichment_id: &str,
+    description: Option<&str>,
+    format: Option<WebsetEnrichmentFormat>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "update"])
+        .expect("websets enrichments update is in registry");
+    with_typed_error_context(op, globals, || {
+        let (spec, path) = build_websets_enrichments_update_spec(
+            webset_id,
+            enrichment_id,
+            description,
+            format,
+            globals,
+        )?;
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_enrichments_delete(
+    webset_id: &str,
+    enrichment_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "delete"])
+        .expect("websets enrichments delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!(
+                "Refusing to delete enrichment `{enrichment_id}` without `--yes`; preview first with `websets enrichments get`"
+            ),
+            format!(
+                "exa-agent websets enrichments delete {webset_id} {enrichment_id} --yes"
+            ),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_enrichments_cancel(
+    webset_id: &str,
+    enrichment_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "enrichments", "cancel"])
+        .expect("websets enrichments cancel is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!(
+                "Refusing to cancel enrichment `{enrichment_id}` without `--yes`; preview first with `websets enrichments get`"
+            ),
+            format!(
+                "exa-agent websets enrichments cancel {webset_id} {enrichment_id} --yes"
+            ),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_imports(
+    sub: &WebsetsImportsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    match sub {
+        WebsetsImportsCmd::Create { source, url, csv } => dispatch_websets_imports_create(
+            source.as_deref(),
+            url.as_deref(),
+            csv.as_deref(),
+            globals,
+            pretty,
+        ),
+        WebsetsImportsCmd::List(pagination) => {
+            dispatch_websets_imports_list(pagination, globals, pretty)
+        }
+        WebsetsImportsCmd::Get { import_id } => {
+            dispatch_websets_imports_get(import_id, globals, pretty)
+        }
+        WebsetsImportsCmd::Update { import_id } => {
+            dispatch_websets_imports_update(import_id, globals, pretty)
+        }
+        WebsetsImportsCmd::Delete { import_id } => {
+            dispatch_websets_imports_delete(import_id, globals, pretty)
+        }
+    }
+}
+
+fn build_websets_imports_create_spec(
+    source: Option<&str>,
+    url: Option<&str>,
+    csv: Option<&str>,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    if source.is_some_and(|source| source != "csv") {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`websets imports create --source` currently supports only `csv`",
+            )
+            .with_suggestion("exa-agent websets imports create --source csv --body @import.json"),
+        ));
+    }
+    if csv.is_some() {
+        return Err(CliError::Usage(Diag::new(
+            "not_implemented",
+            "CSV upload convenience via --csv is deferred; build the import body with --body/--set instead",
+        )));
+    }
+    if url.is_some() {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            "`--url` upload convenience is deferred; build the import body with --body/--set instead",
+        )));
+    }
+    let op = registry::lookup_by_segments(&["websets", "imports", "create"])
+        .expect("websets imports create is in registry");
+    let mut body = serde_json::Map::new();
+    if source == Some("csv") {
+        body.insert(
+            "format".to_string(),
+            serde_json::Value::String("csv".to_string()),
+        );
+    }
+    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
+    validate_websets_import_create_body(&body)?;
+    Ok(request::RequestSpec { op, body })
+}
+
+fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), CliError> {
+    let format = body.get("format").and_then(serde_json::Value::as_str);
+    if let Some(format) = format {
+        if format != "csv" {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    "websets imports create currently supports only `format: \"csv\"`",
+                )
+                .with_suggestion("Set `format` to `csv` or pass `--source csv`."),
+            ));
+        }
+    }
+
+    let mut missing = Vec::new();
+    if !body.get("size").is_some_and(serde_json::Value::is_number) {
+        missing.push("size");
+    }
+    if !body.get("count").is_some_and(serde_json::Value::is_number) {
+        missing.push("count");
+    }
+    if format != Some("csv") {
+        missing.push("format=csv");
+    }
+    if !body.get("entity").is_some_and(serde_json::Value::is_object) {
+        missing.push("entity");
+    }
+    if !missing.is_empty() {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                format!(
+                    "websets imports create requires {} (via --body/--set; --source csv can fill format)",
+                    missing.join(", ")
+                ),
+            )
+            .with_suggestion(
+                r#"exa-agent websets imports create --source csv --body '{"size":1024,"count":10,"entity":{"type":"company"}}'"#,
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn dispatch_websets_imports_create(
+    source: Option<&str>,
+    url: Option<&str>,
+    csv: Option<&str>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "imports", "create"])
+        .expect("websets imports create is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_imports_create_spec(source, url, csv, globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn dispatch_websets_imports_list(
+    pagination: &PaginationArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "imports", "list"])
+        .expect("websets imports list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let query = pagination_query(pagination);
+        if pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None, &[])
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn dispatch_websets_imports_get(
+    import_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "imports", "get"])
+        .expect("websets imports get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", import_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn build_websets_imports_update_spec(
+    op: &'static registry::OperationDef,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let body = apply_request_overrides(serde_json::json!({}), globals)?;
+    if body.as_object().is_some_and(|object| object.is_empty()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "websets imports update requires a request body via --body or --set",
+            )
+            .with_suggestion(
+                "exa-agent websets imports update <id> --set title=\"Updated import\"",
+            ),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_websets_imports_update(
+    import_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "imports", "update"])
+        .expect("websets imports update is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_websets_imports_update_spec(op, globals)?;
+        let path = substitute_path(op.api_path, &[("id", import_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_imports_delete(
+    import_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "imports", "delete"])
+        .expect("websets imports delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!(
+                "Refusing to delete import `{import_id}` without `--yes`; preview first with `websets imports get`"
+            ),
+            format!("exa-agent websets imports delete {import_id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", import_id)]);
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }

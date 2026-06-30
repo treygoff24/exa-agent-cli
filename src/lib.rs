@@ -1620,30 +1620,10 @@ fn dispatch_agent_runs_delete(
 ) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["agent", "runs", "delete"]).expect("agent runs delete");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!("Refusing to delete agent run `{id}` without `--yes`; preview first with `agent runs get`"),
-            format!("exa-agent agent runs delete {id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
-}
-
-fn ensure_destructive_confirmed(
-    op: &'static registry::OperationDef,
-    globals: &GlobalArgs,
-    message: impl Into<String>,
-    suggestion: impl Into<String>,
-) -> Result<(), CliError> {
-    if !op.destructive() || globals.yes || globals.dry_run || globals.print_request {
-        return Ok(());
-    }
-    Err(CliError::Safety(
-        Diag::new("confirmation_required", message.into()).with_suggestion(suggestion.into()),
-    ))
 }
 
 fn globals_with_extra_headers(globals: &GlobalArgs, extra: &[(String, String)]) -> GlobalArgs {
@@ -2250,12 +2230,6 @@ fn dispatch_monitor_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
     let op = registry::lookup_by_segments(&["monitor", "delete"])
         .expect("monitor delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!("Refusing to delete monitor `{id}` without `--yes`; preview first with `monitor get`"),
-            format!("exa-agent monitor delete {id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -2700,12 +2674,6 @@ fn dispatch_websets_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
     let op = registry::lookup_by_segments(&["websets", "delete"])
         .expect("websets delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!("Refusing to delete webset `{id}` without `--yes`; preview first with `websets get`"),
-            format!("exa-agent websets delete {id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -2716,12 +2684,6 @@ fn dispatch_websets_cancel(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
     let op = registry::lookup_by_segments(&["websets", "cancel"])
         .expect("websets cancel is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!("Refusing to cancel webset `{id}` without `--yes`; preview first with `websets get`"),
-            format!("exa-agent websets cancel {id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -2825,14 +2787,6 @@ fn dispatch_websets_items_delete(
     let op = registry::lookup_by_segments(&["websets", "items", "delete"])
         .expect("websets items delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!(
-                "Refusing to delete webset item `{item_id}` without `--yes`; preview first with `websets items get`"
-            ),
-            format!("exa-agent websets items delete {webset_id} {item_id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -3162,16 +3116,6 @@ fn dispatch_websets_enrichments_delete(
     let op = registry::lookup_by_segments(&["websets", "enrichments", "delete"])
         .expect("websets enrichments delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!(
-                "Refusing to delete enrichment `{enrichment_id}` without `--yes`; preview first with `websets enrichments get`"
-            ),
-            format!(
-                "exa-agent websets enrichments delete {webset_id} {enrichment_id} --yes"
-            ),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path =
             checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
@@ -3188,16 +3132,6 @@ fn dispatch_websets_enrichments_cancel(
     let op = registry::lookup_by_segments(&["websets", "enrichments", "cancel"])
         .expect("websets enrichments cancel is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!(
-                "Refusing to cancel enrichment `{enrichment_id}` without `--yes`; preview first with `websets enrichments get`"
-            ),
-            format!(
-                "exa-agent websets enrichments cancel {webset_id} {enrichment_id} --yes"
-            ),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path =
             checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
@@ -3408,14 +3342,6 @@ fn dispatch_websets_imports_delete(
     let op = registry::lookup_by_segments(&["websets", "imports", "delete"])
         .expect("websets imports delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!(
-                "Refusing to delete import `{import_id}` without `--yes`; preview first with `websets imports get`"
-            ),
-            format!("exa-agent websets imports delete {import_id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", import_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -3748,14 +3674,6 @@ fn dispatch_websets_monitors_delete(
     let op = registry::lookup_by_segments(&["websets", "monitors", "delete"])
         .expect("websets monitors delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!(
-                "Refusing to delete monitor `{monitor_id}` without `--yes`; preview first with `websets monitors get`"
-            ),
-            format!("exa-agent websets monitors delete {monitor_id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", monitor_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -4212,14 +4130,6 @@ fn dispatch_websets_webhooks_delete(
     let op = registry::lookup_by_segments(&["websets", "webhooks", "delete"])
         .expect("websets webhooks delete is in registry");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(
-            op,
-            globals,
-            format!(
-                "Refusing to delete webhook `{webhook_id}` without `--yes`; preview first with `websets webhooks get`"
-            ),
-            format!("exa-agent websets webhooks delete {webhook_id} --yes"),
-        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", webhook_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -4756,6 +4666,26 @@ fn dispatch_typed_command_with_options(
     }
 }
 
+fn ensure_registry_yes_confirmed(
+    op: &'static registry::OperationDef,
+    globals: &GlobalArgs,
+) -> Result<(), CliError> {
+    if !op.destructive()
+        || globals.yes
+        || !matches!(op.confirm_protocol(), Some(registry::ConfirmProtocol::Yes))
+    {
+        return Ok(());
+    }
+    let command = op.command();
+    Err(CliError::Safety(
+        Diag::new(
+            "confirmation_required",
+            format!("Refusing live `{command}` because it is destructive; preview with `--dry-run` or pass `--yes` after inspection"),
+        )
+        .with_suggestion(format!("exa-agent {command} ... --yes")),
+    ))
+}
+
 fn dispatch_typed_inner(
     spec: &request::RequestSpec,
     globals: &GlobalArgs,
@@ -4784,6 +4714,7 @@ fn dispatch_typed_inner(
         );
         return Ok(0);
     }
+    ensure_registry_yes_confirmed(spec.op, globals)?;
 
     let effective_globals = options
         .extra_headers

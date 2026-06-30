@@ -137,6 +137,15 @@ impl OperationDef {
         self.dangerous || self.method == Method::Delete
     }
 
+    pub fn confirm_protocol(&self) -> Option<ConfirmProtocol> {
+        self.capabilities
+            .iter()
+            .find_map(|capability| match capability {
+                Capability::Confirm(protocol) => Some(*protocol),
+                _ => None,
+            })
+    }
+
     /// Space-joined command path, e.g. `agent runs create`.
     pub fn command(&self) -> String {
         self.cli_path.join(" ")

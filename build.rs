@@ -31,6 +31,8 @@ struct OpMeta {
     cli_path: String,
     namespace: String,
     #[serde(default)]
+    confirm: Option<ConfirmMeta>,
+    #[serde(default)]
     idempotency_sensitive: bool,
     #[serde(default)]
     dangerous: bool,
@@ -50,6 +52,20 @@ struct OpMeta {
     source_version: Option<String>,
     #[serde(default)]
     fields: Vec<FieldMeta>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum ConfirmMeta {
+    Simple(ConfirmKind),
+    YesPlusEcho { yes_plus_echo: String },
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfirmKind {
+    Yes,
+    EchoId,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +164,7 @@ struct OpRow {
     cursor: Option<String>,
     dangerous: bool,
     namespace: &'static str,
+    confirm: Option<ConfirmMeta>,
     idempotency_sensitive: bool,
     deprecated: bool,
     source: String,
@@ -211,6 +228,7 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         cursor: meta.cursor.clone(),
         dangerous: meta.dangerous,
         namespace,
+        confirm: meta.confirm.clone(),
         idempotency_sensitive: meta.idempotency_sensitive,
         deprecated,
         source,
@@ -252,13 +270,14 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
             f.required
         )?;
     }
+    let capabilities = confirm_capabilities(r)?;
     writeln!(
         out,
         "    OperationDef {{ cli_path: &[{cli_path}], operation_id: {oid:?}, method: {method}, \
          api_path: {api_path:?}, read_only: {read_only}, streaming: {streaming}, pagination: {pagination}, \
          dangerous: {dangerous}, namespace: Namespace::{ns}, idempotency_sensitive: {idem}, \
          deprecated: {dep}, source: {source:?}, source_version: {sver:?}, fields: &[{fields}], \
-         capabilities: &[], body_builder: None, validators: &[], mixed_status_exit: false }},",
+         capabilities: &[{capabilities}], body_builder: None, validators: &[], mixed_status_exit: false }},",
         oid = r.operation_id,
         api_path = r.api_path,
         read_only = r.read_only,
@@ -271,6 +290,26 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         sver = r.source_version,
     )?;
     Ok(())
+}
+
+fn confirm_capabilities(r: &OpRow) -> Result<String> {
+    let Some(confirm) = &r.confirm else {
+        return Ok(String::new());
+    };
+    let protocol = match confirm {
+        ConfirmMeta::Simple(ConfirmKind::Yes) => "ConfirmProtocol::Yes".to_string(),
+        ConfirmMeta::Simple(ConfirmKind::EchoId) => "ConfirmProtocol::EchoId".to_string(),
+        ConfirmMeta::YesPlusEcho { yes_plus_echo } => {
+            if yes_plus_echo.is_empty() {
+                return Err(anyhow!(
+                    "op {}: confirm yes_plus_echo token cannot be empty",
+                    r.operation_id
+                ));
+            }
+            format!("ConfirmProtocol::YesPlusEcho({yes_plus_echo:?})")
+        }
+    };
+    Ok(format!("Capability::Confirm({protocol}), "))
 }
 
 fn method_variant(m: &str) -> Result<&'static str> {

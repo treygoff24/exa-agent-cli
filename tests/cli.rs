@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use exa_agent_cli::cli::{command_path, Cli, Command};
+use exa_agent_cli::registry::{self, ConfirmProtocol};
 use exa_agent_cli::transport;
 use std::fs;
 use std::io::{BufRead, ErrorKind, Read, Write};
@@ -102,6 +103,76 @@ fn run_ok_json(args: &[&str]) -> serde_json::Value {
 
 fn stderr_json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stderr).unwrap_or_else(|e| panic!("stderr was not JSON: {e}"))
+}
+
+fn assert_confirmation_required(output: &Output, command: &str) -> serde_json::Value {
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "{command} should refuse without confirmation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "{command} wrote stdout on refusal"
+    );
+    let stderr = stderr_json(output);
+    assert_eq!(
+        stderr["error"]["code"], "confirmation_required",
+        "{command}"
+    );
+    stderr
+}
+
+fn destructive_refusal_args(command: &str) -> Option<Vec<&'static str>> {
+    Some(match command {
+        "agent runs delete" => vec!["agent", "runs", "delete", "agent_run_abc", "--compact"],
+        "monitor delete" => vec!["monitor", "delete", "mon_abc", "--compact"],
+        "websets cancel" => vec!["websets", "cancel", "ws_abc", "--compact"],
+        "websets delete" => vec!["websets", "delete", "ws_abc", "--compact"],
+        "websets enrichments cancel" => vec![
+            "websets",
+            "enrichments",
+            "cancel",
+            "ws_abc",
+            "enr_1",
+            "--compact",
+        ],
+        "websets enrichments delete" => vec![
+            "websets",
+            "enrichments",
+            "delete",
+            "ws_abc",
+            "enr_1",
+            "--compact",
+        ],
+        "websets imports delete" => vec!["websets", "imports", "delete", "imp_abc", "--compact"],
+        "websets items delete" => vec![
+            "websets",
+            "items",
+            "delete",
+            "ws_abc",
+            "item_1",
+            "--compact",
+        ],
+        "websets monitors delete" => {
+            vec!["websets", "monitors", "delete", "mon_abc", "--compact"]
+        }
+        "websets searches cancel" => vec![
+            "websets",
+            "searches",
+            "cancel",
+            "ws_abc",
+            "search_1",
+            "--compact",
+        ],
+        "websets webhooks delete" => {
+            vec!["websets", "webhooks", "delete", "wh_abc", "--compact"]
+        }
+        "admin keys delete" => vec!["admin", "keys", "delete", "key_abc", "--compact"],
+        _ => return None,
+    })
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -2142,6 +2213,85 @@ fn agent_runs_events_rejects_mixed_replay_and_pagination_modes() {
 }
 
 #[test]
+fn every_destructive_op_refuses_without_confirmation() {
+    let mut saw_websets_searches_cancel = false;
+
+    for op in registry::REGISTRY.iter().filter(|op| op.destructive()) {
+        let command = op.command();
+        let args = destructive_refusal_args(&command)
+            .unwrap_or_else(|| panic!("missing destructive refusal fixture for {command}"));
+        let output = run(&args);
+        let stderr = assert_confirmation_required(&output, &command);
+
+        match op.confirm_protocol() {
+            Some(ConfirmProtocol::Yes) => assert!(
+                stderr["error"]["suggestedCommand"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("--yes"),
+                "{command} should suggest --yes"
+            ),
+            Some(ConfirmProtocol::EchoId) => assert!(
+                stderr["error"]["suggestedCommand"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("--confirm"),
+                "{command} should suggest --confirm"
+            ),
+            Some(ConfirmProtocol::YesPlusEcho(token)) => assert!(
+                stderr["error"]["suggestedCommand"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(token),
+                "{command} should suggest --confirm {token}"
+            ),
+            None => panic!("{command} is destructive but has no Confirm capability"),
+        }
+
+        if command == "websets searches cancel" {
+            saw_websets_searches_cancel = true;
+            assert!(stderr["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("websets searches cancel"));
+        }
+    }
+
+    assert!(
+        saw_websets_searches_cancel,
+        "websets searches cancel must be in the destructive refusal invariant"
+    );
+
+    let monitor_batch =
+        registry::lookup_by_command("monitor batch").expect("monitor batch is in registry");
+    assert_eq!(
+        monitor_batch.confirm_protocol(),
+        Some(ConfirmProtocol::YesPlusEcho("delete"))
+    );
+    let missing_yes = run(&[
+        "monitor",
+        "batch",
+        "--body",
+        r#"{"action":"pause","filter":{"status":"active"},"dry_run":false}"#,
+        "--compact",
+    ]);
+    assert_confirmation_required(&missing_yes, "monitor batch");
+    let missing_confirm = run(&[
+        "monitor",
+        "batch",
+        "--body",
+        r#"{"action":"delete","filter":{"name":"daily"},"dry_run":false}"#,
+        "--yes",
+        "--compact",
+    ]);
+    let stderr = assert_confirmation_required(&missing_confirm, "monitor batch");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--confirm delete"));
+}
+
+#[test]
 fn agent_runs_delete_requires_yes_for_live_execution() {
     let output = run(&["agent", "runs", "delete", "agent_run_abc", "--compact"]);
     assert_eq!(output.status.code(), Some(9));
@@ -3354,7 +3504,11 @@ fn websets_searches_create_get_cancel_shapes() {
         "search_1",
         "--compact",
     ]);
-    assert_ne!(cancel_live.status.code(), Some(9));
+    let stderr = assert_confirmation_required(&cancel_live, "websets searches cancel");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--yes"));
 }
 
 #[test]

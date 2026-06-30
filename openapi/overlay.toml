@@ -7,6 +7,7 @@
 # namespace: "api" => EXA_API_KEY + api host; "service" => EXA_SERVICE_KEY + admin host (D4).
 # idempotency_sensitive: create-POST subject to the no-auto-retry rule (D7/contracts §7).
 # dangerous: requires --yes/--confirm before executing (contracts §9).
+# confirm: confirmation protocol capability: "yes", "echo_id", or { yes_plus_echo = "delete" }.
 # cursor: when set, the command is cursor-paginated with this nextCursor field (contracts §10).
 
 [operations."cancelAgentRun"]
@@ -23,6 +24,7 @@ streaming = true
 cli_path = "agent runs delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."listAgentRunEvents"]
 cli_path = "agent runs events"
@@ -50,6 +52,7 @@ namespace = "api"
 [operations."batchMonitors"]
 cli_path = "monitor batch"
 namespace = "api"
+confirm = { yes_plus_echo = "delete" }
 
 [operations."createMonitor"]
 cli_path = "monitor create"
@@ -60,6 +63,7 @@ idempotency_sensitive = true
 cli_path = "monitor delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."getMonitor"]
 cli_path = "monitor get"
@@ -117,6 +121,7 @@ namespace = "api"
 cli_path = "websets cancel"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."websets-create"]
 cli_path = "websets create"
@@ -127,11 +132,13 @@ idempotency_sensitive = true
 cli_path = "websets delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."websets-enrichments-cancel"]
 cli_path = "websets enrichments cancel"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."websets-enrichments-create"]
 cli_path = "websets enrichments create"
@@ -142,6 +149,7 @@ idempotency_sensitive = true
 cli_path = "websets enrichments delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."websets-enrichments-get"]
 cli_path = "websets enrichments get"
@@ -173,6 +181,7 @@ idempotency_sensitive = true
 cli_path = "websets imports delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."imports-get"]
 cli_path = "websets imports get"
@@ -191,6 +200,7 @@ namespace = "api"
 cli_path = "websets items delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."websets-items-get"]
 cli_path = "websets items get"
@@ -215,6 +225,7 @@ idempotency_sensitive = true
 cli_path = "websets monitors delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."monitors-get"]
 cli_path = "websets monitors get"
@@ -245,6 +256,8 @@ namespace = "api"
 [operations."websets-searches-cancel"]
 cli_path = "websets searches cancel"
 namespace = "api"
+dangerous = true
+confirm = "yes"
 
 [operations."websets-searches-create"]
 cli_path = "websets searches create"
@@ -273,6 +286,7 @@ idempotency_sensitive = true
 cli_path = "websets webhooks delete"
 namespace = "api"
 dangerous = true
+confirm = "yes"
 
 [operations."webhooks-get"]
 cli_path = "websets webhooks get"
@@ -296,6 +310,7 @@ idempotency_sensitive = true
 cli_path = "admin keys delete"
 namespace = "service"
 dangerous = true
+confirm = "echo_id"
 
 [operations."get-api-key"]
 cli_path = "admin keys get"

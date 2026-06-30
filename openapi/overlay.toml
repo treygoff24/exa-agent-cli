@@ -17,6 +17,7 @@ namespace = "api"
 cli_path = "agent runs create"
 namespace = "api"
 idempotency_sensitive = true
+streaming = true
 
 [operations."deleteAgentRun"]
 cli_path = "agent runs delete"
@@ -26,6 +27,7 @@ dangerous = true
 [operations."listAgentRunEvents"]
 cli_path = "agent runs events"
 namespace = "api"
+cursor = "cursor"
 
 [operations."getAgentRun"]
 cli_path = "agent runs get"
@@ -416,6 +418,57 @@ kind = "bool"
 flag = "summary-query"
 body_path = "summary.query"
 kind = "str"
+
+[[operations."createAgentRun".fields]]
+flag = "query"
+body_path = "query"
+kind = "str"
+required = true
+
+[[operations."createAgentRun".fields]]
+flag = "output-schema"
+body_path = "outputSchema"
+kind = "json"
+
+[[operations."createAgentRun".fields]]
+flag = "input"
+body_path = "input"
+kind = "json"
+
+[[operations."createAgentRun".fields]]
+flag = "input-row"
+body_path = "input.data"
+kind = "json"
+
+[[operations."createAgentRun".fields]]
+flag = "exclusion"
+body_path = "input.exclusion"
+kind = "json"
+
+[[operations."createAgentRun".fields]]
+flag = "previous-run-id"
+body_path = "previousRunId"
+kind = "str"
+
+[[operations."createAgentRun".fields]]
+flag = "effort"
+body_path = "effort"
+kind = "str"
+
+[[operations."createAgentRun".fields]]
+flag = "data-source"
+body_path = "dataSources"
+kind = "json"
+
+[[operations."createAgentRun".fields]]
+flag = "metadata"
+body_path = "metadata"
+kind = "json"
+
+[[operations."createAgentRun".fields]]
+flag = "stream"
+body_path = "stream"
+kind = "bool"
 
 [[operations."ResearchController_createResearch".fields]]
 flag = "query"

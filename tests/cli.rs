@@ -1431,6 +1431,7 @@ fn parse_agent_runs_lifecycle() {
         &["agent", "runs", "create", "find eval tools"],
         "agent runs create",
     );
+    assert_path(&["agent", "run", "find eval tools"], "agent run");
     assert_path(&["agent", "runs", "list"], "agent runs list");
     assert_path(&["agent", "runs", "get", "agent_run_abc"], "agent runs get");
     parses(&["agent", "runs", "events", "agent_run_abc", "--stream"]);
@@ -1442,6 +1443,261 @@ fn parse_agent_runs_lifecycle() {
         &["agent", "runs", "delete", "agent_run_abc"],
         "agent runs delete",
     );
+}
+
+#[test]
+fn agent_runs_dry_run_builds_create_list_get_events_cancel_and_delete() {
+    let create = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "find eval tools",
+        "--effort",
+        "medium",
+        "--stream",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "agent runs create");
+    assert_eq!(create["data"]["request"]["path"], "/agent/runs");
+    assert_eq!(
+        create["data"]["request"]["body"]["query"],
+        "find eval tools"
+    );
+    assert_eq!(create["data"]["request"]["body"]["effort"], "medium");
+    assert_eq!(create["data"]["request"]["body"]["stream"], true);
+    assert_eq!(create["data"]["request"]["headers"][0]["name"], "Accept");
+
+    let run_macro = run_ok_json(&["agent", "run", "macro query", "--dry-run", "--compact"]);
+    assert_eq!(run_macro["command"], "agent run");
+    assert_eq!(run_macro["data"]["request"]["path"], "/agent/runs");
+    assert_eq!(run_macro["data"]["request"]["body"]["query"], "macro query");
+    assert!(run_macro["data"]["expandsTo"]
+        .as_str()
+        .unwrap()
+        .contains("agent runs create"));
+
+    let list = run_ok_json(&[
+        "agent",
+        "runs",
+        "list",
+        "--limit",
+        "5",
+        "--cursor",
+        "cur_agent",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "agent runs list");
+    assert_eq!(list["data"]["request"]["path"], "/agent/runs");
+    assert_eq!(
+        list["data"]["request"]["query"],
+        serde_json::json!([
+            {"name": "limit", "value": "5"},
+            {"name": "cursor", "value": "cur_agent"}
+        ])
+    );
+
+    let get = run_ok_json(&[
+        "agent",
+        "runs",
+        "get",
+        "agent_run/abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(get["command"], "agent runs get");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/agent/runs/agent_run%2Fabc"
+    );
+
+    let events = run_ok_json(&[
+        "agent",
+        "runs",
+        "events",
+        "agent_run_abc",
+        "--stream",
+        "--last-event-id",
+        "evt_1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(events["command"], "agent runs events");
+    assert_eq!(
+        events["data"]["request"]["path"],
+        "/agent/runs/agent_run_abc/events"
+    );
+    let headers = events["data"]["request"]["headers"]
+        .as_array()
+        .expect("stream preview headers");
+    assert!(headers
+        .iter()
+        .any(|header| { header["name"] == "Accept" && header["value"] == "text/event-stream" }));
+    assert!(headers
+        .iter()
+        .any(|header| { header["name"] == "Last-Event-ID" && header["value"] == "evt_1" }));
+
+    let cancel = run_ok_json(&[
+        "agent",
+        "runs",
+        "cancel",
+        "agent_run_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(cancel["command"], "agent runs cancel");
+    assert_eq!(
+        cancel["data"]["request"]["path"],
+        "/agent/runs/agent_run_abc/cancel"
+    );
+
+    let delete = run_ok_json(&[
+        "agent",
+        "runs",
+        "delete",
+        "agent_run_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(delete["command"], "agent runs delete");
+    assert_eq!(
+        delete["data"]["request"]["path"],
+        "/agent/runs/agent_run_abc"
+    );
+}
+
+#[test]
+fn agent_runs_create_dry_run_builds_structured_create_fields() {
+    let create = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--output-schema",
+        r#"{"type":"object","properties":{"name":{"type":"string"}}}"#,
+        "--input",
+        r#"{"exclusion":[{"domain":"old.example"}]}"#,
+        "--input-row",
+        r#"{"company":"OpenAI"}"#,
+        "--input-row",
+        r#"{"company":"Anthropic"}"#,
+        "--exclusion",
+        r#"[{"company":"Blocked"}]"#,
+        "--previous-run-id",
+        "agent_run_prev",
+        "--data-source",
+        "similarweb",
+        "--data-source",
+        "fiber_ai",
+        "--metadata",
+        r#"{"ticket":"T1","owner":"ops"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["query"], "enrich target accounts");
+    assert_eq!(
+        body["outputSchema"],
+        serde_json::json!({"type":"object","properties":{"name":{"type":"string"}}})
+    );
+    assert_eq!(
+        body["input"]["data"],
+        serde_json::json!([
+            {"company":"OpenAI"},
+            {"company":"Anthropic"}
+        ])
+    );
+    assert_eq!(
+        body["input"]["exclusion"],
+        serde_json::json!([{"company":"Blocked"}])
+    );
+    assert_eq!(body["previousRunId"], "agent_run_prev");
+    assert_eq!(
+        body["dataSources"],
+        serde_json::json!([
+            {"provider":"similarweb"},
+            {"provider":"fiber_ai"}
+        ])
+    );
+    assert_eq!(
+        body["metadata"],
+        serde_json::json!({"ticket":"T1","owner":"ops"})
+    );
+}
+
+#[test]
+fn agent_runs_events_rejects_mixed_replay_and_pagination_modes() {
+    let no_stream = run(&[
+        "agent",
+        "runs",
+        "events",
+        "agent_run_abc",
+        "--last-event-id",
+        "evt_1",
+        "--compact",
+    ]);
+    assert_eq!(no_stream.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&no_stream.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--last-event-id"));
+
+    let stream_with_cursor = run(&[
+        "agent",
+        "runs",
+        "events",
+        "agent_run_abc",
+        "--stream",
+        "--cursor",
+        "cur_agent",
+        "--compact",
+    ]);
+    assert_eq!(stream_with_cursor.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&stream_with_cursor.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("cursor pagination"));
+}
+
+#[test]
+fn agent_runs_delete_requires_yes_for_live_execution() {
+    let output = run(&["agent", "runs", "delete", "agent_run_abc", "--compact"]);
+    assert_eq!(output.status.code(), Some(9));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "confirmation_required");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("--yes"));
+
+    let allowed = run(&[
+        "agent",
+        "runs",
+        "delete",
+        "agent_run_abc",
+        "--yes",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(
+        allowed.status.success(),
+        "delete with --yes should preview: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+}
+
+#[test]
+fn agent_runs_list_all_dry_run_previews_first_page() {
+    let list_all = run_ok_json(&["agent", "runs", "list", "--all", "--dry-run", "--compact"]);
+    assert_eq!(list_all["command"], "agent runs list");
+    assert_eq!(list_all["data"]["request"]["path"], "/agent/runs");
+    assert_eq!(list_all["data"]["request"]["query"], serde_json::json!([]));
 }
 
 #[test]

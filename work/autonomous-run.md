@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 2C complete; next wave is 3A agent/research lifecycle.
+Status: Wave 3A complete; next wave is 3B SSE/SIGINT/pagination.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint `b771a5b`.
+  `70ac1ad`; latest committed checkpoint `fa09849`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -21,8 +21,8 @@ Codex owns updates.
 - Delegate Cursor Composer work mode verified after local command collision fix;
   smoke artifact: `work/delegate-cursor-composer-smoke.md`.
 - Live smoke credential available from
-  `~/.config/exa-agent-cli/credentials.json` (fingerprint `64c321d8ab24`; do
-  not print full key).
+  `~/.config/exa-agent-cli/credentials.json` (last4 `927c`; do not print full
+  key). Latest live probe still returns upstream 401/`reauth_required`.
 - Implementation started. Wave 1A expanded the typed parser surface and
   not-implemented envelope routing. Wave 1B added request merge/redaction spine.
   Wave 1C added local auth, non-secret config, doctor, and contract/error
@@ -33,6 +33,10 @@ Codex owns updates.
   streaming gates. Wave 2C adds typed `team info`, legacy research
   create/list/get routing, research cursor auto-pagination, and the `ask`/
   `fetch` macro aliases with dry-run expansion metadata kept out of live data.
+  Wave 3A adds the Agent run lifecycle (`agent run` / `agent runs
+  create|list|get|events|cancel|delete`), rich Agent create request fields,
+  event replay-vs-pagination validation, destructive delete confirmation, and
+  contract-shaped pending-run JSONL recovery records.
 
 ## Pre-run checklist
 
@@ -57,8 +61,8 @@ Codex owns updates.
 | 1D Raw/search/goldens | complete | Delegate Cursor Composer + parent integration | findings fixed; narrow re-review found final error-context redaction issue; fixed | findings fixed; re-review no blocking findings | `cargo xtask phase-gate 1` pass; `cargo xtask ci` pass |
 | 2A Search/contents | complete in working tree | native request/chunk lane + Delegate Cursor Composer executor lane + parent integration | native found no-op `--chunk-size`, then chunked error-context gaps; fixed; final approval clean | GLM found clippy/context P3s; fixed; final approval clean | `cargo xtask phase-gate 2` pass; `cargo clippy --workspace --locked -- -D warnings` pass |
 | 2B Answer/context/similar/streaming | complete in working tree | native answer/context/similar lane + Delegate Cursor Composer stream lane + parent integration | native found stream output-mode, terminal data shape, helper-only test, then context override bypass; fixed; final approval clean | GLM found context length guard and generic deprecation warning P3s; fixed; final approval clean | `cargo xtask ci` pass; `cargo xtask phase-gate 2` pass; branch-wide secret scan pass |
-| 2C Team/macros/deprecations | complete in working tree | native baseline macro lane + Delegate Cursor Composer team/research lane + parent integration | initial/re-review findings fixed; final narrow re-review clean with only low-risk notes | initial findings fixed; final GLM re-review clean with accepted P3 residuals | `cargo xtask phase-gate 2` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
-| 3A Agent/research lifecycle | not started | - | - | - | - |
+| 2C Team/macros/deprecations | complete | native baseline macro lane + Delegate Cursor Composer team/research lane + parent integration | initial/re-review findings fixed; final narrow re-review clean with only low-risk notes | initial findings fixed; final GLM re-review clean with accepted P3 residuals | `cargo xtask phase-gate 2` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
+| 3A Agent/research lifecycle | complete in working tree | native pending-run helper lane + Delegate Cursor Composer Agent lifecycle lane + parent integration | initial findings fixed; final/final-final re-reviews clean | GLM found pending schema P1 and P3 dead-input cleanup; fixed; final-final GLM clean | `cargo xtask ci` pass; `cargo xtask phase-gate 3` pass; branch-wide secret scan pass |
 | 3B SSE/SIGINT/pagination | not started | - | - | - | - |
 | 4A Monitors | not started | - | - | - | - |
 | 4B Websets core | not started | - | - | - | - |
@@ -117,6 +121,10 @@ Record every review finding that is not immediately fixed.
 | 2C | native review | low | Local HTTP regression helper could fail on `WouldBlock` before request bytes arrived | fixed | Helper now retries nonblocking reads up to a bounded deadline. |
 | 2C | GLM review | P3 | `data_with_expands_to` had an unreachable non-object fallback and fetch lacked a live no-pollution regression | fixed | Removed unreachable branch and added the fetch local-server no-pollution test. |
 | 2C | GLM final review | P3 | Dry-run macro metadata exposes both `expandsTo` and `expands_to`; `--text` booleans are simple presence flags; `research create --stream` errors because legacy create is non-streaming | accepted for now | Duplicate key keeps camel/snake compatibility; boolean flag shape matches existing CLI convention; create-stream refusal is structured and tested. |
+| 3A | native review | medium | `agent run` / `agent runs create` initially omitted documented create fields (`outputSchema`, `input`, `previousRunId`, `metadata`, `dataSources`) | fixed | Added Agent create flags, overlay mappings, JSON parsing helpers, data-source max-5 validation, request/CLI regressions, and Phase 3 gate coverage. |
+| 3A | native/GLM review | medium | `agent runs events --last-event-id` was accepted without `--stream`, and stream mode could mix cursor pagination flags | fixed | Added `validate_agent_runs_events_mode` to reject replay-without-stream and stream+pagination combinations; added CLI regressions. |
+| 3A | GLM review | P1 | Pending-run JSONL record used helper field names (`operation`, `path`, `createdAt`, nested `suggestedCommand`) instead of frozen `exa.cli.pending_run.v1` fields | fixed | Record now serializes `attemptedAt`, `operationId`, `apiPath`, `requestId`, `idempotencyKey`, and `recoveryCommand`; docs and tests updated. |
+| 3A | GLM review | P3 | Pending-run helper still accepted unused method/correlation/request-body inputs after schema correction | fixed | Removed dead inputs, renamed public helper fields to contract names, and asserted exact pending-record keys. |
 
 ## Gate log
 
@@ -178,6 +186,13 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `cargo xtask ci` | pass | Wave 2C final gate; fmt, clippy, tests |
 | 2026-06-29 | non-printing tracked/diff/history secret scan | pass | Stored API key fingerprint `927c` absent from tracked files, working diff, and reachable branch blobs |
 | 2026-06-29 | `delegate worktree remove cursor-10 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager; no Delegate worktrees remain present |
+| 2026-06-29 | focused Wave 3A tests (`agent_runs`, Agent request mapping, pending record) | pass | After native/GLM review fixes for create fields, event mode validation, and pending schema |
+| 2026-06-29 | `cargo xtask ci` | pass | Wave 3A final gate after pending schema and P3 cleanup |
+| 2026-06-29 | `cargo xtask phase-gate 3` | pass | Agent lifecycle dry-run smokes plus full workspace tests; includes rich Agent create request fields |
+| 2026-06-29 | native Wave 3A final-final re-review (`019f15d6-7be3-7d13-99a0-9911339fe075`) | pass | No blocking findings after pending schema cleanup |
+| 2026-06-29 | Delegate GLM Wave 3A final-final re-review (`droid-26`) | pass | No blocking findings; confirmed pending cleanup and dispatch signatures |
+| 2026-06-29 | non-printing tracked/diff/history secret scan | pass | Stored API key fingerprint `927c` absent from tracked files, working diff, and reachable branch blobs |
+| 2026-06-29 | `delegate worktree remove cursor-11 --discard-uncommitted --force-branch` | pass | Integrated Cursor worktree cleaned via Delegate manager; no Delegate worktrees remain present |
 
 ## Local commit log
 
@@ -190,7 +205,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `d420fe0` | Wave 1D raw transport, response envelope, offline schema/robot-docs, and Phase 1 gate | `cargo xtask phase-gate 1`; `cargo xtask ci`; native + GLM reviews/re-reviews; branch-wide secret scan pass; live smoke blocked by credential 401 |
 | 2026-06-29 | `6f12e42` | Wave 2A typed `search`/`contents`, `/contents` chunking, redaction suggestion fix, and Phase 2 gate | `cargo xtask phase-gate 2`; `cargo clippy --workspace --locked -- -D warnings`; native + GLM final reviews clean |
 | 2026-06-29 | `b771a5b` | Wave 2B typed `answer`/`context`/`similar`, SSE stream envelope shaping, context query validation, and Phase 2 stream gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
-| 2026-06-29 | this commit | Wave 2C typed `team info`, legacy research create/list/get with cursor pagination, `ask`/`fetch` macro aliases, and Phase 2 team/research gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
+| 2026-06-29 | `fa09849` | Wave 2C typed `team info`, legacy research create/list/get with cursor pagination, `ask`/`fetch` macro aliases, and Phase 2 team/research gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
+| 2026-06-29 | this commit | Wave 3A Agent run lifecycle, rich Agent create body fields, event replay validation, delete confirmation, and pending-run JSONL recovery contract | `cargo xtask ci`; `cargo xtask phase-gate 3`; native + GLM final-final reviews clean; branch-wide secret scan pass |
 
 ## Final completion checklist
 

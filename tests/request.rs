@@ -34,6 +34,10 @@ fn team_info_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["team", "info"]).expect("team info op")
 }
 
+fn agent_runs_create_op() -> &'static registry::OperationDef {
+    registry::lookup_by_segments(&["agent", "runs", "create"]).expect("agent runs create op")
+}
+
 #[test]
 fn search_core_fields_map_and_overrides_keep_precedence() {
     let spec = request::build_request(
@@ -379,4 +383,60 @@ fn overflowing_array_index_is_rejected_without_panicking() {
         request::set_at_path(&mut body, "users.18446744073709551615.name", json!("x")).unwrap_err();
     assert!(matches!(err, CliError::Usage(_)));
     assert_eq!(err.diag().code, "invalid_value");
+}
+
+#[test]
+fn agent_runs_create_fields_map_query_effort_and_stream() {
+    let spec = request::build_request(
+        agent_runs_create_op(),
+        &[
+            ("query", Some("find eval tools".into())),
+            (
+                "output-schema",
+                Some(json!({"type":"object","properties":{"name":{"type":"string"}}}).to_string()),
+            ),
+            (
+                "input",
+                Some(json!({"exclusion":[{"domain":"old.example"}]}).to_string()),
+            ),
+            (
+                "input-row",
+                Some(json!([{"company":"OpenAI"},{"company":"Anthropic"}]).to_string()),
+            ),
+            (
+                "exclusion",
+                Some(json!([{"company":"Blocked"}]).to_string()),
+            ),
+            ("previous-run-id", Some("agent_run_prev".into())),
+            ("effort", Some("medium".into())),
+            (
+                "data-source",
+                Some(json!([{"provider":"similarweb"}]).to_string()),
+            ),
+            ("metadata", Some(json!({"ticket":"T1"}).to_string())),
+            ("stream", Some("true".into())),
+        ],
+        RequestOverrides::default(),
+    )
+    .unwrap();
+
+    assert_eq!(spec.body["query"], "find eval tools");
+    assert_eq!(
+        spec.body["outputSchema"],
+        json!({"type":"object","properties":{"name":{"type":"string"}}})
+    );
+    assert_eq!(
+        spec.body["input"]["data"],
+        json!([{"company":"OpenAI"},{"company":"Anthropic"}])
+    );
+    assert_eq!(
+        spec.body["input"]["exclusion"],
+        json!([{"company":"Blocked"}])
+    );
+    assert_eq!(spec.body["previousRunId"], "agent_run_prev");
+    assert_eq!(spec.body["effort"], "medium");
+    assert_eq!(spec.body["dataSources"], json!([{"provider":"similarweb"}]));
+    assert_eq!(spec.body["metadata"], json!({"ticket":"T1"}));
+    assert_eq!(spec.body["stream"], true);
+    assert_eq!(agent_runs_create_op().api_path, "/agent/runs");
 }

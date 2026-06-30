@@ -95,6 +95,19 @@ pub enum Effort {
     Xhigh,
 }
 
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Auto => "auto",
+            Effort::Minimal => "minimal",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum InputFormat {
@@ -114,7 +127,7 @@ pub enum GroupBy {
 }
 
 /// Universal flags, inherited by every subcommand (`global = true`).
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct GlobalArgs {
     #[arg(long, global = true, value_enum, ignore_case = true)]
     pub format: Option<Format>,
@@ -477,8 +490,22 @@ pub struct AgentRunsEventsArgs {
 #[derive(Args, Debug)]
 pub struct AgentRunArgs {
     pub query: String,
+    #[arg(long)]
+    pub output_schema: Option<String>,
+    #[arg(long)]
+    pub input: Option<String>,
+    #[arg(long)]
+    pub input_row: Vec<String>,
+    #[arg(long)]
+    pub exclusion: Option<String>,
+    #[arg(long)]
+    pub previous_run_id: Option<String>,
     #[arg(long, value_enum, ignore_case = true)]
     pub effort: Option<Effort>,
+    #[arg(long)]
+    pub data_source: Vec<String>,
+    #[arg(long)]
+    pub metadata: Option<String>,
     #[arg(long)]
     pub stream: bool,
 }

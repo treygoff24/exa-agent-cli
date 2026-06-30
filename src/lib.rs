@@ -30,7 +30,7 @@ use cli::{
     WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
     WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
     WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
-    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
+    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -198,13 +198,381 @@ fn build_search_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
+    validate_search_intent_args(args)?;
     let flag_values = [
         ("query", Some(args.query.clone())),
-        ("num-results", args.num_results.map(|n| n.to_string())),
+        ("num-results", args.num_results.clone()),
+        ("text", args.text.then_some("true".to_string())),
         ("type", args.r#type.map(|t| t.as_str().to_string())),
-        ("category", args.category.map(|c| c.as_str().to_string())),
+        ("category", args.category.clone()),
+        (
+            "include-domain",
+            (!args.include_domain.is_empty())
+                .then(|| request::encode_str_array(&args.include_domain)),
+        ),
+        (
+            "exclude-domain",
+            (!args.exclude_domain.is_empty())
+                .then(|| request::encode_str_array(&args.exclude_domain)),
+        ),
+        ("start-published-date", args.start_published_date.clone()),
+        ("end-published-date", args.end_published_date.clone()),
     ];
-    build_typed_spec(op, &flag_values, globals)
+    let mut spec = build_typed_spec(op, &flag_values, globals)?;
+    normalize_and_validate_search_body(&mut spec.body, &args.query)?;
+    Ok(spec)
+}
+
+fn validate_search_intent_args(args: &SearchArgs) -> Result<(), CliError> {
+    if let Some(num_results) = args.num_results.as_deref() {
+        validate_search_num_results(&args.query, num_results)?;
+    }
+
+    if let Some(limit) = args.limit.as_deref() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "search is not cursor-paginated; use `--num-results N` (1..100), not `--limit`",
+            )
+            .with_suggestion(format!(
+                "exa-agent search {} --num-results {}",
+                shell_quote(&args.query),
+                replacement_positive_int(limit, Some(100))
+            )),
+        ));
+    }
+
+    if let Some(count) = args.count.as_deref() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "search uses `--num-results`, not Websets-style `--count`",
+            )
+            .with_suggestion(format!(
+                "exa-agent search {} --num-results {}",
+                shell_quote(&args.query),
+                replacement_positive_int(count, Some(100))
+            )),
+        ));
+    }
+
+    if args.all {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "`--all` is only for cursor-paginated list commands; search returns at most 100 results",
+            )
+            .with_suggestion(format!(
+                "exa-agent search {} --num-results 100",
+                shell_quote(&args.query)
+            )),
+        ));
+    }
+
+    if let Some(filter) = args.filter.as_deref() {
+        let suggestion = search_filter_suggestion(&args.query, filter);
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "`search --filter` is not a v1 flag; use typed filters such as `--category`, `--include-domain`, or `--exclude-domain`",
+            )
+            .with_suggestion(suggestion),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_search_num_results(query: &str, raw: &str) -> Result<(), CliError> {
+    if matches!(raw.parse::<u32>(), Ok(1..=100)) {
+        return Ok(());
+    }
+
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            "`search --num-results` must be an integer between 1 and 100",
+        )
+        .with_details(serde_json::json!({ "min": 1, "max": 100, "received": raw }))
+        .with_suggestion(format!(
+            "exa-agent search {} --num-results {}",
+            shell_quote(query),
+            replacement_positive_int(raw, Some(100))
+        )),
+    ))
+}
+
+fn replacement_positive_int(raw: &str, max: Option<u32>) -> u32 {
+    let parsed = raw.parse::<u64>().ok().filter(|value| *value >= 1);
+    let value = parsed.unwrap_or(1);
+    let max = max.unwrap_or(u32::MAX) as u64;
+    value.min(max).min(u32::MAX as u64) as u32
+}
+
+fn search_filter_suggestion(query: &str, filter: &str) -> String {
+    if let Some((key, value)) = filter.split_once('=') {
+        let normalized_key = normalize_filter_key(key);
+        let flag = match normalized_key.as_str() {
+            "category" => Some("category"),
+            "domain" | "domains" | "includedomain" | "includedomains" => Some("include-domain"),
+            "excludedomain" | "excludedomains" => Some("exclude-domain"),
+            "startpublisheddate" | "publishedafter" => Some("start-published-date"),
+            "endpublisheddate" | "publishedbefore" => Some("end-published-date"),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            if flag == "category" {
+                let Some(category) = suggested_search_category(value) else {
+                    return "exa-agent schema show search --compact".to_string();
+                };
+                return format!(
+                    "exa-agent search {} --category {}",
+                    shell_quote(query),
+                    shell_quote(category)
+                );
+            }
+            return format!(
+                "exa-agent search {} --{} {}",
+                shell_quote(query),
+                flag,
+                shell_quote(value)
+            );
+        }
+    }
+
+    "exa-agent schema show search --compact".to_string()
+}
+
+fn normalize_filter_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| !matches!(ch, '-' | '_'))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn normalize_and_validate_search_body(
+    body: &mut serde_json::Value,
+    query: &str,
+) -> Result<(), CliError> {
+    validate_search_num_results_body(body, query)?;
+
+    if let Some(raw) = body.get("category").cloned() {
+        let Some(raw) = raw.as_str() else {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    "search category must be a string; valid categories are company, people, research paper, news, personal site, financial report",
+                )
+                .with_details(serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES }))
+                .with_suggestion("exa-agent schema show search --compact"),
+            ));
+        };
+        let category = canonical_search_category(raw, query)?;
+        body["category"] = serde_json::Value::String(category.to_string());
+    }
+
+    validate_search_category_filter_combinations(body, query)
+}
+
+fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Result<(), CliError> {
+    let Some(raw) = body.get("numResults") else {
+        return Ok(());
+    };
+    if matches!(raw.as_u64(), Some(1..=100)) {
+        return Ok(());
+    }
+
+    let received = match raw {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            "`search numResults` must be an integer between 1 and 100",
+        )
+        .with_details(serde_json::json!({
+            "min": 1,
+            "max": 100,
+            "received": raw,
+        }))
+        .with_suggestion(format!(
+            "exa-agent search {} --num-results {}",
+            shell_quote(query),
+            replacement_positive_int(&received, Some(100))
+        )),
+    ))
+}
+
+fn canonical_search_category(raw: &str, query: &str) -> Result<&'static str, CliError> {
+    if let Some(category) = exact_search_category(raw) {
+        return Ok(category);
+    }
+
+    let did_you_mean = search_category_alias(raw);
+
+    let mut details = serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES });
+    if let Some(suggestion) = did_you_mean {
+        details["didYouMean"] = serde_json::Value::String(suggestion.to_string());
+    }
+
+    let suggested_command = if let Some(suggested_category) = did_you_mean {
+        format!(
+            "exa-agent search {} --category {}",
+            shell_quote(query),
+            shell_quote(suggested_category)
+        )
+    } else {
+        "exa-agent schema show search --compact".to_string()
+    };
+
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            format!(
+                "invalid search category `{raw}`; valid categories are company, people, research paper, news, personal site, financial report"
+            ),
+        )
+        .with_details(details)
+        .with_suggestion(suggested_command),
+    ))
+}
+
+fn suggested_search_category(raw: &str) -> Option<&'static str> {
+    exact_search_category(raw).or_else(|| search_category_alias(raw))
+}
+
+fn exact_search_category(raw: &str) -> Option<&'static str> {
+    let lower = raw.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "company" => Some("company"),
+        "people" => Some("people"),
+        "research paper" => Some("research paper"),
+        "news" => Some("news"),
+        "personal site" => Some("personal site"),
+        "financial report" => Some("financial report"),
+        _ => None,
+    }
+}
+
+fn search_category_alias(raw: &str) -> Option<&'static str> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let compact: String = lower
+        .chars()
+        .filter(|ch| !matches!(ch, ' ' | '-' | '_'))
+        .collect();
+    match compact.as_str() {
+        "companys" | "companies" => Some("company"),
+        "person" | "peoples" => Some("people"),
+        "researchpaper" => Some("research paper"),
+        "personalsite" => Some("personal site"),
+        "financialreport" => Some("financial report"),
+        _ => None,
+    }
+}
+
+fn validate_search_category_filter_combinations(
+    body: &serde_json::Value,
+    query: &str,
+) -> Result<(), CliError> {
+    let category = body.get("category").and_then(serde_json::Value::as_str);
+    if matches!(category, Some("company" | "people")) {
+        let unsupported_filters = [
+            ("exclude-domain", "excludeDomains"),
+            ("start-published-date", "startPublishedDate"),
+            ("end-published-date", "endPublishedDate"),
+        ]
+        .into_iter()
+        .filter_map(|(flag, key)| json_field_has_value(body, key).then_some(flag))
+        .collect::<Vec<_>>();
+        if !unsupported_filters.is_empty() {
+            let category = category.expect("matches! above proves category");
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    format!(
+                        "`category={category}` does not support {} filters",
+                        unsupported_filters.join(", ")
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "category": category,
+                    "unsupportedFilters": unsupported_filters,
+                }))
+                .with_suggestion(format!(
+                    "exa-agent search {} --category {}",
+                    shell_quote(query),
+                    category
+                )),
+            ));
+        }
+    }
+
+    if category == Some("people") {
+        let include_domains = domains_from_body(body.get("includeDomains"));
+        if let Some(invalid) = include_domains
+            .iter()
+            .find(|domain| !is_linkedin_domain(domain))
+        {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`category=people` only supports LinkedIn include-domain filters",
+                )
+                .with_details(serde_json::json!({
+                    "invalidDomain": invalid,
+                    "allowedDomains": ["linkedin.com", "*.linkedin.com"],
+                }))
+                .with_suggestion(format!(
+                    "exa-agent search {} --category people --include-domain linkedin.com",
+                    shell_quote(query)
+                )),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn json_field_has_value(body: &serde_json::Value, key: &str) -> bool {
+    match body.get(key) {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(value)) => !value.is_empty(),
+        Some(serde_json::Value::Array(values)) => !values.is_empty(),
+        Some(serde_json::Value::Object(values)) => !values.is_empty(),
+        Some(_) => true,
+    }
+}
+
+fn domains_from_body(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::String(domain)) if !domain.is_empty() => vec![domain.clone()],
+        Some(serde_json::Value::Array(domains)) => domains
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|domain| !domain.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_linkedin_domain(raw: &str) -> bool {
+    let raw = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    let without_scheme = raw
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw.as_str());
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme)
+        .rsplit('@')
+        .next()
+        .unwrap_or(without_scheme);
+    let host = authority.split(':').next().unwrap_or(authority);
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    host == "linkedin.com" || host.ends_with(".linkedin.com")
 }
 
 fn dispatch_contents(
@@ -242,7 +610,22 @@ fn build_contents_spec(
         ("text", args.text.then_some("true".to_string())),
         ("summary-query", args.summary_query.clone()),
     ];
-    build_typed_spec(op, &flag_values, globals)
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_contents_body_shape(&spec.body)?;
+    Ok(spec)
+}
+
+fn validate_contents_body_shape(body: &serde_json::Value) -> Result<(), CliError> {
+    if body.get("contents").is_some() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "`contents.*` is only valid on `search`; the /contents endpoint uses top-level `--text` and `--summary-query`",
+            )
+            .with_suggestion("exa-agent contents <url-or-id> --text"),
+        ));
+    }
+    Ok(())
 }
 
 fn dispatch_similar(
@@ -1966,6 +2349,7 @@ fn build_websets_create_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["websets", "create"])
         .expect("websets create is in registry");
+    validate_websets_create_intent_args(args)?;
     let mut body = build_websets_create_named_body(args);
     body = apply_request_overrides(body, globals)?;
     if !websets_body_is_non_empty_object(&body) {
@@ -1987,6 +2371,23 @@ fn build_websets_create_spec(
         ));
     }
     Ok(request::RequestSpec { op, body })
+}
+
+fn validate_websets_create_intent_args(args: &WebsetsCreateArgs) -> Result<(), CliError> {
+    if let Some(num_results) = args.num_results.as_deref() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "websets create uses `--count`, not search-style `--num-results`",
+            )
+            .with_suggestion(format!(
+                "exa-agent websets create --query {} --count {}",
+                shell_quote(args.query.as_deref().unwrap_or("<query>")),
+                replacement_positive_int(num_results, None)
+            )),
+        ));
+    }
+    Ok(())
 }
 
 fn dispatch_websets_create(
@@ -5251,8 +5652,9 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "guidance": [
                     "Use capabilities first to discover command metadata.",
                     "Use --dry-run --print-request before live mutations.",
+                    "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
-                    "Errors are JSON on stderr with stable error.code values."
+                    "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
             }),
             pretty,

@@ -399,6 +399,31 @@ flag = "category"
 body_path = "category"
 kind = "str"
 
+[[operations."search".fields]]
+flag = "text"
+body_path = "contents.text"
+kind = "bool"
+
+[[operations."search".fields]]
+flag = "include-domain"
+body_path = "includeDomains"
+kind = "str_array"
+
+[[operations."search".fields]]
+flag = "exclude-domain"
+body_path = "excludeDomains"
+kind = "str_array"
+
+[[operations."search".fields]]
+flag = "start-published-date"
+body_path = "startPublishedDate"
+kind = "str"
+
+[[operations."search".fields]]
+flag = "end-published-date"
+body_path = "endPublishedDate"
+kind = "str"
+
 [[operations."getContents".fields]]
 flag = "urls"
 body_path = "urls"

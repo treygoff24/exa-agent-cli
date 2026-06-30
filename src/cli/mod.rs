@@ -71,6 +71,15 @@ pub enum SearchCategory {
     FinancialReport,
 }
 
+pub const SEARCH_CATEGORY_VALUES: &[&str] = &[
+    "company",
+    "people",
+    "research paper",
+    "news",
+    "personal site",
+    "financial report",
+];
+
 impl SearchCategory {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -356,14 +365,64 @@ pub struct SearchArgs {
     /// The search query.
     pub query: String,
     /// Number of results, 1..=100 (maps `numResults`). Search is not cursor-paginated.
-    #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=100))]
-    pub num_results: Option<u32>,
+    #[arg(
+        short = 'n',
+        long,
+        value_name = "N",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub num_results: Option<String>,
+    /// Return text snippets in each search result (`contents.text=true`).
+    #[arg(long)]
+    pub text: bool,
     /// Search type.
     #[arg(long, value_enum, ignore_case = true)]
     pub r#type: Option<SearchType>,
     /// Result category.
-    #[arg(long, value_enum, ignore_case = true)]
-    pub category: Option<SearchCategory>,
+    ///
+    /// Valid values: company, people, research paper, news, personal site, financial report.
+    #[arg(long, value_name = "CATEGORY")]
+    pub category: Option<String>,
+    /// Restrict results to matching domains.
+    #[arg(long, value_name = "DOMAIN")]
+    pub include_domain: Vec<String>,
+    /// Exclude matching domains.
+    #[arg(long, value_name = "DOMAIN")]
+    pub exclude_domain: Vec<String>,
+    /// Earliest estimated publication date.
+    #[arg(long, visible_alias = "published-after", value_name = "ISO")]
+    pub start_published_date: Option<String>,
+    /// Latest estimated publication date.
+    #[arg(long, visible_alias = "published-before", value_name = "ISO")]
+    pub end_published_date: Option<String>,
+    /// Common mistake: search uses --num-results, not --limit.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "N",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub limit: Option<String>,
+    /// Common mistake: search uses --num-results, not --count.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "N",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub count: Option<String>,
+    /// Common mistake: search is not cursor-paginated.
+    #[arg(long, hide = true)]
+    pub all: bool,
+    /// Common mistake: use typed filter flags instead.
+    #[arg(long, hide = true, value_name = "FILTER")]
+    pub filter: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -636,6 +695,16 @@ pub struct WebsetsCreateArgs {
     pub query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub count: Option<u32>,
+    /// Common mistake: Websets search count is `--count`, not `--num-results`.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "N",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub num_results: Option<String>,
 }
 
 #[derive(Args, Debug)]

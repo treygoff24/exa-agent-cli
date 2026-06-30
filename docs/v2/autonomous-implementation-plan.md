@@ -208,7 +208,7 @@ The autonomous goal can be marked complete only when all are true:
   deferred by an existing decision.
 - `cargo xtask ci` passes locally.
 - `cargo xtask phase-gate 1` through `cargo xtask phase-gate 6` pass locally.
-- Live non-paid smoke passes with a real `EXA_API_KEY`:
+- Live read-only, cost-capped smoke passes with a real `EXA_API_KEY`:
 
   ```bash
   cargo xtask smoke --budget "$EXA_E2E_BUDGET"

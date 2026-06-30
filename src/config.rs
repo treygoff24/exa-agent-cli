@@ -320,7 +320,11 @@ impl Config {
     }
 
     pub fn effective_base_url(&self) -> &str {
-        if let Some(profile) = self.active_profile() {
+        self.effective_base_url_for_profile(None)
+    }
+
+    pub fn effective_base_url_for_profile(&self, selected_profile: Option<&str>) -> &str {
+        if let Some(profile) = self.selected_profile(selected_profile) {
             if let Some(url) = profile.base_url.as_deref() {
                 return url;
             }
@@ -328,10 +332,29 @@ impl Config {
         &self.base_url
     }
 
+    pub fn effective_admin_base_url(&self) -> &str {
+        self.effective_admin_base_url_for_profile(None)
+    }
+
+    pub fn effective_admin_base_url_for_profile(&self, selected_profile: Option<&str>) -> &str {
+        if let Some(profile) = self.selected_profile(selected_profile) {
+            if let Some(url) = profile.admin_base_url.as_deref() {
+                return url;
+            }
+        }
+        &self.admin_base_url
+    }
+
     pub fn active_profile(&self) -> Option<&ProfileConfig> {
         self.active_profile
             .as_deref()
             .and_then(|name| self.profiles.get(name))
+    }
+
+    fn selected_profile(&self, selected_profile: Option<&str>) -> Option<&ProfileConfig> {
+        selected_profile
+            .and_then(|name| self.profiles.get(name))
+            .or_else(|| self.active_profile())
     }
 }
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::auth::{ResolvedCredential, Secret};
+use crate::auth::{CredentialNamespace, ResolvedCredential, Secret};
 use crate::cli::GlobalArgs;
 use crate::config::Config;
 use crate::error::{CliError, Diag};
@@ -550,6 +550,26 @@ pub fn resolve_base_url(globals: &GlobalArgs, cfg: &Config) -> String {
         .unwrap_or_else(|| cfg.effective_base_url().to_string())
 }
 
+pub fn resolve_base_url_for_namespace(
+    globals: &GlobalArgs,
+    cfg: &Config,
+    namespace: CredentialNamespace,
+) -> String {
+    match namespace {
+        CredentialNamespace::Api => globals.base_url.clone().unwrap_or_else(|| {
+            cfg.effective_base_url_for_profile(globals.profile.as_deref())
+                .to_string()
+        }),
+        CredentialNamespace::Service => std::env::var("EXA_ADMIN_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                cfg.effective_admin_base_url_for_profile(globals.profile.as_deref())
+                    .to_string()
+            }),
+    }
+}
+
 fn inject_auth_headers(headers: &mut Vec<(String, String)>, secret: &Secret) {
     headers.push(("x-api-key".to_string(), secret.expose().to_string()));
 }
@@ -1019,7 +1039,8 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     let cfg = Config::load()?;
     let method = params.method.to_ascii_uppercase();
     let query = parse_raw_query(params.query_raw)?;
-    let base_url = resolve_base_url(params.globals, &cfg);
+    let base_url =
+        resolve_base_url_for_namespace(params.globals, &cfg, params.credential.namespace);
     let url = build_url(&base_url, params.path, &query)?;
 
     let mut headers = parse_user_headers(&params.globals.headers)?;

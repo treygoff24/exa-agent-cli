@@ -478,6 +478,15 @@ pub fn looks_like_api_key(key: &str) -> bool {
     k.starts_with("exa-") || k.starts_with("sk-exa") || k.starts_with("sk_exa") || is_uuid_like(&k)
 }
 
+/// Cheap shape check for service/admin keys, used to avoid sending obvious service keys to API flows.
+pub fn looks_like_service_key(key: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    k.starts_with("svc-")
+        || k.starts_with("svc_")
+        || k.starts_with("service-")
+        || k.starts_with("service_")
+}
+
 fn is_uuid_like(token: &str) -> bool {
     let parts: Vec<&str> = token.split('-').collect();
     let lens = [8, 4, 4, 4, 12];

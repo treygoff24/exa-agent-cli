@@ -1000,6 +1000,140 @@ fn phase_gate(n: Option<&str>) -> Result<()> {
             ],
         )?;
     }
+    if n == "5" {
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "admin",
+                "keys",
+                "create",
+                "--name",
+                "ci-key",
+                "--rate-limit",
+                "100",
+                "--budget-cents",
+                "500",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "admin",
+                "keys",
+                "list",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "admin",
+                "keys",
+                "get",
+                "key_abc",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "admin",
+                "keys",
+                "update",
+                "key_abc",
+                "--name",
+                "renamed",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "admin",
+                "keys",
+                "delete",
+                "key_abc",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run_json(
+            "cargo",
+            &[
+                "run",
+                "--quiet",
+                "--bin",
+                "exa-agent",
+                "--",
+                "admin",
+                "keys",
+                "usage",
+                "key_abc",
+                "--start-date",
+                "2026-01-01",
+                "--end-date",
+                "2026-01-31",
+                "--group-by",
+                "day",
+                "--dry-run",
+                "--print-request",
+                "--compact",
+            ],
+            "exa.cli.response.v1",
+        )?;
+        run(
+            "cargo",
+            &[
+                "test",
+                "--quiet",
+                "--test",
+                "cli",
+                "admin",
+                "--",
+                "--nocapture",
+            ],
+        )?;
+    }
     println!("phase-gate {n}: OK");
     Ok(())
 }
@@ -1008,6 +1142,7 @@ fn run_json(cmd: &str, args: &[&str], expected_schema: &str) -> Result<()> {
     eprintln!("$ {cmd} {}", args.join(" "));
     let output = Command::new(cmd)
         .args(args)
+        .env("SOURCE_DATE_EPOCH", "1782777600")
         .output()
         .with_context(|| format!("spawn {cmd}"))?;
     if !output.status.success() {

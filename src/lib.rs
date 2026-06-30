@@ -19,16 +19,18 @@ pub mod transport;
 use clap::Parser;
 use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
+use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
 
 use cli::{
-    command_path, AgentCmd, AgentRunArgs, AgentRunsCmd, AgentRunsEventsArgs, AnswerArgs, AuthCmd,
-    Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs,
-    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
-    PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs,
-    SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
-    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
-    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
-    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
+    AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentRunArgs, AgentRunsCmd,
+    AgentRunsEventsArgs, AnswerArgs, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd,
+    ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MonitorBatchArgs, MonitorCmd,
+    MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd, PaginationArgs, ResearchCmd,
+    ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs, TeamCmd,
+    WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
+    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
+    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
+    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -65,6 +67,17 @@ struct TypedDispatchOptions<'a> {
     sse_accept: bool,
     extra_headers: Option<&'a [(String, String)]>,
     command_override: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct TypedPreviewOptions<'a> {
+    path: &'a str,
+    query: &'a [(String, String)],
+    expands_to: Option<&'a str>,
+    extra_headers: Option<&'a [(String, String)]>,
+    command_override: Option<&'a str>,
+    globals: Option<&'a GlobalArgs>,
+    warnings: &'a [serde_json::Value],
 }
 
 #[derive(Clone, Copy)]
@@ -163,15 +176,12 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Monitor { sub } => dispatch_monitor(sub, &cli.globals, pretty),
         Command::Websets { sub } => dispatch_websets(sub, &cli.globals, pretty),
         Command::Team { sub } => dispatch_team(sub, &cli.globals, pretty),
+        Command::Admin { sub } => dispatch_admin(sub, &cli.globals, pretty),
         Command::Agent { sub } => dispatch_agent(sub, &cli.globals, pretty),
         Command::Research { sub } => dispatch_research(sub, &cli.globals, pretty),
         Command::Ask(args) => dispatch_ask(args, &cli.globals, pretty),
         Command::Fetch(args) => dispatch_fetch(args, &cli.globals, pretty),
         Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
-        _ => Err(not_implemented(
-            &command_path(&cli.command),
-            "parser skeleton only in this wave",
-        )),
     }
 }
 
@@ -409,6 +419,402 @@ fn dispatch_team_info(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
         let spec = build_typed_spec(op, &[], globals)?;
         dispatch_typed_command(spec, globals, pretty)
     })
+}
+
+fn dispatch_admin(sub: &AdminCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        AdminCmd::Keys { sub } => dispatch_admin_keys(sub, globals, pretty),
+    }
+}
+
+fn dispatch_admin_keys(
+    sub: &AdminKeysCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    match sub {
+        AdminKeysCmd::Create(args) => dispatch_admin_keys_create(args, globals, pretty),
+        AdminKeysCmd::List => dispatch_admin_keys_list(globals, pretty),
+        AdminKeysCmd::Get { key_id } => dispatch_admin_keys_get(key_id, globals, pretty),
+        AdminKeysCmd::Update {
+            key_id,
+            name,
+            rate_limit,
+            budget_cents,
+            clear_budget_cents,
+        } => dispatch_admin_keys_update(
+            key_id,
+            name.as_deref(),
+            *rate_limit,
+            *budget_cents,
+            *clear_budget_cents,
+            globals,
+            pretty,
+        ),
+        AdminKeysCmd::Delete { key_id, confirm } => {
+            dispatch_admin_keys_delete(key_id, confirm.as_deref(), globals, pretty)
+        }
+        AdminKeysCmd::Usage {
+            key_id,
+            start_date,
+            end_date,
+            group_by,
+        } => dispatch_admin_keys_usage(
+            key_id,
+            start_date.as_deref(),
+            end_date.as_deref(),
+            *group_by,
+            globals,
+            pretty,
+        ),
+    }
+}
+
+fn dispatch_admin_keys_create(
+    args: &AdminKeysCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "create"])
+        .expect("admin keys create is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_admin_keys_create_spec(args, globals)?;
+        if globals.raw && !(globals.dry_run || globals.print_request) {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`--raw` cannot be combined with `admin keys create`; create responses may include sensitive key material",
+                )
+                .with_suggestion("Use the default JSON envelope so sensitive fields remain structured."),
+            ));
+        }
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_admin_keys_create_spec(
+    args: &AdminKeysCreateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "create"])
+        .expect("admin keys create is in registry");
+    let body = admin_keys_body(args.name.as_deref(), args.rate_limit, args.budget_cents);
+    let body = merge_manual_body_overrides(body, globals)?;
+    validate_admin_keys_body(&body, "admin keys create")?;
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_admin_keys_list(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "list"])
+        .expect("admin keys list is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn dispatch_admin_keys_get(
+    key_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "get"])
+        .expect("admin keys get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_admin_keys_update(
+    key_id: &str,
+    name: Option<&str>,
+    rate_limit: Option<u32>,
+    budget_cents: Option<u64>,
+    clear_budget_cents: bool,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "update"])
+        .expect("admin keys update is in registry");
+    with_typed_error_context(op, globals, || {
+        let mut body = admin_keys_body(name, rate_limit, budget_cents);
+        if clear_budget_cents {
+            body["budgetCents"] = serde_json::Value::Null;
+        }
+        let body = merge_manual_body_overrides(body, globals)?;
+        validate_admin_keys_body(&body, "admin keys update")?;
+        if body.as_object().is_some_and(serde_json::Map::is_empty) {
+            return Err(CliError::NoInput(
+                Diag::new(
+                    "missing_required_argument",
+                    "admin keys update requires at least one field via named flags, --body, or --set",
+                )
+                .with_suggestion("exa-agent admin keys update <id> --name renamed"),
+            ));
+        }
+        let spec = request::RequestSpec { op, body };
+        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_admin_keys_delete(
+    key_id: &str,
+    confirm: Option<&str>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "delete"])
+        .expect("admin keys delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_confirm_by_id(
+            key_id,
+            confirm,
+            globals,
+            format!("Refusing to delete API key `{key_id}` without `--confirm {key_id}`"),
+            format!("exa-agent admin keys delete {key_id} --confirm {key_id}"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_admin_keys_usage(
+    key_id: &str,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    group_by: Option<GroupBy>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["admin", "keys", "usage"])
+        .expect("admin keys usage is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_admin_usage_dates(start_date, end_date)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let mut query = Vec::new();
+        if let Some(start_date) = start_date {
+            query.push(("start_date".to_string(), start_date.to_string()));
+        }
+        if let Some(end_date) = end_date {
+            query.push(("end_date".to_string(), end_date.to_string()));
+        }
+        if let Some(group_by) = group_by {
+            query.push(("group_by".to_string(), admin_group_by(group_by).to_string()));
+        }
+        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        dispatch_typed_command_routed(
+            spec,
+            globals,
+            pretty,
+            Some(path.as_str()),
+            &query,
+            false,
+            None,
+        )
+    })
+}
+
+fn admin_keys_body(
+    name: Option<&str>,
+    rate_limit: Option<u32>,
+    budget_cents: Option<u64>,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = name {
+        body.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+    }
+    if let Some(rate_limit) = rate_limit {
+        body.insert("rateLimit".to_string(), serde_json::json!(rate_limit));
+    }
+    if let Some(budget_cents) = budget_cents {
+        body.insert("budgetCents".to_string(), serde_json::json!(budget_cents));
+    }
+    serde_json::Value::Object(body)
+}
+
+fn merge_manual_body_overrides(
+    mut body: serde_json::Value,
+    globals: &GlobalArgs,
+) -> Result<serde_json::Value, CliError> {
+    if let Some(source) = globals
+        .body
+        .as_deref()
+        .map(request::parse_body_source)
+        .transpose()?
+    {
+        let overlay = request::read_body_source(source)?;
+        if !overlay.is_object() {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "`--body` must be a JSON object when merging with named flags",
+            )));
+        }
+        request::deep_merge(&mut body, overlay);
+    }
+    for entry in &globals.set {
+        let (path, value) = request::parse_set(entry)?;
+        request::set_at_path(&mut body, &path, value)?;
+    }
+    Ok(body)
+}
+
+fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(), CliError> {
+    let Some(obj) = body.as_object() else {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("{command} request body must be a JSON object"),
+        )));
+    };
+    if let Some(value) = obj.get("rateLimit") {
+        if value.as_u64().is_none_or(|rate| rate > u32::MAX as u64) {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("{command} rateLimit must be a non-negative integer"),
+            )));
+        }
+    }
+    if let Some(value) = obj.get("budgetCents") {
+        if !(value.is_null() || value.as_u64().is_some()) {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("{command} budgetCents must be a non-negative integer or null"),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_confirm_by_id(
+    id: &str,
+    confirm: Option<&str>,
+    globals: &GlobalArgs,
+    message: impl Into<String>,
+    suggestion: impl Into<String>,
+) -> Result<(), CliError> {
+    if globals.dry_run || globals.print_request {
+        return Ok(());
+    }
+    match confirm {
+        Some(confirm) if confirm == id => Ok(()),
+        _ => Err(CliError::Safety(
+            Diag::new("confirmation_required", message.into()).with_suggestion(suggestion.into()),
+        )),
+    }
+}
+
+fn admin_group_by(group_by: GroupBy) -> &'static str {
+    match group_by {
+        GroupBy::Hour => "hour",
+        GroupBy::Day => "day",
+        GroupBy::Month => "month",
+    }
+}
+
+fn validate_admin_usage_dates(
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<(), CliError> {
+    let start = start_date.map(parse_admin_usage_date).transpose()?;
+    let end = end_date.map(parse_admin_usage_date).transpose()?;
+    let now = now_utc_for_admin_validation();
+    let oldest = utc_midnight(now - TimeDuration::days(180));
+    if let (Some(start), Some(end)) = (start, end) {
+        if start > end {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    "admin keys usage --start-date must be before or equal to --end-date",
+                )
+                .with_suggestion(
+                    "exa-agent admin keys usage <id> --start-date 2026-01-01 --end-date 2026-01-31",
+                ),
+            ));
+        }
+        if end - start > TimeDuration::days(180) {
+            return Err(admin_usage_window_error(
+                "admin keys usage date range must be 180 days or less",
+            ));
+        }
+    }
+    for (label, date) in [("--start-date", start), ("--end-date", end)] {
+        if let Some(date) = date {
+            if date < oldest {
+                return Err(admin_usage_window_error(format!(
+                    "admin keys usage {label} must be within the last 180 days"
+                )));
+            }
+            if date > now {
+                return Err(admin_usage_window_error(format!(
+                    "admin keys usage {label} cannot be in the future"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn admin_usage_window_error(message: impl Into<String>) -> CliError {
+    CliError::Usage(Diag::new("invalid_value", message.into()).with_suggestion(
+        "exa-agent admin keys usage <id> --start-date 2026-01-01 --end-date 2026-01-31",
+    ))
+}
+
+fn parse_admin_usage_date(raw: &str) -> Result<OffsetDateTime, CliError> {
+    if raw.contains('T') {
+        return OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).map_err(
+            |_| {
+                CliError::Usage(
+                    Diag::new(
+                        "invalid_value",
+                        "admin keys usage dates must be ISO dates or RFC3339 date-times",
+                    )
+                    .with_suggestion("Use YYYY-MM-DD or 2026-01-01T00:00:00Z"),
+                )
+            },
+        );
+    }
+    let mut parts = raw.split('-');
+    let year = parts.next().and_then(|part| part.parse::<i32>().ok());
+    let month = parts.next().and_then(|part| part.parse::<u8>().ok());
+    let day = parts.next().and_then(|part| part.parse::<u8>().ok());
+    if parts.next().is_some() {
+        return Err(admin_usage_date_error());
+    }
+    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+        return Err(admin_usage_date_error());
+    };
+    let month = time::Month::try_from(month).map_err(|_| admin_usage_date_error())?;
+    let date = Date::from_calendar_date(year, month, day).map_err(|_| admin_usage_date_error())?;
+    Ok(PrimitiveDateTime::new(date, time::Time::MIDNIGHT).assume_utc())
+}
+
+fn admin_usage_date_error() -> CliError {
+    CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            "admin keys usage dates must be ISO dates or RFC3339 date-times",
+        )
+        .with_suggestion("Use YYYY-MM-DD or 2026-01-01T00:00:00Z"),
+    )
+}
+
+fn now_utc_for_admin_validation() -> OffsetDateTime {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .and_then(|seconds| OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .unwrap_or_else(OffsetDateTime::now_utc)
+}
+
+fn utc_midnight(datetime: OffsetDateTime) -> OffsetDateTime {
+    PrimitiveDateTime::new(datetime.date(), time::Time::MIDNIGHT).assume_utc()
 }
 
 fn dispatch_agent(sub: &AgentCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -1055,6 +1461,7 @@ fn dispatch_monitor_create_live(
         command: &spec.op.command(),
         method: &result.method,
         path: &result.path,
+        operation: Some(spec.op),
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -3077,6 +3484,7 @@ fn dispatch_websets_webhooks_create_live(
         command: &spec.op.command(),
         method: &result.method,
         path: &result.path,
+        operation: Some(spec.op),
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -3335,7 +3743,7 @@ fn dispatch_websets_webhooks(
 
 fn dispatch_typed_preview_with_warnings(
     spec: request::RequestSpec,
-    _globals: &GlobalArgs,
+    globals: &GlobalArgs,
     pretty: bool,
     options: TypedDispatchOptions<'_>,
     extra_warnings: &[serde_json::Value],
@@ -3345,70 +3753,21 @@ fn dispatch_typed_preview_with_warnings(
     let mut warnings = typed_command_warnings(op);
     warnings.extend_from_slice(extra_warnings);
     emit_stdout(
-        &redacted_preview_expanded_with_warnings(
+        &redacted_preview_expanded(
             &spec,
-            path,
-            options.query,
-            options.expands_to,
-            options.extra_headers,
-            options.command_override,
-            &warnings,
+            TypedPreviewOptions {
+                path,
+                query: options.query,
+                expands_to: options.expands_to,
+                extra_headers: options.extra_headers,
+                command_override: options.command_override,
+                globals: Some(globals),
+                warnings: &warnings,
+            },
         ),
         pretty,
     );
     Ok(0)
-}
-
-fn redacted_preview_expanded_with_warnings(
-    spec: &request::RequestSpec,
-    path: &str,
-    query: &[(String, String)],
-    expands_to: Option<&str>,
-    extra_headers: Option<&[(String, String)]>,
-    command_override: Option<&str>,
-    warnings: &[serde_json::Value],
-) -> serde_json::Value {
-    let mut body = typed_wire_body(spec);
-    redaction::redact_json_value(&mut body);
-    let command = command_override
-        .map(str::to_string)
-        .unwrap_or_else(|| spec.op.command());
-    let mut request = serde_json::json!({
-        "method": spec.op.method.as_str(),
-        "path": path,
-        "query": query_preview(query),
-        "body": body,
-    });
-    if let Some(headers) = extra_headers.filter(|headers| !headers.is_empty()) {
-        request["headers"] = serde_json::Value::Array(header_preview(headers));
-    } else if body_wants_stream(&body) {
-        request["headers"] = serde_json::json!([{
-            "name": "Accept",
-            "value": "text/event-stream"
-        }]);
-    }
-    let data = data_with_expands_to(
-        serde_json::json!({
-            "request": request,
-            "dryRun": true,
-        }),
-        expands_to,
-    );
-    let count = transport::primary_count(data.get("request").unwrap_or(&data));
-    let hash = transport::data_hash(&data);
-    response_envelope(ResponseEnvelopeArgs {
-        command: &command,
-        method: spec.op.method.as_str(),
-        path,
-        request_id: "req_dry_run",
-        profile: "default",
-        correlation_id: None,
-        data,
-        count,
-        data_hash: hash,
-        retries: 0,
-        warnings,
-    })
 }
 
 fn substitute_path(template: &str, params: &[(&str, &str)]) -> String {
@@ -3522,6 +3881,38 @@ fn header_preview(headers: &[(String, String)]) -> Vec<serde_json::Value> {
             serde_json::json!({ "name": name, "value": value })
         })
         .collect()
+}
+
+fn typed_preview_headers(
+    body: &serde_json::Value,
+    extra_headers: Option<&[(String, String)]>,
+    globals: Option<&GlobalArgs>,
+) -> Vec<serde_json::Value> {
+    let mut headers = if let Some(headers) = extra_headers.filter(|headers| !headers.is_empty()) {
+        header_preview(headers)
+    } else if body_wants_stream(body) {
+        vec![serde_json::json!({
+            "name": "Accept",
+            "value": "text/event-stream"
+        })]
+    } else {
+        Vec::new()
+    };
+    if let Some(globals) = globals {
+        if let Some(key) = globals.idempotency_key.as_deref() {
+            headers.extend(header_preview(&[(
+                "Idempotency-Key".to_string(),
+                key.to_string(),
+            )]));
+        }
+        if let Some(beta) = globals.beta.as_deref() {
+            headers.extend(header_preview(&[(
+                "x-exa-beta".to_string(),
+                beta.to_string(),
+            )]));
+        }
+    }
+    headers
 }
 
 fn build_typed_spec(
@@ -3760,14 +4151,19 @@ fn dispatch_typed_inner(
 ) -> Result<i32, CliError> {
     parse_user_headers(&globals.headers)?;
     if globals.print_request || globals.dry_run {
+        let warnings = typed_command_warnings(spec.op);
         emit_stdout(
             &redacted_preview_expanded(
                 spec,
-                path,
-                options.query,
-                options.expands_to,
-                options.extra_headers,
-                options.command_override,
+                TypedPreviewOptions {
+                    path,
+                    query: options.query,
+                    expands_to: options.expands_to,
+                    extra_headers: options.extra_headers,
+                    command_override: options.command_override,
+                    globals: Some(globals),
+                    warnings: &warnings,
+                },
             ),
             pretty,
         );
@@ -3779,9 +4175,7 @@ fn dispatch_typed_inner(
         .filter(|headers| !headers.is_empty())
         .map(|headers| globals_with_extra_headers(globals, headers))
         .unwrap_or_else(|| globals.clone());
-    let api_input = credential_input(auth::CredentialNamespace::Api, &effective_globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let credential = resolve_operation_credential(spec.op, &effective_globals)?;
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(&effective_globals, &cfg);
     let transport = UreqTransport::new(timeout);
@@ -3821,9 +4215,7 @@ fn dispatch_paginated_typed_command(
         ));
     }
     parse_user_headers(&globals.headers)?;
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let credential = resolve_operation_credential(spec.op, globals)?;
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg);
     let transport = UreqTransport::new(timeout);
@@ -3942,6 +4334,7 @@ fn execute_paginated_live<T: Transport>(
         all_items.extend(primary_items(&data));
         if ndjson {
             emit_ndjson(&page_envelope(
+                spec.op,
                 &command,
                 &result,
                 data.clone(),
@@ -3978,6 +4371,7 @@ fn execute_paginated_live<T: Transport>(
             command: &command,
             method: spec.op.method.as_str(),
             path: path_override.unwrap_or(spec.op.api_path),
+            operation: Some(spec.op),
             request_id: &first_request_id,
             profile: &credential.profile,
             correlation_id: globals.correlation_id.as_deref(),
@@ -4011,6 +4405,7 @@ struct PageInfo<'a> {
 }
 
 fn page_envelope(
+    op: &registry::OperationDef,
     command: &str,
     result: &transport::RawExecuteResult,
     data: serde_json::Value,
@@ -4024,6 +4419,7 @@ fn page_envelope(
         command,
         method: &result.method,
         path: &result.path,
+        operation: Some(op),
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -4100,9 +4496,11 @@ fn dispatch_typed_chunks_inner(
         return Ok(0);
     }
 
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let op = specs
+        .first()
+        .map(|spec| spec.op)
+        .expect("contents chunking creates at least one spec");
+    let credential = resolve_operation_credential(op, globals)?;
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg);
     let transport = UreqTransport::new(timeout);
@@ -4177,6 +4575,7 @@ fn execute_typed_live<T: Transport>(
             transport,
             params,
             &command,
+            Some(spec.op),
             globals,
             execution.pretty,
             &warnings,
@@ -4238,6 +4637,7 @@ fn execute_typed_live<T: Transport>(
         command: &command,
         method: &result.method,
         path: &result.path,
+        operation: Some(spec.op),
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -4259,6 +4659,7 @@ fn execute_streaming_live<T: Transport>(
     transport: &T,
     params: RawExecuteParams<'_>,
     command: &str,
+    operation: Option<&registry::OperationDef>,
     globals: &GlobalArgs,
     pretty: bool,
     warnings: &[serde_json::Value],
@@ -4309,6 +4710,7 @@ fn execute_streaming_live<T: Transport>(
             command,
             method: &result.method,
             path: &result.path,
+            operation,
             request_id: &result.request_id,
             profile: &result.profile,
             correlation_id: result.correlation_id.as_deref(),
@@ -4334,6 +4736,7 @@ fn execute_streaming_live<T: Transport>(
         command,
         method: &result.method,
         path: &result.path,
+        operation,
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -4594,6 +4997,7 @@ fn stream_ndjson_values(
         command,
         method: &result.method,
         path: &result.path,
+        operation: None,
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -4655,9 +5059,16 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
             let service_input = credential_input(auth::CredentialNamespace::Service, globals)?;
             let api = auth::resolve_api_credential(&api_input, &auth::NoopKeyring);
             let service = auth::resolve_service_credential(&service_input, &auth::NoopKeyring);
+            let mut warnings = Vec::new();
             let (authenticated, source, key_fingerprint, last4, checked) = match api {
                 Ok(resolved) => {
                     let status = resolved.status();
+                    if auth::looks_like_service_key(resolved.secret.expose()) {
+                        warnings.push(
+                            "EXA_API_KEY looks like a service key; API commands require a normal Exa API key"
+                                .to_string(),
+                        );
+                    }
                     (
                         true,
                         Some(status.source),
@@ -4668,7 +5079,6 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                 }
                 Err(missing) => (false, None, None, None, missing.checked),
             };
-            let mut warnings = Vec::new();
             let (can_admin, service_source) = match service {
                 Ok(resolved) if auth::looks_like_api_key(resolved.secret.expose()) => {
                     warnings.push(
@@ -5101,6 +5511,54 @@ fn credential_input(
     ))
 }
 
+fn resolve_operation_credential(
+    op: &'static registry::OperationDef,
+    globals: &GlobalArgs,
+) -> Result<auth::ResolvedCredential, CliError> {
+    let namespace = match op.namespace {
+        registry::Namespace::Api => auth::CredentialNamespace::Api,
+        registry::Namespace::Service => auth::CredentialNamespace::Service,
+    };
+    let input = credential_input(namespace, globals)?;
+    let resolved = match namespace {
+        auth::CredentialNamespace::Api => auth::resolve_api_credential(&input, &auth::NoopKeyring),
+        auth::CredentialNamespace::Service => {
+            auth::resolve_service_credential(&input, &auth::NoopKeyring)
+        }
+    }
+    .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    if namespace == auth::CredentialNamespace::Service
+        && auth::looks_like_api_key(resolved.secret.expose())
+    {
+        return Err(CliError::Auth(
+            Diag::new(
+                "key_scope_mismatch",
+                "resolved service key looks like a normal Exa API key; admin commands require EXA_SERVICE_KEY",
+            )
+            .with_suggestion("Set EXA_SERVICE_KEY to a service/admin key, not EXA_API_KEY."),
+        ));
+    }
+    reject_mismatched_credential_scope(&resolved)?;
+    Ok(resolved)
+}
+
+fn reject_mismatched_credential_scope(
+    credential: &auth::ResolvedCredential,
+) -> Result<(), CliError> {
+    if credential.namespace == auth::CredentialNamespace::Api
+        && auth::looks_like_service_key(credential.secret.expose())
+    {
+        return Err(CliError::Auth(
+            Diag::new(
+                "key_scope_mismatch",
+                "resolved API key looks like a service/admin key; API commands require EXA_API_KEY",
+            )
+            .with_suggestion("Set EXA_API_KEY to a normal Exa API key, not EXA_SERVICE_KEY."),
+        ));
+    }
+    Ok(())
+}
+
 fn read_secret_stdin(context: &str, env_var: &str) -> Result<auth::Secret, CliError> {
     if io::stdin().is_terminal() {
         return Err(CliError::NoInput(
@@ -5128,50 +5586,55 @@ fn parse_checks(raw: &[String]) -> Vec<String> {
 }
 
 fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
-    redacted_preview_expanded(spec, spec.op.api_path, &[], None, None, None)
+    let warnings = typed_command_warnings(spec.op);
+    redacted_preview_expanded(
+        spec,
+        TypedPreviewOptions {
+            path: spec.op.api_path,
+            query: &[],
+            expands_to: None,
+            extra_headers: None,
+            command_override: None,
+            globals: None,
+            warnings: &warnings,
+        },
+    )
 }
 
 fn redacted_preview_expanded(
     spec: &request::RequestSpec,
-    path: &str,
-    query: &[(String, String)],
-    expands_to: Option<&str>,
-    extra_headers: Option<&[(String, String)]>,
-    command_override: Option<&str>,
+    preview: TypedPreviewOptions<'_>,
 ) -> serde_json::Value {
     let mut body = typed_wire_body(spec);
     redaction::redact_json_value(&mut body);
-    let command = command_override
+    let command = preview
+        .command_override
         .map(str::to_string)
         .unwrap_or_else(|| spec.op.command());
-    let warnings = typed_command_warnings(spec.op);
     let mut request = serde_json::json!({
         "method": spec.op.method.as_str(),
-        "path": path,
-        "query": query_preview(query),
+        "path": preview.path,
+        "query": query_preview(preview.query),
         "body": body,
     });
-    if let Some(headers) = extra_headers.filter(|headers| !headers.is_empty()) {
-        request["headers"] = serde_json::Value::Array(header_preview(headers));
-    } else if body_wants_stream(&body) {
-        request["headers"] = serde_json::json!([{
-            "name": "Accept",
-            "value": "text/event-stream"
-        }]);
+    let headers = typed_preview_headers(&body, preview.extra_headers, preview.globals);
+    if !headers.is_empty() {
+        request["headers"] = serde_json::Value::Array(headers);
     }
     let data = data_with_expands_to(
         serde_json::json!({
             "request": request,
             "dryRun": true,
         }),
-        expands_to,
+        preview.expands_to,
     );
     let count = transport::primary_count(data.get("request").unwrap_or(&data));
     let hash = transport::data_hash(&data);
     response_envelope(ResponseEnvelopeArgs {
         command: &command,
         method: spec.op.method.as_str(),
-        path,
+        path: preview.path,
+        operation: Some(spec.op),
         request_id: "req_dry_run",
         profile: "default",
         correlation_id: None,
@@ -5179,7 +5642,7 @@ fn redacted_preview_expanded(
         count,
         data_hash: hash,
         retries: 0,
-        warnings: &warnings,
+        warnings: preview.warnings,
     })
 }
 
@@ -5257,6 +5720,7 @@ fn dispatch_raw_inner(
                 command: "raw",
                 method,
                 path: &args.path,
+                operation: None,
                 request_id,
                 profile: "default",
                 correlation_id: globals.correlation_id.as_deref(),
@@ -5274,6 +5738,7 @@ fn dispatch_raw_inner(
     let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    reject_mismatched_credential_scope(&credential)?;
     let body = raw_body(globals)?;
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg);
@@ -5291,6 +5756,7 @@ fn dispatch_raw_inner(
                 request_id: request_id.to_string(),
             },
             "raw",
+            None,
             globals,
             pretty,
             &[],
@@ -5326,6 +5792,7 @@ fn dispatch_raw_inner(
         command: "raw",
         method: &result.method,
         path: &result.path,
+        operation: None,
         request_id: &result.request_id,
         profile: &result.profile,
         correlation_id: result.correlation_id.as_deref(),
@@ -5429,6 +5896,8 @@ mod tests {
     use crate::auth::{CredentialInput, NoopKeyring};
     use crate::registry::{FieldDef, Method, Namespace, OperationDef, Pagination};
     use crate::transport::{FakeTransport, HttpResponse, RawExecuteResult};
+
+    static PENDING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     static GENERIC_DEPRECATED_OP: OperationDef = OperationDef {
         cli_path: &["old"],
@@ -5767,6 +6236,7 @@ mod tests {
 
     #[test]
     fn golden_pending_run_record() {
+        let _pending_lock = PENDING_TEST_LOCK.lock().unwrap();
         let pending_path = std::env::temp_dir().join(format!(
             "exa-agent-pending-lib-{}-{}.jsonl",
             std::process::id(),
@@ -5844,6 +6314,104 @@ mod tests {
     }
 
     #[test]
+    fn admin_create_idempotency_controls_retry_and_header() {
+        let _pending_lock = PENDING_TEST_LOCK.lock().unwrap();
+        let op = registry::lookup_by_segments(&["admin", "keys", "create"]).unwrap();
+        let spec = request::RequestSpec {
+            op,
+            body: serde_json::json!({"name":"ci-key"}),
+        };
+        let credential = auth::resolve_service_credential(
+            &CredentialInput {
+                explicit: Some("svc-admin-secret".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+
+        let pending_path = std::env::temp_dir().join(format!(
+            "exa-agent-pending-admin-lib-{}-{}.jsonl",
+            std::process::id(),
+            transport::new_request_id()
+        ));
+        let _ = std::fs::remove_file(&pending_path);
+        let _pending_override = PendingPathGuard::set(pending_path.clone());
+
+        let unkeyed = FakeTransport::default();
+        unkeyed.push_ok_json(503, "down");
+        unkeyed.push_ok_json(200, r#"{"id":"key_abc"}"#);
+        let unkeyed_globals =
+            parse_globals(&["--format", "json", "--service-key", "svc-admin-secret"]);
+        let err = execute_typed_live(
+            &unkeyed,
+            &spec,
+            &unkeyed_globals,
+            &credential,
+            TypedExecution {
+                request_id: "req_admin_pending",
+                pretty: false,
+                route: TypedRoute {
+                    path: spec.op.api_path,
+                    query: &[],
+                    sse_accept: false,
+                },
+                command_override: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(unkeyed.recorded_requests().len(), 1);
+        assert_eq!(
+            err.diag().details.as_ref().unwrap()["pendingRunWritten"],
+            true
+        );
+        let raw = std::fs::read_to_string(&pending_path).unwrap();
+        let record: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(record["operationId"], "create-api-key");
+        assert_eq!(record["command"], "admin keys create");
+
+        let keyed = FakeTransport::default();
+        keyed.push_ok_json(503, "down");
+        keyed.push_ok_json(200, r#"{"id":"key_abc"}"#);
+        let keyed_globals = parse_globals(&[
+            "--format",
+            "json",
+            "--service-key",
+            "svc-admin-secret",
+            "--idempotency-key",
+            "idem-admin-create",
+        ]);
+        assert_eq!(
+            execute_typed_live(
+                &keyed,
+                &spec,
+                &keyed_globals,
+                &credential,
+                TypedExecution {
+                    request_id: "req_admin_keyed",
+                    pretty: false,
+                    route: TypedRoute {
+                        path: spec.op.api_path,
+                        query: &[],
+                        sse_accept: false,
+                    },
+                    command_override: None,
+                },
+            )
+            .unwrap(),
+            0
+        );
+        let recorded = keyed.recorded_requests();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded.iter().all(|request| request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Idempotency-Key" && value == "idem-admin-create")));
+
+        let _ = std::fs::remove_file(&pending_path);
+    }
+
+    #[test]
     fn live_macro_metadata_does_not_pollute_data_or_hash() {
         let upstream = serde_json::json!({"answer":"done","citations":[]});
         let count = transport::primary_count(&upstream);
@@ -5852,6 +6420,7 @@ mod tests {
             command: "answer",
             method: "POST",
             path: "/answer",
+            operation: None,
             request_id: "req_test",
             profile: "default",
             correlation_id: None,

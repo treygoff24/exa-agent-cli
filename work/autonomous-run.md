@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 4C complete; next wave is 5 Admin keys.
+Status: Wave 5 complete; next wave is 6 Ergonomics/smoke/release.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint before Wave 4C was `498e34d`.
+  `70ac1ad`; latest committed checkpoint before Wave 5 was `ea92d46`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -54,7 +54,11 @@ Codex owns updates.
   Wave 4C adds Websets monitors/events/webhooks/attempts dispatch, Websets
   monitor body validation, event/webhook-attempt filter-preserving pagination,
   webhook secret capture, pending-run recovery and raw-output safety for
-  secret-capturing creates, and Phase 4 Websets closeout.
+  secret-capturing creates, and Phase 4 Websets closeout. Wave 5 adds gated
+  admin keys create/list/get/update/delete/usage, service-key/auth-host
+  separation, selected-profile admin base URLs, API-only `--base-url`
+  behavior, admin usage date validation, registry-backed envelope metadata,
+  admin create idempotency/pending-run coverage, and Phase 5 gate coverage.
 
 ## Pre-run checklist
 
@@ -84,8 +88,8 @@ Codex owns updates.
 | 3B SSE/SIGINT/pagination | complete | native SSE/interrupt lane + Delegate Cursor Composer mechanical gate/test lane + parent integration | native found Phase 3 lock gaps, partial-id resume bug, NDJSON write-failure gap; fixed; final re-review clean | Delegate Cursor safe found callback/write-failure resume bug; fixed; Delegate Grok safe returned only a progress line and was replaced per updated lane policy | `cargo xtask phase-gate 3` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 4A Monitors | complete | native checklist + Delegate Cursor Composer implementation + parent integration | found/fixed secret-output preflight, final-path reservation, post-write deletion, missing-secret, and narrow refactor issues; final reviews clean | Delegate Grok safe found/fixed non-boolean batch `dry_run` bypass and confirmed final fixes; one post-CI Grok run returned only progress output | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 4B Websets core | complete in working tree | native checklist + Delegate Cursor Composer implementation + parent integration; Grok xtask lane no-op | found/fixed preview `search=true`, imports update fixture, item pagination test gap, and count range validation; final re-review approved | Delegate Grok safe review returned only progress output; recorded as partial/no-op under current lane policy | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; tracked/diff secret scan pass |
-| 4C Websets webhooks/events/closeout | complete in working tree | native checklist + Delegate Cursor Composer implementation + parent integration; Grok review lanes no-op/partial | found/fixed monitor create `behavior.type` validation; final re-reviews approved | Claude phase review found/fixed secret-create pending-run recovery, raw rejection, and pagination test gaps; Delegate Grok returned progress/cancelled output | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; tracked/diff secret scan pass |
-| 5 Admin keys | not started | - | - | - | - |
+| 4C Websets webhooks/events/closeout | complete | native checklist + Delegate Cursor Composer implementation + parent integration; Grok review lanes no-op/partial | found/fixed monitor create `behavior.type` validation; final re-reviews approved | Claude phase review found/fixed secret-create pending-run recovery, raw rejection, and pagination test gaps; Delegate Grok returned progress/cancelled output | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; tracked/diff secret scan pass |
+| 5 Admin keys | complete in working tree | native checklist + Delegate Cursor Composer implementation + parent integration; Grok review attempts inconclusive | found/fixed profile admin URL, date validation, envelope metadata, reciprocal service/API shape guard, date-only boundary; final re-review approved | Delegate Grok safe reviews (`grok-14`, `grok-15`) returned progress-only; Delegate Cursor safe fallback (`cursor-18`) approved | `cargo xtask phase-gate 5` pass; `cargo xtask ci` pass; tracked/diff secret scan pass |
 | 6 Ergonomics/smoke/release | not started | - | - | - | - |
 
 ## Finding log
@@ -169,6 +173,14 @@ Record every review finding that is not immediately fixed.
 | 4C | Claude phase review | low | Secret-capturing create paths silently ignored live `--raw` | fixed | Reject live `--raw` with `invalid_flag_combination` for `monitor create` and `websets webhooks create`; regressions added. |
 | 4C | Claude phase review | low | Events and webhook-attempt `--all` static filters lacked direct across-page regressions | fixed | Added local two-page tests for events `types`/`createdAfter` and attempts `eventType`/`successful`. |
 | 4C | Delegate Grok safe | low | Grok review lanes returned progress-only/cancelled output after tool errors | accepted for now | Native and Claude reviews found/fixed actionable issues; final native re-review and gates pass. |
+| 5 | native review | high | `--profile` selected service credential profile but not profile-specific `admin_base_url` | fixed | Added selected-profile-aware admin/base URL resolution and local-server regression. |
+| 5 | Delegate Grok review | high | `--base-url` overrode admin host despite docs defining it as API-only | fixed | Service namespace now ignores `--base-url`; admin host uses `EXA_ADMIN_BASE_URL`/profile/default; regression added. |
+| 5 | native review | medium | Usage date validation allowed future/old `end-date` values | fixed | Validates each supplied date against future and last-180-days guard; regressions added. |
+| 5 | native review | low | Success envelopes omitted registry operation metadata for admin ops | fixed | `ResponseEnvelopeArgs` now accepts operation metadata; typed/admin envelopes emit `operationId`/`source`/`sourceVersion`; raw stays generic. |
+| 5 | Delegate Grok review | medium | Admin create no-retry/idempotency wire coverage was missing | fixed | Added CLI preview and lib live tests for unkeyed no-retry/pending-run and keyed retry/header. |
+| 5 | native re-review | medium | Obvious service-shaped keys in `EXA_API_KEY` were accepted for API commands | fixed | Added conservative service-key shape guard, typed/raw API rejection, auth-status warning, and regressions. |
+| 5 | native re-review | low | Date-only 180-day boundary depended on current time of day | fixed | Lower lookback boundary now floors to UTC midnight; midday regression added. |
+| 5 | Delegate Grok safe | low | Grok safe review runs returned progress-only output despite successful exit | accepted for now | Native final re-review and Delegate Cursor safe fallback approved; issue recorded as harness/output limitation. |
 
 ## Gate log
 
@@ -278,6 +290,16 @@ Record every review finding that is not immediately fixed.
 | 2026-06-30 | `cargo xtask phase-gate 4` | pass | Full workspace tests plus monitor/Websets Phase 4 smokes; monitor slice 21 tests, Websets slice 20 tests |
 | 2026-06-30 | `cargo xtask ci` | fail then pass | Initial clippy `nonminimal_bool` failure fixed; final fmt, clippy, and full workspace tests pass |
 | 2026-06-30 | `delegate worktree remove cursor-16 --discard-uncommitted` | pass | Integrated Cursor worktree removed through Delegate manager; no present Delegate worktrees |
+| 2026-06-30 | native Wave 5 checklist (`019f1670...`) | pass | Mapped admin-key service namespace, host, date, delete, idempotency, and safety traps |
+| 2026-06-30 | Delegate Cursor Composer worktree (`cursor-17`) | pass | Implemented initial Wave 5 admin-key diff in isolated worktree; parent reviewed, corrected, and integrated |
+| 2026-06-30 | Delegate Grok Wave 5 safe reviews (`grok-13`, `grok-14`, `grok-15`) | partial | `grok-13` produced actionable admin host/idempotency findings; later re-reviews returned only progress output |
+| 2026-06-30 | native Wave 5 reviews (`019f167a...`) | findings fixed then pass | Found profile admin URL, usage date, envelope metadata, reciprocal service/API shape, and date-only boundary issues; final follow-up approved |
+| 2026-06-30 | Delegate Cursor Wave 5 safe fallback (`cursor-18`) | pass | Approved with no findings after Grok re-review output was inconclusive |
+| 2026-06-30 | `cargo test --test cli -- --nocapture` | pass | 112 CLI tests including Wave 5 admin and service-shaped API key regressions |
+| 2026-06-30 | `cargo xtask ci` | pass | fmt, clippy, full workspace tests after Wave 5 final fixes |
+| 2026-06-30 | `cargo xtask phase-gate 5` | pass | Full workspace tests plus admin dry-run smokes and admin CLI slice |
+| 2026-06-30 | non-printing tracked/diff secret scan | pass | Stored API key absent from tracked files and working diff |
+| 2026-06-30 | `delegate worktree remove cursor-17 --discard-uncommitted` | pass | Integrated Cursor worktree removed through Delegate manager after source integration and review |
 
 ## Local commit log
 
@@ -295,7 +317,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-30 | `b707df5` | Wave 3B blocking SSE streaming, SIGINT/resume metadata, raw/NDJSON/human progressive stream output, Agent pagination and pending-run locks, and updated lane policy | `cargo xtask phase-gate 3`; `cargo xtask ci`; native + Delegate Cursor reviews clean; branch-wide secret scan pass |
 | 2026-06-30 | `5ca5f18` | Wave 4A top-level monitor command family, webhook secret capture, filter-preserving monitor pagination, batch/delete safety, and Phase 4 monitor gate | `cargo xtask phase-gate 4`; `cargo xtask ci`; native + Delegate Grok reviews clean/recorded; branch-wide secret scan pass |
 | 2026-06-30 | `498e34d` | Wave 4B Websets core/items/searches/enrichments/imports, preview activation, Websets pagination, import validation, safety gates, and Phase 4 Websets gate | `cargo xtask phase-gate 4`; `cargo xtask ci`; native review approved; Delegate Grok progress-only recorded; tracked/diff secret scan pass |
-| 2026-06-30 | this commit | Wave 4C Websets monitors/events/webhooks/attempts, webhook secret capture, secret-create pending-run recovery/raw safety, and Phase 4 closeout | `cargo xtask phase-gate 4`; `cargo xtask ci`; native + Claude reviews clean; Delegate Grok partial/no-op recorded; tracked/diff secret scan pass |
+| 2026-06-30 | `ea92d46` | Wave 4C Websets monitors/events/webhooks/attempts, webhook secret capture, secret-create pending-run recovery/raw safety, and Phase 4 closeout | `cargo xtask phase-gate 4`; `cargo xtask ci`; native + Claude reviews clean; Delegate Grok partial/no-op recorded; tracked/diff secret scan pass |
+| 2026-06-30 | this commit | Wave 5 gated admin keys, service-key/admin-host separation, usage validation, admin idempotency/pending-run safety, registry-backed operation metadata, and Phase 5 gate | `cargo xtask ci`; `cargo xtask phase-gate 5`; native final review clean; Delegate Cursor safe review clean; Delegate Grok partial recorded; tracked/diff secret scan pass |
 
 ## Final completion checklist
 

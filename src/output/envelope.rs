@@ -185,6 +185,7 @@ pub struct ResponseEnvelopeArgs<'a> {
     pub command: &'a str,
     pub method: &'a str,
     pub path: &'a str,
+    pub operation: Option<&'a OperationDef>,
     pub request_id: &'a str,
     pub profile: &'a str,
     pub correlation_id: Option<&'a str>,
@@ -196,6 +197,11 @@ pub struct ResponseEnvelopeArgs<'a> {
 }
 
 pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
+    let operation_id = args.operation.map(|op| op.operation_id);
+    let source = args.operation.map_or(registry::SPEC_URL, |op| op.source);
+    let source_version = args
+        .operation
+        .map_or(registry::SPEC_VERSION, |op| op.source_version);
     serde_json::json!({
         "schema": "exa.cli.response.v1",
         "ok": true,
@@ -203,9 +209,9 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         "operation": {
             "method": args.method,
             "path": args.path,
-            "operationId": null,
-            "source": registry::SPEC_URL,
-            "sourceVersion": registry::SPEC_VERSION,
+            "operationId": operation_id,
+            "source": source,
+            "sourceVersion": source_version,
         },
         "request": {
             "requestId": args.request_id,

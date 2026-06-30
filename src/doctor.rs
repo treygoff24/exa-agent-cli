@@ -435,5 +435,8 @@ mod unit {
             "11111111-2222-3333-4444-555555555555"
         ));
         assert!(!auth::looks_like_api_key("svc-admin-key"));
+        assert!(auth::looks_like_service_key("svc-admin-key"));
+        assert!(auth::looks_like_service_key("service_admin_key"));
+        assert!(!auth::looks_like_service_key("exa-deadbeef"));
     }
 }

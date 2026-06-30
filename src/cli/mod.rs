@@ -992,7 +992,10 @@ pub enum AdminKeysCmd {
         #[arg(long)]
         rate_limit: Option<u32>,
         #[arg(long)]
-        budget_cents: Option<i64>,
+        budget_cents: Option<u64>,
+        /// Clear the key budget by sending budgetCents:null.
+        #[arg(long, conflicts_with = "budget_cents")]
+        clear_budget_cents: bool,
     },
     /// DELETE /api-keys/{id}.
     Delete {
@@ -1019,7 +1022,7 @@ pub struct AdminKeysCreateArgs {
     #[arg(long)]
     pub rate_limit: Option<u32>,
     #[arg(long)]
-    pub budget_cents: Option<i64>,
+    pub budget_cents: Option<u64>,
 }
 
 #[derive(Subcommand, Debug)]

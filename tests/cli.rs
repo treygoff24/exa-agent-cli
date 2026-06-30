@@ -50,6 +50,7 @@ fn command(args: &[&str]) -> ProcessCommand {
         .env_remove("EXA_OUTPUT")
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")
+        .env_remove("EXA_ADMIN_BASE_URL")
         .env_remove("EXA_AGENT_CREDENTIALS")
         .env_remove("EXA_AGENT_CONFIG")
         .env_remove("EXA_PROFILE");
@@ -4027,7 +4028,15 @@ fn parse_admin_keys_commands() {
     assert_path(&["admin", "keys", "list"], "admin keys list");
     assert_path(&["admin", "keys", "get", "key_abc"], "admin keys get");
     assert_path(
-        &["admin", "keys", "update", "key_abc", "--name", "renamed"],
+        &[
+            "admin",
+            "keys",
+            "update",
+            "key_abc",
+            "--name",
+            "renamed",
+            "--clear-budget-cents",
+        ],
         "admin keys update",
     );
     parses(&["admin", "keys", "delete", "key_abc", "--confirm", "key_abc"]);
@@ -4047,6 +4056,528 @@ fn parse_admin_keys_commands() {
         parse_err(&["admin", "keys", "usage", "key_abc", "--group-by", "decade"]).kind(),
         clap::error::ErrorKind::InvalidValue
     );
+}
+
+#[test]
+fn admin_keys_dry_run_builds_requests() {
+    let create = run_ok_json(&[
+        "admin",
+        "keys",
+        "create",
+        "--name",
+        "ci-key",
+        "--rate-limit",
+        "100",
+        "--budget-cents",
+        "500",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "admin keys create");
+    assert_eq!(create["operation"]["method"], "POST");
+    assert_eq!(create["operation"]["path"], "/api-keys");
+    assert_eq!(create["operation"]["operationId"], "create-api-key");
+    assert_eq!(create["operation"]["source"], "team-management.json");
+    assert_eq!(create["data"]["request"]["body"]["name"], "ci-key");
+    assert_eq!(create["data"]["request"]["body"]["rateLimit"], 100);
+    assert_eq!(create["data"]["request"]["body"]["budgetCents"], 500);
+
+    let keyed_create = run_ok_json(&[
+        "admin",
+        "keys",
+        "create",
+        "--name",
+        "ci-key",
+        "--idempotency-key",
+        "idem-admin-create",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    let headers = keyed_create["data"]["request"]["headers"]
+        .as_array()
+        .expect("headers");
+    assert!(headers.iter().any(|header| {
+        header["name"] == "Idempotency-Key" && header["value"] == "idem-admin-create"
+    }));
+
+    let list = run_ok_json(&[
+        "admin",
+        "keys",
+        "list",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "admin keys list");
+    assert_eq!(list["data"]["request"]["method"], "GET");
+    assert_eq!(list["data"]["request"]["path"], "/api-keys");
+    assert!(list["data"]["request"]["body"].is_null());
+
+    let get = run_ok_json(&[
+        "admin",
+        "keys",
+        "get",
+        "key/with/slash",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/api-keys/key%2Fwith%2Fslash"
+    );
+
+    let update = run_ok_json(&[
+        "admin",
+        "keys",
+        "update",
+        "key_abc",
+        "--name",
+        "renamed",
+        "--clear-budget-cents",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(update["command"], "admin keys update");
+    assert_eq!(update["operation"]["method"], "PUT");
+    assert_eq!(update["data"]["request"]["path"], "/api-keys/key_abc");
+    assert_eq!(update["data"]["request"]["body"]["name"], "renamed");
+    assert!(update["data"]["request"]["body"]["budgetCents"].is_null());
+
+    let delete = run_ok_json(&[
+        "admin",
+        "keys",
+        "delete",
+        "key_abc",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(delete["command"], "admin keys delete");
+    assert_eq!(delete["operation"]["method"], "DELETE");
+    assert_eq!(delete["data"]["request"]["path"], "/api-keys/key_abc");
+    assert!(delete["data"]["request"]["body"].is_null());
+
+    let usage_output = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+            "--group-by",
+            "DAY",
+            "--dry-run",
+            "--print-request",
+            "--compact",
+        ],
+        &[("SOURCE_DATE_EPOCH", "1782777600")],
+    );
+    assert!(
+        usage_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&usage_output.stderr)
+    );
+    let usage: serde_json::Value = serde_json::from_slice(&usage_output.stdout).unwrap();
+    assert_eq!(usage["command"], "admin keys usage");
+    assert_eq!(usage["data"]["request"]["path"], "/api-keys/key_abc/usage");
+    assert_eq!(
+        usage["data"]["request"]["query"],
+        serde_json::json!([
+            {"name":"start_date","value":"2026-01-01"},
+            {"name":"end_date","value":"2026-01-31"},
+            {"name":"group_by","value":"day"}
+        ])
+    );
+}
+
+#[test]
+fn admin_keys_delete_requires_confirm_by_id() {
+    for args in [
+        vec!["admin", "keys", "delete", "key_abc", "--compact"],
+        vec![
+            "admin",
+            "keys",
+            "delete",
+            "key_abc",
+            "--confirm",
+            "other_key",
+            "--compact",
+        ],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(9));
+        assert!(output.stdout.is_empty());
+        let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(stderr["error"]["code"], "confirmation_required");
+        assert!(stderr["error"]["suggestedCommand"]
+            .as_str()
+            .unwrap()
+            .contains("--confirm key_abc"));
+    }
+}
+
+#[test]
+fn admin_keys_update_and_body_validation() {
+    let empty = run(&["admin", "keys", "update", "key_abc", "--compact"]);
+    assert_eq!(empty.status.code(), Some(11));
+    let stderr: serde_json::Value = serde_json::from_slice(&empty.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    let negative_budget = run(&[
+        "admin",
+        "keys",
+        "create",
+        "--set",
+        "budgetCents=-1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(negative_budget.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&negative_budget.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let bad_rate = run(&[
+        "admin",
+        "keys",
+        "update",
+        "key_abc",
+        "--set",
+        "rateLimit=-1",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(bad_rate.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&bad_rate.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+}
+
+#[test]
+fn admin_keys_usage_validates_dates_and_lookback() {
+    let env = [("SOURCE_DATE_EPOCH", "1782777600")]; // 2026-06-30T00:00:00Z
+    let ok = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-06-30",
+            "--dry-run",
+            "--compact",
+        ],
+        &env,
+    );
+    assert!(
+        ok.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    let boundary_midday = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-06-30",
+            "--dry-run",
+            "--compact",
+        ],
+        &[("SOURCE_DATE_EPOCH", "1782820800")], // 2026-06-30T12:00:00Z
+    );
+    assert!(
+        boundary_midday.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&boundary_midday.stderr)
+    );
+
+    let reversed = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2026-06-30",
+            "--end-date",
+            "2026-01-01",
+            "--dry-run",
+            "--compact",
+        ],
+        &env,
+    );
+    assert_eq!(reversed.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&reversed.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let too_old = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2025-12-31",
+            "--dry-run",
+            "--compact",
+        ],
+        &env,
+    );
+    assert_eq!(too_old.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&too_old.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let end_too_old = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--end-date",
+            "2025-12-31",
+            "--dry-run",
+            "--compact",
+        ],
+        &env,
+    );
+    assert_eq!(end_too_old.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&end_too_old.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let future_end = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2026-06-01",
+            "--end-date",
+            "2100-01-01",
+            "--dry-run",
+            "--compact",
+        ],
+        &env,
+    );
+    assert_eq!(future_end.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&future_end.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let range_too_wide = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "usage",
+            "key_abc",
+            "--start-date",
+            "2025-12-31",
+            "--end-date",
+            "2026-06-30",
+            "--dry-run",
+            "--compact",
+        ],
+        &env,
+    );
+    assert_eq!(range_too_wide.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&range_too_wide.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+}
+
+#[test]
+fn admin_keys_use_service_key_and_admin_base_url() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("GET /api-keys "),
+                "unexpected admin request:\n{request}"
+            );
+            let lower = request.to_ascii_lowercase();
+            assert!(
+                lower.contains("x-api-key: svc-admin-secret"),
+                "expected service key header:\n{request}"
+            );
+            assert!(
+                !lower.contains("test-key-abcdef12"),
+                "admin request used normal API key:\n{request}"
+            );
+        },
+        br#"{"apiKeys":[]}"#,
+    );
+    let output = run_with_env(
+        &["admin", "keys", "list", "--compact"],
+        &[
+            ("EXA_SERVICE_KEY", "svc-admin-secret"),
+            ("EXA_API_KEY", "test-key-abcdef12"),
+            ("EXA_ADMIN_BASE_URL", base_url.as_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("GET /api-keys "),
+                "unexpected admin request:\n{request}"
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-api-key: svc-admin-secret"),
+                "expected service key header:\n{request}"
+            );
+        },
+        br#"{"apiKeys":[]}"#,
+    );
+    let output = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "list",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--compact",
+        ],
+        &[
+            ("EXA_SERVICE_KEY", "svc-admin-secret"),
+            ("EXA_ADMIN_BASE_URL", base_url.as_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+
+    let dir = temp_path("admin-profile-base-url");
+    let config = dir.join("config.toml");
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("GET /api-keys "),
+                "unexpected admin request:\n{request}"
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-api-key: svc-admin-secret"),
+                "expected service key header:\n{request}"
+            );
+        },
+        br#"{"apiKeys":[]}"#,
+    );
+    fs::write(
+        &config,
+        format!("[profiles.admin]\nadmin_base_url = \"{base_url}\"\n"),
+    )
+    .unwrap();
+    let output = run_with_env(
+        &["--profile", "admin", "admin", "keys", "list", "--compact"],
+        &[
+            ("EXA_SERVICE_KEY", "svc-admin-secret"),
+            ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+
+    let missing_service = run_with_env(
+        &["admin", "keys", "list", "--compact"],
+        &[("EXA_API_KEY", "test-key-abcdef12")],
+    );
+    assert_eq!(missing_service.status.code(), Some(2));
+    let stderr: serde_json::Value = serde_json::from_slice(&missing_service.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "not_authenticated");
+    assert!(stderr["error"]["details"]["checked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "EXA_SERVICE_KEY"));
+
+    let api_shaped_service = run_with_env(
+        &["admin", "keys", "list", "--compact"],
+        &[
+            ("EXA_SERVICE_KEY", "00000000-0000-0000-0000-000000000000"),
+            ("EXA_ADMIN_BASE_URL", closed_local_base_url().as_str()),
+        ],
+    );
+    assert_eq!(api_shaped_service.status.code(), Some(2));
+    let stderr: serde_json::Value = serde_json::from_slice(&api_shaped_service.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "key_scope_mismatch");
+}
+
+#[test]
+fn service_shaped_api_key_is_rejected_for_api_commands() {
+    let output = run_with_env(
+        &["search", "hello", "--compact"],
+        &[("EXA_API_KEY", "svc-admin-secret")],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "key_scope_mismatch");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("service/admin key"));
+
+    let status = run_with_env(
+        &["auth", "status", "--compact"],
+        &[("EXA_API_KEY", "svc-admin-secret")],
+    );
+    assert!(status.status.success());
+    let stdout: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(stdout["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning.as_str().unwrap().contains("service key")));
+}
+
+#[test]
+fn admin_keys_create_safety_edges() {
+    let raw = run(&["admin", "keys", "create", "--raw", "--compact"]);
+    assert_eq!(raw.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&raw.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+
+    let dir = temp_path("admin-key-create-pending");
+    let pending_path = dir.join("pending-runs.jsonl");
+    let pending_path_string = pending_path.to_string_lossy().into_owned();
+    let base_url = closed_local_base_url();
+    let output = run_with_env(
+        &["admin", "keys", "create", "--name", "ci-key", "--compact"],
+        &[
+            ("EXA_SERVICE_KEY", "svc-admin-secret"),
+            ("EXA_ADMIN_BASE_URL", base_url.as_str()),
+            ("EXA_AGENT_PENDING_RUNS", pending_path_string.as_str()),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
+    assert_pending_record(&pending_path, "admin keys create", "/api-keys");
 }
 
 #[test]

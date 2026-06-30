@@ -289,6 +289,7 @@ fn streaming_ndjson_shape_from_canned_sse() {
             command: "answer",
             method: "POST",
             path: "/answer",
+            operation: None,
             request_id: "req_test",
             profile: "default",
             correlation_id: Some("corr-test"),

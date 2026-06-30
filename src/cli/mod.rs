@@ -415,7 +415,7 @@ pub enum MonitorCmd {
     /// POST /monitors [create-POST].
     Create(MonitorCreateArgs),
     /// GET /monitors.
-    List(PaginationArgs),
+    List(MonitorListArgs),
     /// GET /monitors/{id}.
     Get { id: String },
     /// PATCH /monitors/{id}.
@@ -425,13 +425,19 @@ pub enum MonitorCmd {
         name: Option<String>,
         #[arg(long)]
         query: Option<String>,
+        #[arg(long)]
+        schedule: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        webhook_url: Option<String>,
     },
     /// DELETE /monitors/{id}.
     Delete { id: String },
     /// POST /monitors/{id}/trigger.
     Trigger { id: String },
     /// POST /monitors/batch.
-    Batch,
+    Batch(MonitorBatchArgs),
     /// Monitor run history.
     Runs {
         #[command(subcommand)]
@@ -451,6 +457,26 @@ pub struct MonitorCreateArgs {
     pub webhook_url: Option<String>,
     #[arg(long)]
     pub secret_output: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct MonitorListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    #[arg(long)]
+    pub status: Option<String>,
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Metadata filter as `key=value` (repeatable; encoded as `metadata[key]=value`).
+    #[arg(long = "metadata", value_name = "KEY=VALUE")]
+    pub metadata: Vec<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct MonitorBatchArgs {
+    /// Required with live `dry_run:false` and `action=delete` (pass `delete`).
+    #[arg(long)]
+    pub confirm: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -983,7 +1009,7 @@ pub fn command_path(command: &Command) -> String {
             MonitorCmd::Update { .. } => "monitor update".to_string(),
             MonitorCmd::Delete { .. } => "monitor delete".to_string(),
             MonitorCmd::Trigger { .. } => "monitor trigger".to_string(),
-            MonitorCmd::Batch => "monitor batch".to_string(),
+            MonitorCmd::Batch(_) => "monitor batch".to_string(),
             MonitorCmd::Runs { sub } => match sub {
                 MonitorRunsCmd::List { .. } => "monitor runs list".to_string(),
                 MonitorRunsCmd::Get { .. } => "monitor runs get".to_string(),

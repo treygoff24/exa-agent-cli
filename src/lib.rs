@@ -23,6 +23,7 @@ use std::time::Duration;
 use cli::{
     command_path, AgentCmd, AgentRunArgs, AgentRunsCmd, AgentRunsEventsArgs, AnswerArgs, AuthCmd,
     Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs,
+    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
     PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs,
     SimilarArgs, TeamCmd,
 };
@@ -156,6 +157,7 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
         Command::Answer(args) => dispatch_answer(args, &cli.globals, pretty),
         Command::Context(args) => dispatch_context(args, &cli.globals, pretty),
+        Command::Monitor { sub } => dispatch_monitor(sub, &cli.globals, pretty),
         Command::Team { sub } => dispatch_team(sub, &cli.globals, pretty),
         Command::Agent { sub } => dispatch_agent(sub, &cli.globals, pretty),
         Command::Research { sub } => dispatch_research(sub, &cli.globals, pretty),
@@ -553,7 +555,7 @@ fn dispatch_agent_runs_list(
         let spec = build_typed_spec(op, &[], globals)?;
         let query = pagination_query(pagination);
         if pagination.all && !(globals.print_request || globals.dry_run) {
-            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None)
+            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None, &[])
         } else {
             dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
         }
@@ -589,6 +591,7 @@ fn dispatch_agent_runs_events(
                 pretty,
                 &args.pagination,
                 Some(path.as_str()),
+                &[],
             )
         } else {
             dispatch_typed_command_routed(
@@ -669,7 +672,12 @@ fn dispatch_agent_runs_delete(
 ) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["agent", "runs", "delete"]).expect("agent runs delete");
     with_typed_error_context(op, globals, || {
-        ensure_destructive_confirmed(op, globals, id)?;
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!("Refusing to delete agent run `{id}` without `--yes`; preview first with `agent runs get`"),
+            format!("exa-agent agent runs delete {id} --yes"),
+        )?;
         let spec = build_typed_spec(op, &[], globals)?;
         let path = substitute_path(op.api_path, &[("id", id)]);
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
@@ -679,19 +687,14 @@ fn dispatch_agent_runs_delete(
 fn ensure_destructive_confirmed(
     op: &'static registry::OperationDef,
     globals: &GlobalArgs,
-    id: &str,
+    message: impl Into<String>,
+    suggestion: impl Into<String>,
 ) -> Result<(), CliError> {
     if !op.destructive() || globals.yes || globals.dry_run || globals.print_request {
         return Ok(());
     }
     Err(CliError::Safety(
-        Diag::new(
-            "confirmation_required",
-            format!(
-                "Refusing to delete agent run `{id}` without `--yes`; preview first with `agent runs get`"
-            ),
-        )
-        .with_suggestion(format!("exa-agent agent runs delete {id} --yes")),
+        Diag::new("confirmation_required", message.into()).with_suggestion(suggestion.into()),
     ))
 }
 
@@ -761,7 +764,7 @@ fn dispatch_research_list(
         let spec = build_typed_spec(op, &[], globals)?;
         let query = pagination_query(pagination);
         if pagination.all && !(globals.print_request || globals.dry_run) {
-            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None)
+            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None, &[])
         } else {
             dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
         }
@@ -801,6 +804,751 @@ fn dispatch_research_get(
         let spec = build_typed_spec(op, &[], globals)?;
         let path = substitute_path(op.api_path, &[("researchId", research_id)]);
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_monitor(sub: &MonitorCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        MonitorCmd::Create(args) => dispatch_monitor_create(args, globals, pretty),
+        MonitorCmd::List(args) => dispatch_monitor_list(args, globals, pretty),
+        MonitorCmd::Get { id } => dispatch_monitor_get(id, globals, pretty),
+        MonitorCmd::Update {
+            id,
+            name,
+            query,
+            schedule,
+            status,
+            webhook_url,
+        } => dispatch_monitor_update(
+            id,
+            MonitorUpdateFields {
+                name: name.as_deref(),
+                query: query.as_deref(),
+                schedule: schedule.as_deref(),
+                status: status.as_deref(),
+                webhook_url: webhook_url.as_deref(),
+            },
+            globals,
+            pretty,
+        ),
+        MonitorCmd::Delete { id } => dispatch_monitor_delete(id, globals, pretty),
+        MonitorCmd::Trigger { id } => dispatch_monitor_trigger(id, globals, pretty),
+        MonitorCmd::Batch(args) => dispatch_monitor_batch(args, globals, pretty),
+        MonitorCmd::Runs { sub } => match sub {
+            MonitorRunsCmd::List {
+                monitor_id,
+                pagination,
+            } => dispatch_monitor_runs_list(monitor_id, pagination, globals, pretty),
+            MonitorRunsCmd::Get { monitor_id, run_id } => {
+                dispatch_monitor_runs_get(monitor_id, run_id, globals, pretty)
+            }
+        },
+    }
+}
+
+fn dispatch_monitor_create(
+    args: &MonitorCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "create"])
+        .expect("monitor create is in registry");
+    with_typed_error_context(op, globals, || {
+        if args.secret_output.as_deref() == Some("-") {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "Refusing to write webhook secret to stdout; use a file path for --secret-output",
+            )));
+        }
+        let spec = build_monitor_create_spec(args, globals)?;
+        let extra_warnings = monitor_webhook_secret_warnings(args, &spec.body);
+        if globals.print_request || globals.dry_run {
+            return dispatch_typed_preview_with_warnings(
+                spec,
+                globals,
+                pretty,
+                TypedDispatchOptions::default(),
+                &extra_warnings,
+            );
+        }
+        let secret_output = args
+            .secret_output
+            .as_deref()
+            .map(reserve_webhook_secret_file)
+            .transpose()?;
+        dispatch_monitor_create_live(spec, secret_output, globals, pretty, extra_warnings)
+    })
+}
+
+fn build_monitor_create_spec(
+    args: &MonitorCreateArgs,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "create"])
+        .expect("monitor create is in registry");
+    let mut body = build_monitor_create_named_body(args);
+    body = apply_request_overrides(body, globals)?;
+    if !monitor_create_has_required_fields(&body) {
+        return Err(CliError::NoInput(
+            Diag::new(
+                "missing_required_argument",
+                "monitor create requires search.query and webhook.url (via --query/--webhook-url, --body, or --set)",
+            )
+            .with_suggestion(
+                "exa-agent monitor create --query \"AI news\" --webhook-url https://example.com/hook",
+            ),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn build_monitor_create_named_body(args: &MonitorCreateArgs) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = &args.name {
+        body.insert("name".to_string(), serde_json::Value::String(name.clone()));
+    }
+    if let Some(query) = &args.query {
+        body.insert("search".to_string(), serde_json::json!({ "query": query }));
+    }
+    if let Some(schedule) = &args.schedule {
+        body.insert(
+            "trigger".to_string(),
+            serde_json::json!({ "type": "interval", "period": schedule }),
+        );
+    }
+    if let Some(url) = &args.webhook_url {
+        body.insert("webhook".to_string(), serde_json::json!({ "url": url }));
+    }
+    serde_json::Value::Object(body)
+}
+
+fn monitor_create_has_required_fields(body: &serde_json::Value) -> bool {
+    let has_search_query = body
+        .get("search")
+        .and_then(|search| search.get("query"))
+        .and_then(|query| query.as_str())
+        .is_some_and(|query| !query.is_empty());
+    let has_webhook_url = body
+        .get("webhook")
+        .and_then(|webhook| webhook.get("url"))
+        .and_then(|url| url.as_str())
+        .is_some_and(|url| !url.is_empty());
+    has_search_query && has_webhook_url
+}
+
+fn monitor_webhook_secret_warnings(
+    args: &MonitorCreateArgs,
+    body: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let has_webhook_url = args.webhook_url.is_some()
+        || body
+            .get("webhook")
+            .and_then(|webhook| webhook.get("url"))
+            .and_then(|url| url.as_str())
+            .is_some_and(|url| !url.is_empty());
+    if has_webhook_url && args.secret_output.is_none() {
+        vec![serde_json::json!({
+            "code": "webhook_secret_ephemeral",
+            "message": "Create responses include webhookSecret once; use --secret-output FILE to capture it or it will be lost.",
+            "replacement": "exa-agent monitor create --query \"...\" --webhook-url https://example.com/hook --secret-output ./webhook.secret"
+        })]
+    } else {
+        Vec::new()
+    }
+}
+
+fn apply_request_overrides(
+    mut body: serde_json::Value,
+    globals: &GlobalArgs,
+) -> Result<serde_json::Value, CliError> {
+    if let Some(raw) = globals.body.as_deref() {
+        let source = request::parse_body_source(raw)?;
+        let overlay = request::read_body_source(source)?;
+        if !overlay.is_object() {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "`--body` must be a JSON object when merging with named flags",
+            )));
+        }
+        request::deep_merge(&mut body, overlay);
+    }
+    for entry in &globals.set {
+        let (path, value) = request::parse_set(entry)?;
+        request::set_at_path(&mut body, &path, value)?;
+    }
+    Ok(body)
+}
+
+fn dispatch_monitor_create_live(
+    spec: request::RequestSpec,
+    secret_output: Option<SecretOutputReservation>,
+    globals: &GlobalArgs,
+    pretty: bool,
+    extra_warnings: Vec<serde_json::Value>,
+) -> Result<i32, CliError> {
+    parse_user_headers(&globals.headers)?;
+    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+        .map_err(|missing| auth::not_authenticated_error(&missing))?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg);
+    let transport = UreqTransport::new(timeout);
+    let request_id = transport::new_request_id();
+    let mut warnings = typed_command_warnings(spec.op);
+    warnings.extend(extra_warnings);
+    let result = execute_raw_with_request_id(
+        &transport,
+        RawExecuteParams {
+            method: spec.op.method.as_str(),
+            path: spec.op.api_path,
+            query_raw: &[],
+            body: typed_wire_body(&spec),
+            globals,
+            credential: &credential,
+            request_id: request_id.clone(),
+        },
+    )?;
+    let mut data = transport::parse_response_data(&result.response.body);
+    if let Some(output) = secret_output {
+        let secret = data
+            .get("webhookSecret")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                CliError::Upstream(
+                    Diag::new(
+                        "upstream_malformed",
+                        "monitor create response did not include string `webhookSecret`; reserved --secret-output file was not written",
+                    )
+                    .with_suggestion("exa-agent monitor list --limit 10"),
+                )
+            })?;
+        output.commit(secret)?;
+    }
+    redaction::redact_json_value(&mut data);
+    let count = transport::primary_count(&data);
+    let hash = transport::data_hash(&data);
+    let envelope = response_envelope(ResponseEnvelopeArgs {
+        command: &spec.op.command(),
+        method: &result.method,
+        path: &result.path,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+        warnings: &warnings,
+    });
+    if globals.ndjson {
+        emit_ndjson(&envelope);
+    } else {
+        emit_stdout(&envelope, pretty);
+    }
+    Ok(0)
+}
+
+struct SecretOutputReservation {
+    target: std::path::PathBuf,
+    file: Option<std::fs::File>,
+    committed: bool,
+}
+
+impl SecretOutputReservation {
+    fn commit(mut self, secret: &str) -> Result<(), CliError> {
+        use std::io::Write;
+        let path = self.target.display().to_string();
+        let Some(mut file) = self.file.take() else {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("failed to write --secret-output file `{path}`"),
+            )));
+        };
+        file.write_all(secret.as_bytes()).map_err(|err| {
+            CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("failed to write --secret-output file `{path}`: {err}"),
+            ))
+        })?;
+        // After the full secret is written, never remove the final output path on a later
+        // best-effort finalization error. `webhookSecret` is returned once; preserving the
+        // captured file is safer than returning an error and deleting the only copy.
+        self.committed = true;
+        file.sync_all().map_err(|err| {
+            CliError::Usage(Diag::new(
+                "invalid_value",
+                format!("failed to flush --secret-output file `{path}`: {err}"),
+            ))
+        })?;
+        drop(file);
+        Ok(())
+    }
+}
+
+impl Drop for SecretOutputReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.target);
+        }
+    }
+}
+
+fn reserve_webhook_secret_file(path: &str) -> Result<SecretOutputReservation, CliError> {
+    let target = std::path::PathBuf::from(path);
+    if target.is_dir() {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("--secret-output `{path}` must be a file path, not a directory"),
+        )));
+    }
+    if target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .is_none()
+    {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("--secret-output `{path}` must include a file name"),
+        )));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&target).map_err(|err| {
+        let message = if err.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("--secret-output file `{path}` already exists; choose a new path")
+        } else {
+            format!("failed to reserve --secret-output file `{path}` before request: {err}")
+        };
+        CliError::Usage(Diag::new("invalid_value", message))
+    })?;
+    Ok(SecretOutputReservation {
+        target,
+        file: Some(file),
+        committed: false,
+    })
+}
+
+fn dispatch_monitor_list(
+    args: &MonitorListArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op =
+        registry::lookup_by_segments(&["monitor", "list"]).expect("monitor list is in registry");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(&args.pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let static_query = monitor_list_static_query(args)?;
+        let query = merge_static_and_pagination_query(&static_query, &args.pagination);
+        if args.pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                &args.pagination,
+                None,
+                &static_query,
+            )
+        } else {
+            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn monitor_list_static_query(args: &MonitorListArgs) -> Result<Vec<(String, String)>, CliError> {
+    let mut query = Vec::new();
+    if let Some(status) = &args.status {
+        query.push(("status".to_string(), status.clone()));
+    }
+    if let Some(name) = &args.name {
+        query.push(("name".to_string(), name.clone()));
+    }
+    for entry in &args.metadata {
+        let (key, value) = parse_metadata_kv(entry)?;
+        query.push((format!("metadata[{key}]"), value));
+    }
+    Ok(query)
+}
+
+fn merge_static_and_pagination_query(
+    static_query: &[(String, String)],
+    pagination: &PaginationArgs,
+) -> Vec<(String, String)> {
+    let mut query = static_query.to_vec();
+    query.extend(pagination_query(pagination));
+    query
+}
+
+fn parse_metadata_kv(raw: &str) -> Result<(String, String), CliError> {
+    let (key, value) = raw.split_once('=').ok_or_else(|| {
+        CliError::Usage(
+            Diag::new("invalid_value", "`--metadata` expects `key=value`")
+                .with_suggestion("exa-agent monitor list --metadata slack_channel_id=C123"),
+        )
+    })?;
+    if key.is_empty() {
+        return Err(CliError::Usage(
+            Diag::new("invalid_value", "`--metadata` key must not be empty")
+                .with_suggestion("exa-agent monitor list --metadata owner=ops"),
+        ));
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
+fn dispatch_monitor_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "get"]).expect("monitor get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+#[derive(Clone, Copy)]
+struct MonitorUpdateFields<'a> {
+    name: Option<&'a str>,
+    query: Option<&'a str>,
+    schedule: Option<&'a str>,
+    status: Option<&'a str>,
+    webhook_url: Option<&'a str>,
+}
+
+fn dispatch_monitor_update(
+    id: &str,
+    fields: MonitorUpdateFields<'_>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "update"])
+        .expect("monitor update is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_monitor_update_spec(op, fields, globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn build_monitor_update_spec(
+    op: &'static registry::OperationDef,
+    fields: MonitorUpdateFields<'_>,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = fields.name {
+        body.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+    }
+    if let Some(query) = fields.query {
+        body.insert("search".to_string(), serde_json::json!({ "query": query }));
+    }
+    if let Some(schedule) = fields.schedule {
+        body.insert(
+            "trigger".to_string(),
+            serde_json::json!({ "type": "interval", "period": schedule }),
+        );
+    }
+    if let Some(status) = fields.status {
+        body.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+    }
+    if let Some(url) = fields.webhook_url {
+        body.insert("webhook".to_string(), serde_json::json!({ "url": url }));
+    }
+    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
+    if body.as_object().is_some_and(|object| object.is_empty()) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "monitor update requires at least one field via named flags, --body, or --set",
+            )
+            .with_suggestion("exa-agent monitor update <id> --status paused"),
+        ));
+    }
+    Ok(request::RequestSpec { op, body })
+}
+
+fn dispatch_monitor_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "delete"])
+        .expect("monitor delete is in registry");
+    with_typed_error_context(op, globals, || {
+        ensure_destructive_confirmed(
+            op,
+            globals,
+            format!("Refusing to delete monitor `{id}` without `--yes`; preview first with `monitor get`"),
+            format!("exa-agent monitor delete {id} --yes"),
+        )?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_monitor_trigger(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "trigger"])
+        .expect("monitor trigger is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_monitor_batch(
+    args: &MonitorBatchArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op =
+        registry::lookup_by_segments(&["monitor", "batch"]).expect("monitor batch is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_monitor_batch_spec(op, globals)?;
+        validate_monitor_batch_live(&spec.body, globals, args.confirm.as_deref())?;
+        dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn build_monitor_batch_spec(
+    op: &'static registry::OperationDef,
+    globals: &GlobalArgs,
+) -> Result<request::RequestSpec, CliError> {
+    let mut spec = build_typed_spec(op, &[], globals)?;
+    inject_batch_dry_run_default(&mut spec.body);
+    validate_monitor_batch_shape(&spec.body)?;
+    Ok(spec)
+}
+
+fn inject_batch_dry_run_default(body: &mut serde_json::Value) {
+    if body.get("dry_run").is_none() && body.get("dryRun").is_none() {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("dry_run".to_string(), serde_json::Value::Bool(true));
+        }
+    }
+}
+
+fn validate_monitor_batch_shape(body: &serde_json::Value) -> Result<(), CliError> {
+    let action = body.get("action").and_then(|value| value.as_str()).ok_or_else(|| {
+        CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "monitor batch requires `action` (delete, pause, or unpause) in the request body",
+            )
+            .with_suggestion(
+                "exa-agent monitor batch --body '{\"action\":\"pause\",\"filter\":{\"status\":\"active\"}}'",
+            ),
+        )
+    })?;
+    if !matches!(action, "delete" | "pause" | "unpause") {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("monitor batch action must be delete, pause, or unpause (got `{action}`)"),
+        )));
+    }
+    let filter = body.get("filter").and_then(|value| value.as_object()).ok_or_else(|| {
+        CliError::Usage(
+            Diag::new(
+                "missing_required_argument",
+                "monitor batch requires a non-empty `filter` object",
+            )
+            .with_suggestion(
+                "exa-agent monitor batch --body '{\"action\":\"pause\",\"filter\":{\"name\":\"daily\"}}'",
+            ),
+        )
+    })?;
+    if filter.is_empty() {
+        return Err(CliError::Usage(Diag::new(
+            "missing_required_argument",
+            "monitor batch filter must include at least one field",
+        )));
+    }
+    monitor_batch_dry_run(body)?;
+    Ok(())
+}
+
+fn monitor_batch_dry_run(body: &serde_json::Value) -> Result<Option<bool>, CliError> {
+    let Some(value) = body.get("dry_run").or_else(|| body.get("dryRun")) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        CliError::Usage(Diag::new(
+            "invalid_value",
+            "monitor batch `dry_run` must be a boolean",
+        ))
+    })
+}
+
+fn validate_monitor_batch_live(
+    body: &serde_json::Value,
+    globals: &GlobalArgs,
+    confirm: Option<&str>,
+) -> Result<(), CliError> {
+    if globals.dry_run || globals.print_request {
+        return Ok(());
+    }
+    let dry_run = monitor_batch_dry_run(body)?;
+    if dry_run != Some(false) {
+        return Ok(());
+    }
+    if !globals.yes {
+        return Err(CliError::Safety(
+            Diag::new(
+                "confirmation_required",
+                "Refusing live monitor batch with dry_run:false without --yes; preview first with --dry-run",
+            )
+            .with_suggestion(
+                "exa-agent monitor batch --body '{\"action\":\"pause\",\"filter\":{\"status\":\"active\"},\"dry_run\":false}' --yes",
+            ),
+        ));
+    }
+    if body.get("action").and_then(|value| value.as_str()) == Some("delete")
+        && confirm != Some("delete")
+    {
+        return Err(CliError::Safety(
+            Diag::new(
+                "confirmation_required",
+                "Refusing live monitor batch delete without --confirm delete",
+            )
+            .with_suggestion(
+                "exa-agent monitor batch --confirm delete --body '{\"action\":\"delete\",\"filter\":{\"name\":\"daily\"},\"dry_run\":false}' --yes",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn dispatch_monitor_runs_list(
+    monitor_id: &str,
+    pagination: &PaginationArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "runs", "list"]).expect("monitor runs list");
+    with_typed_error_context(op, globals, || {
+        validate_cursor_pagination(pagination)?;
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        let query = pagination_query(pagination);
+        if pagination.all && !(globals.print_request || globals.dry_run) {
+            dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                pagination,
+                Some(path.as_str()),
+                &[],
+            )
+        } else {
+            dispatch_typed_command_routed(
+                spec,
+                globals,
+                pretty,
+                Some(path.as_str()),
+                &query,
+                false,
+                None,
+            )
+        }
+    })
+}
+
+fn dispatch_monitor_runs_get(
+    monitor_id: &str,
+    run_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["monitor", "runs", "get"]).expect("monitor runs get");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path = substitute_path(op.api_path, &[("id", monitor_id), ("runId", run_id)]);
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_typed_preview_with_warnings(
+    spec: request::RequestSpec,
+    _globals: &GlobalArgs,
+    pretty: bool,
+    options: TypedDispatchOptions<'_>,
+    extra_warnings: &[serde_json::Value],
+) -> Result<i32, CliError> {
+    let op = spec.op;
+    let path = options.path_override.unwrap_or(op.api_path);
+    let mut warnings = typed_command_warnings(op);
+    warnings.extend_from_slice(extra_warnings);
+    emit_stdout(
+        &redacted_preview_expanded_with_warnings(
+            &spec,
+            path,
+            options.query,
+            options.expands_to,
+            options.extra_headers,
+            options.command_override,
+            &warnings,
+        ),
+        pretty,
+    );
+    Ok(0)
+}
+
+fn redacted_preview_expanded_with_warnings(
+    spec: &request::RequestSpec,
+    path: &str,
+    query: &[(String, String)],
+    expands_to: Option<&str>,
+    extra_headers: Option<&[(String, String)]>,
+    command_override: Option<&str>,
+    warnings: &[serde_json::Value],
+) -> serde_json::Value {
+    let mut body = typed_wire_body(spec);
+    redaction::redact_json_value(&mut body);
+    let command = command_override
+        .map(str::to_string)
+        .unwrap_or_else(|| spec.op.command());
+    let mut request = serde_json::json!({
+        "method": spec.op.method.as_str(),
+        "path": path,
+        "query": query_preview(query),
+        "body": body,
+    });
+    if let Some(headers) = extra_headers.filter(|headers| !headers.is_empty()) {
+        request["headers"] = serde_json::Value::Array(header_preview(headers));
+    } else if body_wants_stream(&body) {
+        request["headers"] = serde_json::json!([{
+            "name": "Accept",
+            "value": "text/event-stream"
+        }]);
+    }
+    let data = data_with_expands_to(
+        serde_json::json!({
+            "request": request,
+            "dryRun": true,
+        }),
+        expands_to,
+    );
+    let count = transport::primary_count(data.get("request").unwrap_or(&data));
+    let hash = transport::data_hash(&data);
+    response_envelope(ResponseEnvelopeArgs {
+        command: &command,
+        method: spec.op.method.as_str(),
+        path,
+        request_id: "req_dry_run",
+        profile: "default",
+        correlation_id: None,
+        data,
+        count,
+        data_hash: hash,
+        retries: 0,
+        warnings,
     })
 }
 
@@ -1202,6 +1950,7 @@ fn dispatch_paginated_typed_command(
     pretty: bool,
     pagination: &PaginationArgs,
     path_override: Option<&str>,
+    static_query: &[(String, String)],
 ) -> Result<i32, CliError> {
     if globals.raw {
         return Err(CliError::Usage(
@@ -1222,23 +1971,43 @@ fn dispatch_paginated_typed_command(
     execute_paginated_live(
         &transport,
         &spec,
-        globals,
-        &credential,
-        pretty,
-        pagination,
-        path_override,
+        PaginatedExecution {
+            globals,
+            credential: &credential,
+            pretty,
+            pagination,
+            route: PaginatedRoute {
+                path_override,
+                static_query,
+            },
+        },
     )
+}
+
+struct PaginatedExecution<'a> {
+    globals: &'a GlobalArgs,
+    credential: &'a auth::ResolvedCredential,
+    pretty: bool,
+    pagination: &'a PaginationArgs,
+    route: PaginatedRoute<'a>,
+}
+
+struct PaginatedRoute<'a> {
+    path_override: Option<&'a str>,
+    static_query: &'a [(String, String)],
 }
 
 fn execute_paginated_live<T: Transport>(
     transport: &T,
     spec: &request::RequestSpec,
-    globals: &GlobalArgs,
-    credential: &auth::ResolvedCredential,
-    pretty: bool,
-    pagination: &PaginationArgs,
-    path_override: Option<&str>,
+    execution: PaginatedExecution<'_>,
 ) -> Result<i32, CliError> {
+    let globals = execution.globals;
+    let credential = execution.credential;
+    let pretty = execution.pretty;
+    let pagination = execution.pagination;
+    let path_override = execution.route.path_override;
+    let static_query = execution.route.static_query;
     let delay = pagination
         .page_delay
         .as_deref()
@@ -1269,7 +2038,8 @@ fn execute_paginated_live<T: Transport>(
         if first_request_id.is_empty() {
             first_request_id = request_id.clone();
         }
-        let query = pagination_query_with_cursor(pagination, cursor.as_deref());
+        let mut query = static_query.to_vec();
+        query.extend(pagination_query_with_cursor(pagination, cursor.as_deref()));
         let query_raw: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let path = path_override.unwrap_or(spec.op.api_path);
         let result = execute_raw_with_request_id(
@@ -3115,11 +3885,16 @@ mod tests {
             execute_paginated_live(
                 &fake,
                 &spec,
-                &globals,
-                &credential,
-                false,
-                &pagination,
-                None,
+                PaginatedExecution {
+                    globals: &globals,
+                    credential: &credential,
+                    pretty: false,
+                    pagination: &pagination,
+                    route: PaginatedRoute {
+                        path_override: None,
+                        static_query: &[],
+                    },
+                },
             )
             .unwrap(),
             0

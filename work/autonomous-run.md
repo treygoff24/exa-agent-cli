@@ -1,6 +1,6 @@
 # Autonomous Run Ledger
 
-Status: Wave 3B complete; next wave is 4A monitor family.
+Status: Wave 4A complete; next wave is 4B websets core.
 Created: 2026-06-29.
 Plan: [`docs/v2/autonomous-implementation-plan.md`](../docs/v2/autonomous-implementation-plan.md).
 
@@ -11,7 +11,7 @@ Codex owns updates.
 
 - Current observed git state: implementation branch
   `codex/autonomous-v1-implementation`; baseline scaffold committed as
-  `70ac1ad`; latest committed checkpoint before Wave 3B was `45d1860`.
+  `70ac1ad`; latest committed checkpoint before Wave 4A was `b707df5`.
 - Current verified checks:
   - `cargo test --workspace --locked`
   - `cargo xtask ci`
@@ -44,7 +44,10 @@ Codex owns updates.
   contract-shaped pending-run JSONL recovery records. Wave 3B adds true
   blocking SSE streaming, raw/NDJSON/human progressive stream output, SIGINT
   interruption with resume metadata, Last-Event-ID replay, Agent pagination
-  goldens, and Phase 3 gate coverage.
+  goldens, and Phase 3 gate coverage. Wave 4A adds the top-level monitor
+  command family (`monitor create|list|get|update|delete|trigger|batch|runs`),
+  monitor list filter-preserving pagination, one-time webhook secret capture,
+  batch/delete safety guards, and Phase 4 monitor gate coverage.
 
 ## Pre-run checklist
 
@@ -72,7 +75,7 @@ Codex owns updates.
 | 2C Team/macros/deprecations | complete | native baseline macro lane + Delegate Cursor Composer team/research lane + parent integration | initial/re-review findings fixed; final narrow re-review clean with only low-risk notes | initial findings fixed; final GLM re-review clean with accepted P3 residuals | `cargo xtask phase-gate 2` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 3A Agent/research lifecycle | complete | native pending-run helper lane + Delegate Cursor Composer Agent lifecycle lane + parent integration | initial findings fixed; final/final-final re-reviews clean | GLM found pending schema P1 and P3 dead-input cleanup; fixed; final-final GLM clean | `cargo xtask ci` pass; `cargo xtask phase-gate 3` pass; branch-wide secret scan pass |
 | 3B SSE/SIGINT/pagination | complete | native SSE/interrupt lane + Delegate Cursor Composer mechanical gate/test lane + parent integration | native found Phase 3 lock gaps, partial-id resume bug, NDJSON write-failure gap; fixed; final re-review clean | Delegate Cursor safe found callback/write-failure resume bug; fixed; Delegate Grok safe returned only a progress line and was replaced per updated lane policy | `cargo xtask phase-gate 3` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
-| 4A Monitors | not started | - | - | - | - |
+| 4A Monitors | complete in working tree | native checklist + Delegate Cursor Composer implementation + parent integration | found/fixed secret-output preflight, final-path reservation, post-write deletion, missing-secret, and narrow refactor issues; final reviews clean | Delegate Grok safe found/fixed non-boolean batch `dry_run` bypass and confirmed final fixes; one post-CI Grok run returned only progress output | `cargo xtask phase-gate 4` pass; `cargo xtask ci` pass; branch-wide secret scan pass |
 | 4B Websets core | not started | - | - | - | - |
 | 4C Websets webhooks/events/closeout | not started | - | - | - | - |
 | 5 Admin keys | not started | - | - | - | - |
@@ -139,6 +142,15 @@ Record every review finding that is not immediately fixed.
 | 3B | native review | high | NDJSON streaming wrote with infallible `println!`, so broken stdout could bypass the callback-error wrapper | fixed | Added fallible `write_ndjson`, streaming NDJSON writer helper, and output-boundary regression for write failure. |
 | 3B | parent | medium | Human TTY `--stream` path was not progressive despite contracts §8 | fixed | Added minimal progressive human frame writes with fallible error mapping and helper regressions. |
 | 3B | Delegate Cursor safe | low | Interrupted-stream envelope lock is an integration assertion, not an insta snapshot; SIGINT test is Unix-only | accepted for now | The black-box test asserts exit 12 and stderr envelope `details.lastEventId`; this local run targets macOS/Unix. Cross-platform signal harness can be added with CI platform work. |
+| 4A | native checklist | high | Top-level `monitor` parser existed but dispatch was unwired; generated monitor registry fields were empty, so custom request builders were required | fixed | Added `Command::Monitor` dispatch and monitor-specific builders for create/update/list/batch/runs while keeping Websets monitor paths separate. |
+| 4A | native review | medium | `monitor create --secret-output` originally detected output-file failures only after `POST /monitors`, risking one-time `webhookSecret` loss | fixed | Reserved the final target path before auth/network with `create_new`; added bad-parent/existing-target no-POST regressions. |
+| 4A | native re-review | medium | Temp-file reservation did not reserve the final pathname before POST | fixed | Replaced temp+rename with final-path `create_new` reservation and explicit existing-target refusal. |
+| 4A | native re-review | high | A post-write sync/chmod failure could delete a successfully written one-time secret | fixed | Marked the reservation committed immediately after `write_all` succeeds and removed redundant post-create/post-write chmod paths. |
+| 4A | native review | medium | `--secret-output` could silently succeed if upstream omitted a string `webhookSecret` | fixed | Missing/non-string `webhookSecret` now returns `upstream_malformed`, leaves stdout empty, and removes the reserved file; regression added. |
+| 4A | Delegate Grok safe | high | Non-boolean batch `dry_run` values such as `"false"` bypassed live confirmation because `as_bool()` returned `None` | fixed | Batch shape validation now rejects non-boolean `dry_run`/`dryRun` as `invalid_value`; regression added. |
+| 4A | Delegate Grok safe | low | `monitor update <id>` with no patch fields could send an empty live PATCH | fixed | Empty monitor update bodies are rejected locally with `missing_required_argument`; regression added. |
+| 4A | CI/clippy | medium | New helper signatures exceeded clippy's `too_many_arguments` threshold under `cargo xtask ci` | fixed | Grouped monitor update fields and pagination execution parameters into small structs; post-CI native review found no regression. |
+| 4A | Delegate Grok safe | low | Windows lacks Unix `0600` hardening for `--secret-output`; wrong-type `webhookSecret` and camelCase `dryRun` alias have no separate black-box cases | accepted for now | Current Unix mode is tested on macOS; wrong-type and alias paths share the same validation helper paths as covered cases. |
 
 ## Gate log
 
@@ -215,6 +227,20 @@ Record every review finding that is not immediately fixed.
 | 2026-06-30 | `cargo xtask ci` | pass | fmt, clippy, and full workspace tests after all Wave 3B review fixes |
 | 2026-06-30 | non-printing tracked/diff secret scan | pass | Stored API key fingerprint `927c` absent from tracked files and working diff |
 | 2026-06-30 | `delegate worktree list` | pass | All Delegate worktrees are removed; none present with unreviewed edits |
+| 2026-06-30 | Delegate Cursor Composer worktree (`cursor-14`) | pass | Implemented initial Wave 4A monitor diff in isolated worktree; parent reviewed and integrated into source checkout |
+| 2026-06-30 | Delegate Grok Composer worktree (`grok-2`) | no-op | Implementation lane returned no source changes |
+| 2026-06-30 | native Wave 4A checklist (`019f1624...`) | pass | Produced monitor contract/request-shape checklist that guided implementation and tests |
+| 2026-06-30 | native Wave 4A reviews (`019f162e...`, `019f1631...`, `019f1635...`, `019f1638...`, `019f163c...`) | findings fixed | Found and verified secret-output safety fixes: preflight before POST, final-path reservation, post-write preservation, missing-secret hard error, and chmod cleanup |
+| 2026-06-30 | Delegate Grok Wave 4A safe reviews (`grok-5`, `grok-6`, `grok-7`) | findings fixed | First run progress-only; later runs found batch `dry_run` bypass and empty-update gap, then confirmed no actionable findings after fixes |
+| 2026-06-30 | `cargo fmt --check && git diff --check` | pass | Wave 4A formatting and whitespace gate after final fixes |
+| 2026-06-30 | `cargo test --test cli monitor_create -- --nocapture` | pass | 8 monitor-create tests including secret-output capture, preflight, existing-target, stdout refusal, and missing-secret hard error |
+| 2026-06-30 | `cargo test --test cli monitor -- --nocapture` | pass | 16 monitor tests covering create/list/get/update/delete/batch/runs and filter-preserving pagination |
+| 2026-06-30 | `cargo xtask phase-gate 4` | pass | Full workspace tests plus monitor dry-run smokes and 16-test monitor slice |
+| 2026-06-30 | `cargo xtask ci` | fail then pass | Initial fail on clippy `too_many_arguments`; refactored helper parameter structs and reran successfully |
+| 2026-06-30 | native post-CI refactor review (`019f163f...`) | pass | No behavior/lifetime regressions from clippy-driven refactor |
+| 2026-06-30 | Delegate Grok post-CI refactor review (`grok-8`) | partial | Returned only a progress line; no actionable signal |
+| 2026-06-30 | non-printing tracked/diff secret scan | pass | Stored API key prefix/suffix absent from tracked files, working diff, and cached diff |
+| 2026-06-30 | `delegate worktree remove grok-2`; `delegate worktree remove cursor-14 --discard-uncommitted --force-branch` | pass | Completed Wave 4A Delegate worktrees removed through Delegate manager after source integration and review |
 
 ## Local commit log
 
@@ -229,7 +255,8 @@ Record every review finding that is not immediately fixed.
 | 2026-06-29 | `b771a5b` | Wave 2B typed `answer`/`context`/`similar`, SSE stream envelope shaping, context query validation, and Phase 2 stream gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
 | 2026-06-29 | `fa09849` | Wave 2C typed `team info`, legacy research create/list/get with cursor pagination, `ask`/`fetch` macro aliases, and Phase 2 team/research gate | `cargo xtask ci`; `cargo xtask phase-gate 2`; native + GLM final reviews clean; branch-wide secret scan pass |
 | 2026-06-29 | `45d1860` | Wave 3A Agent run lifecycle, rich Agent create body fields, event replay validation, delete confirmation, and pending-run JSONL recovery contract | `cargo xtask ci`; `cargo xtask phase-gate 3`; native + GLM final-final reviews clean; branch-wide secret scan pass |
-| 2026-06-30 | this commit | Wave 3B blocking SSE streaming, SIGINT/resume metadata, raw/NDJSON/human progressive stream output, Agent pagination and pending-run locks, and updated lane policy | `cargo xtask phase-gate 3`; `cargo xtask ci`; native + Delegate Cursor reviews clean; branch-wide secret scan pass |
+| 2026-06-30 | `b707df5` | Wave 3B blocking SSE streaming, SIGINT/resume metadata, raw/NDJSON/human progressive stream output, Agent pagination and pending-run locks, and updated lane policy | `cargo xtask phase-gate 3`; `cargo xtask ci`; native + Delegate Cursor reviews clean; branch-wide secret scan pass |
+| 2026-06-30 | this commit | Wave 4A top-level monitor command family, webhook secret capture, filter-preserving monitor pagination, batch/delete safety, and Phase 4 monitor gate | `cargo xtask phase-gate 4`; `cargo xtask ci`; native + Delegate Grok reviews clean/recorded; branch-wide secret scan pass |
 
 ## Final completion checklist
 

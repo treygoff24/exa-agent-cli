@@ -1963,6 +1963,525 @@ fn parse_monitor_commands() {
 }
 
 #[test]
+fn monitor_create_dry_run_builds_nested_body() {
+    let create = run_ok_json(&[
+        "monitor",
+        "create",
+        "--name",
+        "daily",
+        "--query",
+        "AI news",
+        "--schedule",
+        "6h",
+        "--webhook-url",
+        "https://example.com/hook",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "monitor create");
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["name"], "daily");
+    assert_eq!(body["search"]["query"], "AI news");
+    assert_eq!(body["trigger"]["type"], "interval");
+    assert_eq!(body["trigger"]["period"], "6h");
+    assert_eq!(body["webhook"]["url"], "https://example.com/hook");
+    assert!(create["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "webhook_secret_ephemeral"));
+}
+
+#[test]
+fn monitor_create_body_set_precedence_over_named_flags() {
+    let create = run_ok_json(&[
+        "monitor",
+        "create",
+        "--query",
+        "flag query",
+        "--webhook-url",
+        "https://example.com/flag",
+        "--body",
+        r#"{"search":{"query":"body query"},"webhook":{"url":"https://example.com/body"}}"#,
+        "--set",
+        "search.query=set query",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["search"]["query"], "set query");
+    assert_eq!(body["webhook"]["url"], "https://example.com/body");
+}
+
+#[test]
+fn monitor_create_requires_search_query_and_webhook_url() {
+    let output = run(&["monitor", "create", "--query", "AI news", "--compact"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("search.query and webhook.url"));
+}
+
+#[test]
+fn monitor_list_dry_run_includes_filters_and_metadata_brackets() {
+    let list = run_ok_json(&[
+        "monitor",
+        "list",
+        "--status",
+        "active",
+        "--name",
+        "daily",
+        "--metadata",
+        "owner=ops",
+        "--metadata",
+        "team=search",
+        "--limit",
+        "10",
+        "--cursor",
+        "cur_mon",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "monitor list");
+    assert_eq!(
+        list["data"]["request"]["query"],
+        serde_json::json!([
+            {"name": "status", "value": "active"},
+            {"name": "name", "value": "daily"},
+            {"name": "metadata[owner]", "value": "ops"},
+            {"name": "metadata[team]", "value": "search"},
+            {"name": "limit", "value": "10"},
+            {"name": "cursor", "value": "cur_mon"}
+        ])
+    );
+}
+
+fn local_paginated_monitor_list_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let responses = [
+            r#"{"data":[{"id":"mon_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
+            r#"{"data":[{"id":"mon_2"}],"hasMore":false,"nextCursor":null}"#,
+        ];
+        for (idx, response_body) in responses.iter().enumerate() {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == ErrorKind::WouldBlock
+                            && started.elapsed() < Duration::from_secs(10) =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("failed to accept local pagination test request: {err}"),
+                }
+            };
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
+            if idx == 0 {
+                assert!(
+                    request.starts_with(
+                        "GET /monitors?status=active&name=daily&metadata%5Bowner%5D=ops&limit=1 "
+                    ),
+                    "unexpected first page request:\n{request}"
+                );
+            } else {
+                assert!(
+                    request.starts_with(
+                        "GET /monitors?status=active&name=daily&metadata%5Bowner%5D=ops&limit=1&cursor=cur2 "
+                    ),
+                    "unexpected second page request:\n{request}"
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn monitor_list_all_live_preserves_filters_across_pages() {
+    let (base_url, server) = local_paginated_monitor_list_server();
+    let output = run_owned(&[
+        "monitor".into(),
+        "list".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--status".into(),
+        "active".into(),
+        "--name".into(),
+        "daily".into(),
+        "--metadata".into(),
+        "owner=ops".into(),
+        "--ndjson".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn monitor_delete_requires_yes_for_live_execution() {
+    let output = run(&["monitor", "delete", "mon_abc", "--compact"]);
+    assert_eq!(output.status.code(), Some(9));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "confirmation_required");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("--yes"));
+}
+
+#[test]
+fn monitor_get_update_and_trigger_dry_run_shapes() {
+    let get = run_ok_json(&["monitor", "get", "mon/abc", "--dry-run", "--compact"]);
+    assert_eq!(get["command"], "monitor get");
+    assert_eq!(get["data"]["request"]["path"], "/monitors/mon%2Fabc");
+    assert!(get["data"]["request"]["body"].is_null());
+
+    let update = run_ok_json(&[
+        "monitor",
+        "update",
+        "mon_abc",
+        "--name",
+        "renamed",
+        "--query",
+        "new query",
+        "--schedule",
+        "1d",
+        "--status",
+        "paused",
+        "--webhook-url",
+        "https://example.com/new-hook",
+        "--set",
+        "search.query=set query",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(update["command"], "monitor update");
+    assert_eq!(update["data"]["request"]["path"], "/monitors/mon_abc");
+    let body = &update["data"]["request"]["body"];
+    assert_eq!(body["name"], "renamed");
+    assert_eq!(body["search"]["query"], "set query");
+    assert_eq!(body["trigger"]["type"], "interval");
+    assert_eq!(body["trigger"]["period"], "1d");
+    assert_eq!(body["status"], "paused");
+    assert_eq!(body["webhook"]["url"], "https://example.com/new-hook");
+
+    let empty_update = run(&["monitor", "update", "mon_abc", "--dry-run", "--compact"]);
+    assert_eq!(empty_update.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&empty_update.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("requires at least one field"));
+
+    let trigger = run_ok_json(&["monitor", "trigger", "mon_abc", "--dry-run", "--compact"]);
+    assert_eq!(trigger["command"], "monitor trigger");
+    assert_eq!(
+        trigger["data"]["request"]["path"],
+        "/monitors/mon_abc/trigger"
+    );
+    assert_eq!(trigger["data"]["request"]["body"], serde_json::json!({}));
+}
+
+#[test]
+fn monitor_batch_defaults_dry_run_true() {
+    let batch = run_ok_json(&[
+        "monitor",
+        "batch",
+        "--body",
+        r#"{"action":"pause","filter":{"status":"active"}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(batch["command"], "monitor batch");
+    assert_eq!(batch["data"]["request"]["body"]["dry_run"], true);
+}
+
+#[test]
+fn monitor_batch_dry_run_false_requires_confirmation() {
+    let missing_yes = run(&[
+        "monitor",
+        "batch",
+        "--body",
+        r#"{"action":"pause","filter":{"status":"active"},"dry_run":false}"#,
+        "--compact",
+    ]);
+    assert_eq!(missing_yes.status.code(), Some(9));
+    let stderr: serde_json::Value = serde_json::from_slice(&missing_yes.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "confirmation_required");
+
+    let delete_missing_confirm = run(&[
+        "monitor",
+        "batch",
+        "--body",
+        r#"{"action":"delete","filter":{"name":"daily"},"dry_run":false}"#,
+        "--yes",
+        "--compact",
+    ]);
+    assert_eq!(delete_missing_confirm.status.code(), Some(9));
+    let stderr: serde_json::Value = serde_json::from_slice(&delete_missing_confirm.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "confirmation_required");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--confirm delete"));
+
+    let non_boolean_dry_run = run(&[
+        "monitor",
+        "batch",
+        "--body",
+        r#"{"action":"pause","filter":{"status":"active"},"dry_run":"false"}"#,
+        "--compact",
+    ]);
+    assert_eq!(non_boolean_dry_run.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&non_boolean_dry_run.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("must be a boolean"));
+}
+
+#[test]
+fn monitor_runs_list_and_get_dry_run_paths() {
+    let list = run_ok_json(&[
+        "monitor",
+        "runs",
+        "list",
+        "mon_abc",
+        "--limit",
+        "5",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(list["command"], "monitor runs list");
+    assert_eq!(list["data"]["request"]["path"], "/monitors/mon_abc/runs");
+    assert_eq!(
+        list["data"]["request"]["query"],
+        serde_json::json!([{"name": "limit", "value": "5"}])
+    );
+
+    let get = run_ok_json(&[
+        "monitor",
+        "runs",
+        "get",
+        "mon_abc",
+        "run_xyz",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(get["command"], "monitor runs get");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/monitors/mon_abc/runs/run_xyz"
+    );
+}
+
+#[test]
+fn monitor_create_live_captures_webhook_secret_and_redacts_stdout() {
+    let response = br#"{"id":"mon_test","webhookSecret":"whsec_live_capture_12345"}"#;
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /monitors "));
+            assert!(request.contains(r#""query":"secret test""#));
+        },
+        response,
+    );
+    let secret_path = temp_path("webhook-secret").join("secret.txt");
+    let output = run_owned(&[
+        "monitor".into(),
+        "create".into(),
+        "--query".into(),
+        "secret test".into(),
+        "--webhook-url".into(),
+        "https://example.com/hook".into(),
+        "--secret-output".into(),
+        secret_path.to_string_lossy().into_owned(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local monitor create server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(!stdout.contains("whsec_live_capture_12345"));
+    assert!(stdout.contains("<redacted>"));
+    let secret = fs::read_to_string(&secret_path).expect("secret file");
+    assert_eq!(secret, "whsec_live_capture_12345");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&secret_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[test]
+fn monitor_create_secret_output_requires_webhook_secret() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /monitors "));
+        },
+        br#"{"id":"mon_test"}"#,
+    );
+    let secret_path = temp_path("webhook-secret-missing").join("secret.txt");
+    let output = run_owned(&[
+        "monitor".into(),
+        "create".into(),
+        "--query".into(),
+        "secret test".into(),
+        "--webhook-url".into(),
+        "https://example.com/hook".into(),
+        "--secret-output".into(),
+        secret_path.to_string_lossy().into_owned(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local monitor create server panicked");
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    assert!(
+        !secret_path.exists(),
+        "reserved secret file should be removed when the response omits webhookSecret"
+    );
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "upstream_malformed");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("monitor create response did not include string"));
+}
+
+#[test]
+fn monitor_create_bad_secret_output_fails_before_post() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let missing_parent = temp_path("webhook-secret-preflight")
+        .join("missing")
+        .join("secret.txt");
+    let output = run_owned(&[
+        "monitor".into(),
+        "create".into(),
+        "--query".into(),
+        "secret test".into(),
+        "--webhook-url".into(),
+        "https://example.com/hook".into(),
+        "--secret-output".into(),
+        missing_parent.to_string_lossy().into_owned(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("before request"));
+    match listener.accept() {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("monitor create sent a request before secret-output preflight succeeded"),
+        Err(err) => panic!("unexpected listener error: {err}"),
+    }
+}
+
+#[test]
+fn monitor_create_existing_secret_output_fails_before_post() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let secret_path = temp_path("webhook-secret-existing").join("secret.txt");
+    fs::write(&secret_path, "do not overwrite").unwrap();
+    let output = run_owned(&[
+        "monitor".into(),
+        "create".into(),
+        "--query".into(),
+        "secret test".into(),
+        "--webhook-url".into(),
+        "https://example.com/hook".into(),
+        "--secret-output".into(),
+        secret_path.to_string_lossy().into_owned(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        fs::read_to_string(&secret_path).unwrap(),
+        "do not overwrite"
+    );
+    match listener.accept() {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("monitor create sent a request before existing secret-output failed"),
+        Err(err) => panic!("unexpected listener error: {err}"),
+    }
+}
+
+#[test]
+fn monitor_create_secret_output_refuses_stdout() {
+    let output = run(&[
+        "monitor",
+        "create",
+        "--query",
+        "AI news",
+        "--webhook-url",
+        "https://example.com/hook",
+        "--secret-output",
+        "-",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+}
+
+#[test]
 fn parse_websets_representative_nested() {
     assert_path(
         &[

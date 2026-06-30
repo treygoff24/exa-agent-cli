@@ -100,6 +100,10 @@ fn run_ok_json(args: &[&str]) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("stdout was not JSON for {args:?}: {e}"))
 }
 
+fn stderr_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stderr).unwrap_or_else(|e| panic!("stderr was not JSON: {e}"))
+}
+
 fn temp_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "exa-agent-cli-blackbox-{name}-{}",
@@ -1440,6 +1444,95 @@ fn parse_search_core() {
 }
 
 #[test]
+fn clap_missing_required_argument_names_query() {
+    let output = run(&["search"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("<QUERY>"));
+    let missing = stderr["error"]["details"]["missing"].as_array().unwrap();
+    assert!(!missing.is_empty());
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str().is_some_and(|value| value.contains("QUERY"))));
+}
+
+#[test]
+fn clap_unknown_subcommand_includes_did_you_mean() {
+    let output = run(&["serch", "x"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "unknown_subcommand");
+    assert_eq!(stderr["error"]["details"]["didYouMean"], "search");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("search"));
+}
+
+#[test]
+fn clap_nonsense_subcommand_has_no_false_suggestion() {
+    // Trust clap's similarity threshold: nonsense input gets NO suggestion rather
+    // than a re-derived false match.
+    for argv in [&["xyz"][..], &["q"][..]] {
+        let output = run(argv);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "unknown_subcommand");
+        assert!(
+            stderr["error"]["details"]["didYouMean"].is_null(),
+            "no false suggestion for {argv:?}, got {}",
+            stderr["error"]["details"]
+        );
+    }
+}
+
+#[test]
+fn clap_nested_subcommand_typo_suggests_most_similar_not_destructive() {
+    // Regression: a `.next()` on clap's ascending-similarity list picked the LEAST
+    // similar candidate, steering `websets event` toward the destructive `delete`.
+    let output = run(&["websets", "event"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["details"]["didYouMean"], "events");
+    assert_ne!(stderr["error"]["details"]["didYouMean"], "delete");
+}
+
+#[test]
+fn placeholder_guard_allows_lowercase_real_id() {
+    // Case-sensitive word prefixes: a real lowercase id is not a placeholder.
+    let ok = run_ok_json(&[
+        "websets",
+        "get",
+        "example_abc123",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(ok["data"]["request"]["path"], "/v0/websets/example_abc123");
+}
+
+#[test]
+fn clap_unknown_flag_includes_did_you_mean() {
+    let output = run(&["search", "--numresults", "5", "q"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    assert!(stderr["error"]["details"]["didYouMean"]
+        .as_str()
+        .unwrap()
+        .contains("--num-results"));
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("--num-results"));
+}
+
+#[test]
 fn parse_contents_answer_context_similar() {
     assert_path(&["contents", "https://exa.ai/docs"], "contents");
     parses(&["contents", "--ids", "id1", "id2"]);
@@ -2643,7 +2736,7 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
     assert_eq!(body["search"]["count"], 12);
 
     let missing_body = run(&["websets", "create", "--compact"]);
-    assert_eq!(missing_body.status.code(), Some(11));
+    assert_eq!(missing_body.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&missing_body.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
 
@@ -2695,7 +2788,7 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
     );
 
     let preview_missing_query = run(&["websets", "preview", "--count", "3", "--compact"]);
-    assert_eq!(preview_missing_query.status.code(), Some(11));
+    assert_eq!(preview_missing_query.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&preview_missing_query.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
 
@@ -2724,6 +2817,41 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
     assert_eq!(preview_criteria.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&preview_criteria.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "invalid_value");
+}
+
+#[test]
+fn websets_create_missing_fields_uses_usage_exit_code() {
+    let output = run(&["websets", "create", "--compact"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+    assert_eq!(stderr["error"]["category"], "usage");
+    assert_eq!(stderr["error"]["exitCode"], 1);
+}
+
+#[test]
+fn websets_get_rejects_placeholder_ids_before_auth() {
+    for placeholder in ["<id>", "$RUN_ID", "YOUR_WEBSET_ID"] {
+        let output = run(&["websets", "get", placeholder, "--compact"]);
+        assert_eq!(output.status.code(), Some(1), "placeholder {placeholder}");
+        assert!(output.stdout.is_empty());
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "placeholder_argument");
+        assert_eq!(stderr["error"]["category"], "usage");
+        assert!(stderr["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(placeholder));
+        assert!(stderr["error"]["suggestedCommand"]
+            .as_str()
+            .unwrap()
+            .contains("websets get webset_123"));
+    }
+
+    let ok = run_ok_json(&["websets", "get", "webset_123", "--dry-run", "--compact"]);
+    assert_eq!(ok["command"], "websets get");
+    assert_eq!(ok["data"]["request"]["path"], "/v0/websets/webset_123");
 }
 
 fn local_paginated_websets_list_server() -> (String, thread::JoinHandle<()>) {
@@ -3036,7 +3164,7 @@ fn websets_searches_create_get_cancel_shapes() {
         "founders",
         "--compact",
     ]);
-    assert_eq!(missing.status.code(), Some(11));
+    assert_eq!(missing.status.code(), Some(1));
 
     let zero_count = run(&[
         "websets",
@@ -3186,7 +3314,7 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
         "csv",
         "--compact",
     ]);
-    assert_eq!(missing_body.status.code(), Some(11));
+    assert_eq!(missing_body.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&missing_body.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
 
@@ -3330,7 +3458,7 @@ fn websets_monitors_create_update_dry_run_and_validation() {
         "0 9 * * 1",
         "--compact",
     ]);
-    assert_eq!(missing.status.code(), Some(11));
+    assert_eq!(missing.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
 
@@ -3359,7 +3487,7 @@ fn websets_monitors_create_update_dry_run_and_validation() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(body_missing_behavior_type.status.code(), Some(11));
+    assert_eq!(body_missing_behavior_type.status.code(), Some(1));
     let stderr: serde_json::Value =
         serde_json::from_slice(&body_missing_behavior_type.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
@@ -3373,7 +3501,7 @@ fn websets_monitors_create_update_dry_run_and_validation() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(body_empty_behavior_type.status.code(), Some(11));
+    assert_eq!(body_empty_behavior_type.status.code(), Some(1));
     let stderr: serde_json::Value =
         serde_json::from_slice(&body_empty_behavior_type.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
@@ -3722,7 +3850,7 @@ fn websets_webhooks_create_update_delete_dry_run_and_secret_output() {
         "https://example.com/hook",
         "--compact",
     ]);
-    assert_eq!(missing.status.code(), Some(11));
+    assert_eq!(missing.status.code(), Some(1));
 
     let empty_events_body = run(&[
         "websets",
@@ -3733,7 +3861,7 @@ fn websets_webhooks_create_update_delete_dry_run_and_secret_output() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(empty_events_body.status.code(), Some(11));
+    assert_eq!(empty_events_body.status.code(), Some(1));
 
     let update = run_ok_json(&[
         "websets",
@@ -4226,7 +4354,7 @@ fn admin_keys_delete_requires_confirm_by_id() {
 #[test]
 fn admin_keys_update_and_body_validation() {
     let empty = run(&["admin", "keys", "update", "key_abc", "--compact"]);
-    assert_eq!(empty.status.code(), Some(11));
+    assert_eq!(empty.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&empty.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "missing_required_argument");
 

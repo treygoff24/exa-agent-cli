@@ -112,7 +112,7 @@ pub fn run() -> i32 {
 /// clap's default exit 2 collides with `auth` (D23): help/version → stdout exit 0; every other
 /// parse error → exit 1 + an `exa.cli.error.v1` envelope on stderr.
 fn handle_clap_error(e: clap::Error) -> i32 {
-    use clap::error::ErrorKind;
+    use clap::error::{ContextKind, ErrorKind};
     match e.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
             print!("{e}");
@@ -126,7 +126,53 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 ErrorKind::MissingRequiredArgument => "missing_required_argument",
                 _ => "invalid_value",
             };
-            let err = CliError::Usage(Diag::new(code, first_line(&e.to_string())));
+            let mut details = serde_json::Map::new();
+            let mut message = first_line(&e.to_string());
+            let mut suggestion = None;
+
+            if matches!(kind, ErrorKind::MissingRequiredArgument) {
+                let missing = clap_ctx_strings(&e, ContextKind::InvalidArg);
+                if !missing.is_empty() {
+                    message = format!("missing required argument(s): {}", missing.join(", "));
+                    details.insert("missing".to_string(), serde_json::json!(missing));
+                }
+            }
+
+            let suggested_kind = match kind {
+                ErrorKind::UnknownArgument => Some(ContextKind::SuggestedArg),
+                ErrorKind::InvalidSubcommand => Some(ContextKind::SuggestedSubcommand),
+                ErrorKind::InvalidValue | ErrorKind::ValueValidation => {
+                    Some(ContextKind::SuggestedValue)
+                }
+                _ => None,
+            };
+            if let Some(kind) = suggested_kind {
+                // clap orders suggestions by ascending similarity (most similar LAST)
+                // and emits none when there is no good match. Trust it rather than
+                // re-deriving a suggestion ourselves — an ad-hoc edit-distance pass
+                // invents false matches for nonsense input and can point an agent at a
+                // destructive command (`websets event` → `delete`).
+                if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
+                    details.insert(
+                        "didYouMean".to_string(),
+                        serde_json::Value::String(did_you_mean.clone()),
+                    );
+                    suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
+                }
+            }
+
+            let diag = Diag::new(code, message);
+            let diag = if details.is_empty() {
+                diag
+            } else {
+                diag.with_details(serde_json::Value::Object(details))
+            };
+            let diag = if let Some(suggestion) = suggestion {
+                diag.with_suggestion(suggestion)
+            } else {
+                diag
+            };
+            let err = CliError::Usage(diag);
             let env = ErrorEnvelope::from_error(&err);
             eprintln!(
                 "{}",
@@ -134,6 +180,18 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             );
             err.category() as i32
         }
+    }
+}
+
+fn clap_ctx_strings(e: &clap::Error, kind: clap::error::ContextKind) -> Vec<String> {
+    use clap::error::ContextValue;
+
+    match e.get(kind) {
+        Some(ContextValue::String(value)) => vec![value.clone()],
+        Some(ContextValue::Strings(values)) => values.clone(),
+        Some(ContextValue::StyledStr(value)) => vec![value.to_string()],
+        Some(ContextValue::StyledStrs(values)) => values.iter().map(ToString::to_string).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -881,7 +939,7 @@ fn dispatch_admin_keys_create(
             ));
         }
         let Some(secret_path) = args.secret_output.as_deref() else {
-            return Err(CliError::NoInput(
+            return Err(CliError::Usage(
                 Diag::new(
                     "missing_required_argument",
                     "admin keys create returns the new key once and never prints it to stdout; pass --secret-output FILE to capture it",
@@ -1001,7 +1059,7 @@ fn dispatch_admin_keys_get(
         .expect("admin keys get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", key_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1025,7 +1083,7 @@ fn dispatch_admin_keys_update(
         let body = merge_manual_body_overrides(body, globals)?;
         validate_admin_keys_body(&body, "admin keys update")?;
         if body.as_object().is_some_and(serde_json::Map::is_empty) {
-            return Err(CliError::NoInput(
+            return Err(CliError::Usage(
                 Diag::new(
                     "missing_required_argument",
                     "admin keys update requires at least one field via named flags, --body, or --set",
@@ -1034,7 +1092,7 @@ fn dispatch_admin_keys_update(
             ));
         }
         let spec = request::RequestSpec { op, body };
-        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", key_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1056,7 +1114,7 @@ fn dispatch_admin_keys_delete(
             format!("exa-agent admin keys delete {key_id} --confirm {key_id}"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", key_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1084,7 +1142,7 @@ fn dispatch_admin_keys_usage(
         if let Some(group_by) = group_by {
             query.push(("group_by".to_string(), admin_group_by(group_by).to_string()));
         }
-        let path = substitute_path(op.api_path, &[("id", key_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", key_id)])?;
         dispatch_typed_command_routed(
             spec,
             globals,
@@ -1455,7 +1513,7 @@ fn dispatch_agent_runs_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
     let op = registry::lookup_by_segments(&["agent", "runs", "get"]).expect("agent runs get");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1470,7 +1528,7 @@ fn dispatch_agent_runs_events(
         validate_agent_runs_events_mode(args)?;
         validate_cursor_pagination(&args.pagination)?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", &args.id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", &args.id)])?;
         let query = pagination_query(&args.pagination);
         let extra_headers = agent_runs_events_headers(args);
         if args.pagination.all && !args.stream && !(globals.print_request || globals.dry_run) {
@@ -1549,7 +1607,7 @@ fn dispatch_agent_runs_cancel(
     let op = registry::lookup_by_segments(&["agent", "runs", "cancel"]).expect("agent runs cancel");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1568,7 +1626,7 @@ fn dispatch_agent_runs_delete(
             format!("exa-agent agent runs delete {id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1691,7 +1749,7 @@ fn dispatch_research_get(
         registry::lookup_by_segments(&["research", "get"]).expect("research get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("researchId", research_id)]);
+        let path = checked_substitute_path(op.api_path, &[("researchId", research_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -1787,7 +1845,7 @@ fn build_monitor_create_spec(
     let mut body = build_monitor_create_named_body(args);
     body = apply_request_overrides(body, globals)?;
     if !monitor_create_has_required_fields(&body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "monitor create requires search.query and webhook.url (via --query/--webhook-url, --body, or --set)",
@@ -2115,7 +2173,7 @@ fn dispatch_monitor_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<
     let op = registry::lookup_by_segments(&["monitor", "get"]).expect("monitor get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2139,7 +2197,7 @@ fn dispatch_monitor_update(
         .expect("monitor update is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_monitor_update_spec(op, fields, globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2198,7 +2256,7 @@ fn dispatch_monitor_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
             format!("exa-agent monitor delete {id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2208,7 +2266,7 @@ fn dispatch_monitor_trigger(id: &str, globals: &GlobalArgs, pretty: bool) -> Res
         .expect("monitor trigger is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2345,7 +2403,7 @@ fn dispatch_monitor_runs_list(
     with_typed_error_context(op, globals, || {
         validate_cursor_pagination(pagination)?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", monitor_id)])?;
         let query = pagination_query(pagination);
         if pagination.all && !(globals.print_request || globals.dry_run) {
             dispatch_paginated_typed_command(
@@ -2379,7 +2437,7 @@ fn dispatch_monitor_runs_get(
     let op = registry::lookup_by_segments(&["monitor", "runs", "get"]).expect("monitor runs get");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", monitor_id), ("runId", run_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", monitor_id), ("runId", run_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2449,7 +2507,7 @@ fn build_websets_create_spec(
     let mut body = build_websets_create_named_body(args);
     body = apply_request_overrides(body, globals)?;
     if !websets_body_is_non_empty_object(&body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets create requires at least one field (via --query, --body, or --set)",
@@ -2458,7 +2516,7 @@ fn build_websets_create_spec(
         ));
     }
     if body.get("search").is_some() && !websets_search_has_query(&body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets create search requires search.query (via --query, --body, or --set)",
@@ -2530,7 +2588,7 @@ fn build_websets_preview_spec(
     let body = build_websets_preview_named_body(args);
     let body = apply_request_overrides(body, globals)?;
     if !websets_search_has_query(&body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets preview requires search.query (via --query, --body, or --set)",
@@ -2605,7 +2663,7 @@ fn dispatch_websets_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<
     let op = registry::lookup_by_segments(&["websets", "get"]).expect("websets get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2632,7 +2690,7 @@ fn dispatch_websets_update(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
         .expect("websets update is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_websets_update_spec(op, globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2648,7 +2706,7 @@ fn dispatch_websets_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
             format!("exa-agent websets delete {id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2664,7 +2722,7 @@ fn dispatch_websets_cancel(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
             format!("exa-agent websets cancel {id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2716,7 +2774,7 @@ fn dispatch_websets_items_list(
     with_typed_error_context(op, globals, || {
         validate_cursor_pagination(pagination)?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id)]);
+        let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
         let static_query = websets_items_list_static_query(source_id);
         let query = merge_static_and_pagination_query(&static_query, pagination);
         if pagination.all && !(globals.print_request || globals.dry_run) {
@@ -2752,7 +2810,7 @@ fn dispatch_websets_items_get(
         .expect("websets items get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)]);
+        let path = checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2775,7 +2833,7 @@ fn dispatch_websets_items_delete(
             format!("exa-agent websets items delete {webset_id} {item_id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)]);
+        let path = checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", item_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2851,7 +2909,7 @@ fn build_websets_searches_create_spec(
     }
     let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
     if !websets_searches_create_has_query_and_count(&body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets searches create requires query and count (via --query/--count, --body, or --set)",
@@ -2861,7 +2919,7 @@ fn build_websets_searches_create_spec(
             ),
         ));
     }
-    let path = substitute_path(op.api_path, &[("webset", webset_id)]);
+    let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
     Ok((request::RequestSpec { op, body }, path))
 }
 
@@ -2892,7 +2950,8 @@ fn dispatch_websets_searches_get(
         .expect("websets searches get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", search_id)]);
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", search_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2907,7 +2966,8 @@ fn dispatch_websets_searches_cancel(
         .expect("websets searches cancel is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", search_id)]);
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", search_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -2985,7 +3045,7 @@ fn build_websets_enrichments_create_spec(
         .and_then(|value| value.as_str())
         .is_some_and(|value| !value.is_empty());
     if !has_description {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets enrichments create requires description (via --description, --body, or --set)",
@@ -2995,7 +3055,7 @@ fn build_websets_enrichments_create_spec(
             ),
         ));
     }
-    let path = substitute_path(op.api_path, &[("webset", webset_id)]);
+    let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
     Ok((request::RequestSpec { op, body }, path))
 }
 
@@ -3025,7 +3085,8 @@ fn dispatch_websets_enrichments_get(
         .expect("websets enrichments get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3064,7 +3125,8 @@ fn build_websets_enrichments_update_spec(
             ),
         ));
     }
-    let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+    let path =
+        checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
     Ok((request::RequestSpec { op, body }, path))
 }
 
@@ -3110,7 +3172,8 @@ fn dispatch_websets_enrichments_delete(
             ),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3135,7 +3198,8 @@ fn dispatch_websets_enrichments_cancel(
             ),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)]);
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3237,7 +3301,7 @@ fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), C
         missing.push("entity");
     }
     if !missing.is_empty() {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 format!(
@@ -3297,7 +3361,7 @@ fn dispatch_websets_imports_get(
         .expect("websets imports get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", import_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", import_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3330,7 +3394,7 @@ fn dispatch_websets_imports_update(
         .expect("websets imports update is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_websets_imports_update_spec(op, globals)?;
-        let path = substitute_path(op.api_path, &[("id", import_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", import_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3352,7 +3416,7 @@ fn dispatch_websets_imports_delete(
             format!("exa-agent websets imports delete {import_id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", import_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", import_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3457,7 +3521,7 @@ fn websets_monitor_create_has_required_fields(body: &serde_json::Value) -> bool 
 
 fn validate_websets_monitor_create_body(body: &serde_json::Value) -> Result<(), CliError> {
     if !websets_monitor_create_has_required_fields(body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets monitors create requires websetId, cadence.cron, behavior.type, and behavior.config.count >= 1 (via named flags, --body, or --set)",
@@ -3539,7 +3603,7 @@ fn dispatch_websets_monitors_get(
         .expect("websets monitors get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", monitor_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3670,7 +3734,7 @@ fn dispatch_websets_monitors_update(
         .expect("websets monitors update is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_websets_monitors_update_spec(args, globals)?;
-        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", monitor_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3692,7 +3756,7 @@ fn dispatch_websets_monitors_delete(
             format!("exa-agent websets monitors delete {monitor_id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", monitor_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", monitor_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3708,7 +3772,7 @@ fn dispatch_websets_monitors_runs_list(
     with_typed_error_context(op, globals, || {
         validate_cursor_pagination(pagination)?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("monitor", monitor_id)]);
+        let path = checked_substitute_path(op.api_path, &[("monitor", monitor_id)])?;
         let query = pagination_query(pagination);
         if pagination.all && !(globals.print_request || globals.dry_run) {
             dispatch_paginated_typed_command(
@@ -3743,7 +3807,8 @@ fn dispatch_websets_monitors_runs_get(
         .expect("websets monitors runs get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("monitor", monitor_id), ("id", run_id)]);
+        let path =
+            checked_substitute_path(op.api_path, &[("monitor", monitor_id), ("id", run_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3828,7 +3893,7 @@ fn dispatch_websets_events_get(
         .expect("websets events get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", event_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", event_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3896,7 +3961,7 @@ fn build_websets_webhooks_create_spec(
     let body = build_websets_webhooks_create_named_body(args);
     let body = apply_request_overrides(body, globals)?;
     if !websets_webhooks_create_has_required_fields(&body) {
-        return Err(CliError::NoInput(
+        return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
                 "websets webhooks create requires url and a non-empty events array (via --url/--event, --body, or --set)",
@@ -4070,7 +4135,7 @@ fn dispatch_websets_webhooks_get(
         .expect("websets webhooks get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", webhook_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -4133,7 +4198,7 @@ fn dispatch_websets_webhooks_update(
         .expect("websets webhooks update is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_websets_webhooks_update_spec(args, globals)?;
-        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", webhook_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -4155,7 +4220,7 @@ fn dispatch_websets_webhooks_delete(
             format!("exa-agent websets webhooks delete {webhook_id} --yes"),
         )?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", webhook_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -4184,7 +4249,7 @@ fn dispatch_websets_webhook_attempts_list(
     with_typed_error_context(op, globals, || {
         validate_cursor_pagination(&args.pagination)?;
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = substitute_path(op.api_path, &[("id", webhook_id)]);
+        let path = checked_substitute_path(op.api_path, &[("id", webhook_id)])?;
         let static_query = websets_webhook_attempts_list_static_query(args);
         let query = merge_static_and_pagination_query(&static_query, &args.pagination);
         if args.pagination.all && !(globals.print_request || globals.dry_run) {
@@ -4267,6 +4332,13 @@ fn dispatch_typed_preview_with_warnings(
     Ok(0)
 }
 
+fn checked_substitute_path(template: &str, params: &[(&str, &str)]) -> Result<String, CliError> {
+    for (key, value) in params {
+        reject_placeholder_value(value, key)?;
+    }
+    Ok(substitute_path(template, params))
+}
+
 fn substitute_path(template: &str, params: &[(&str, &str)]) -> String {
     let mut path = template.to_string();
     for (key, value) in params {
@@ -4274,6 +4346,51 @@ fn substitute_path(template: &str, params: &[(&str, &str)]) -> String {
         path = path.replace(&format!("{{{key}}}"), &value);
     }
     path
+}
+
+fn reject_placeholder_value(value: &str, arg_name: &str) -> Result<(), CliError> {
+    if !looks_like_placeholder(value) {
+        return Ok(());
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "placeholder_argument",
+            format!("{arg_name} looks like a placeholder: `{value}`"),
+        )
+        .with_suggestion(placeholder_example_command(arg_name)),
+    ))
+}
+
+fn looks_like_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    if is_placeholder_token(value) {
+        return true;
+    }
+    value.split('/').any(is_placeholder_token)
+}
+
+fn is_placeholder_token(value: &str) -> bool {
+    // `<...>` and `$VAR` are unambiguous placeholders. The word-prefix forms are matched
+    // case-SENSITIVELY (uppercase only) so a real lowercase id like `example_abc123` is
+    // never rejected, while the canonical agent paste `YOUR_WEBSET_ID` still is.
+    (value.starts_with('<') && value.ends_with('>') && value.len() > 2)
+        || value.starts_with('$')
+        || value.starts_with("YOUR_")
+        || value.starts_with("REPLACE_")
+        || value.starts_with("EXAMPLE_")
+}
+
+fn placeholder_example_command(arg_name: &str) -> &'static str {
+    match arg_name {
+        "path" => "exa-agent raw GET /search --dry-run",
+        "researchId" => "exa-agent research get research_123 --dry-run",
+        "runId" => "exa-agent monitor runs get mon_123 run_123 --dry-run",
+        "monitor" => "exa-agent websets monitors get mon_123 --dry-run",
+        _ => "exa-agent websets get webset_123 --dry-run",
+    }
 }
 
 fn pagination_query(pagination: &PaginationArgs) -> Vec<(String, String)> {
@@ -4521,7 +4638,7 @@ fn contents_inputs_from_body(
             "invalid_flag_combination",
             "contents request body must contain urls or ids, not both",
         ))),
-        _ => Err(CliError::NoInput(Diag::new(
+        _ => Err(CliError::Usage(Diag::new(
             "missing_required_argument",
             "contents requires at least one URL or --ids value",
         ))),
@@ -6208,6 +6325,7 @@ fn dispatch_raw_inner(
     method: &str,
     request_id: &str,
 ) -> Result<i32, CliError> {
+    reject_placeholder_value(&args.path, "path")?;
     parse_user_headers(&globals.headers)?;
     if globals.print_request || globals.dry_run {
         let mut body = raw_body(globals)?;

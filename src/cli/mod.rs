@@ -1092,6 +1092,10 @@ pub struct AdminKeysCreateArgs {
     pub rate_limit: Option<u32>,
     #[arg(long)]
     pub budget_cents: Option<u64>,
+    /// Write the one-time created API key to this file (mode 0600). Required: the
+    /// key is returned once and is never printed to stdout.
+    #[arg(long)]
+    pub secret_output: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

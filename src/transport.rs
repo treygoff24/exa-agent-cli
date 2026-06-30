@@ -520,13 +520,21 @@ pub fn parse_raw_query(raw: &[String]) -> Result<Vec<(String, String)>, CliError
         .collect()
 }
 
-pub fn resolve_timeout(globals: &GlobalArgs, cfg: &Config) -> Duration {
+pub fn resolve_timeout(globals: &GlobalArgs, cfg: &Config) -> Result<Duration, CliError> {
     let raw = globals
         .timeout
         .as_deref()
         .or(cfg.timeout.as_deref())
         .unwrap_or(crate::config::DEFAULT_TIMEOUT);
-    parse_duration(raw).unwrap_or(DEFAULT_TIMEOUT)
+    parse_duration(raw).ok_or_else(|| {
+        CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                format!("invalid timeout `{raw}` (use e.g. `30s` or `250ms`)"),
+            )
+            .with_suggestion("exa-agent <command> --timeout 30s"),
+        )
+    })
 }
 
 fn parse_duration(raw: &str) -> Option<Duration> {
@@ -534,28 +542,22 @@ fn parse_duration(raw: &str) -> Option<Duration> {
     if raw.is_empty() {
         return None;
     }
-    if let Some(secs) = raw.strip_suffix('s') {
-        return secs.parse::<u64>().ok().map(Duration::from_secs);
-    }
+    // `ms` must be tested before `s` — every `…ms` also ends in `s`.
     if let Some(ms) = raw.strip_suffix("ms") {
-        return ms.parse::<u64>().ok().map(Duration::from_millis);
+        return ms.trim().parse::<u64>().ok().map(Duration::from_millis);
+    }
+    if let Some(secs) = raw.strip_suffix('s') {
+        return secs.trim().parse::<u64>().ok().map(Duration::from_secs);
     }
     raw.parse::<u64>().ok().map(Duration::from_secs)
-}
-
-pub fn resolve_base_url(globals: &GlobalArgs, cfg: &Config) -> String {
-    globals
-        .base_url
-        .clone()
-        .unwrap_or_else(|| cfg.effective_base_url().to_string())
 }
 
 pub fn resolve_base_url_for_namespace(
     globals: &GlobalArgs,
     cfg: &Config,
     namespace: CredentialNamespace,
-) -> String {
-    match namespace {
+) -> Result<String, CliError> {
+    let url = match namespace {
         CredentialNamespace::Api => globals.base_url.clone().unwrap_or_else(|| {
             cfg.effective_base_url_for_profile(globals.profile.as_deref())
                 .to_string()
@@ -567,7 +569,65 @@ pub fn resolve_base_url_for_namespace(
                 cfg.effective_admin_base_url_for_profile(globals.profile.as_deref())
                     .to_string()
             }),
+    };
+    validate_base_url(&url)?;
+    Ok(url)
+}
+
+/// Refuse to attach the managed key to a base URL that would leak it in cleartext
+/// to a non-local host. `https` is always allowed; plain `http` only for loopback
+/// (local dev/test servers, which never leave the machine). This is the egress
+/// chokepoint — every live request resolves its base URL here before auth headers
+/// are attached — so a `--base-url`/`EXA_ADMIN_BASE_URL` override pointed at an
+/// attacker host (e.g. via prompt injection) cannot exfiltrate the credential.
+fn validate_base_url(url: &str) -> Result<(), CliError> {
+    if crate::config::is_valid_https_url(url) || is_loopback_http_url(url) {
+        return Ok(());
     }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            format!(
+                "refusing to send credentials to `{url}`: base URL must be https (plain http is allowed only for localhost)"
+            ),
+        )
+        .with_suggestion("use an https base URL, e.g. --base-url https://api.exa.ai"),
+    ))
+}
+
+fn is_loopback_http_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    if rest
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || ch.is_control())
+    {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        // `[ipv6]` or `[ipv6]:port`
+        match stripped.split_once(']') {
+            Some((host, _)) => host,
+            None => return false,
+        }
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    // Loopback literals only — parse as an IP so `127.0.0.1.evil.com` (a remote
+    // host that merely starts with `127.`) is NOT treated as local.
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 fn inject_auth_headers(headers: &mut Vec<(String, String)>, secret: &Secret) {
@@ -1040,7 +1100,7 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     let method = params.method.to_ascii_uppercase();
     let query = parse_raw_query(params.query_raw)?;
     let base_url =
-        resolve_base_url_for_namespace(params.globals, &cfg, params.credential.namespace);
+        resolve_base_url_for_namespace(params.globals, &cfg, params.credential.namespace)?;
     let url = build_url(&base_url, params.path, &query)?;
 
     let mut headers = parse_user_headers(&params.globals.headers)?;
@@ -1104,6 +1164,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(url, "https://api.exa.ai/search?limit=10");
+    }
+
+    #[test]
+    fn parse_duration_tries_ms_before_seconds() {
+        assert_eq!(parse_duration("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("5"), Some(Duration::from_secs(5)));
+        // Unparseable values are rejected, not silently defaulted.
+        assert_eq!(parse_duration("bogus"), None);
+        assert_eq!(parse_duration("ms"), None);
+        assert_eq!(parse_duration("12x"), None);
+    }
+
+    #[test]
+    fn resolve_timeout_rejects_unparseable_value() {
+        let cli =
+            crate::cli::Cli::try_parse_from(["exa-agent", "--timeout", "bogus", "capabilities"])
+                .unwrap();
+        let err = resolve_timeout(&cli.globals, &Config::default()).unwrap_err();
+        assert_eq!(err.diag().code, "invalid_value");
+    }
+
+    #[test]
+    fn base_url_refuses_remote_cleartext_allows_https_and_loopback() {
+        // https to anywhere, and http only to loopback, are accepted.
+        assert!(validate_base_url("https://api.exa.ai").is_ok());
+        assert!(validate_base_url("https://gateway.internal.corp/exa").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8731").is_ok());
+        assert!(validate_base_url("http://localhost:3000/x").is_ok());
+        assert!(validate_base_url("http://[::1]:9000").is_ok());
+        // Cleartext to a non-local host would exfiltrate the key — refused.
+        assert_eq!(
+            validate_base_url("http://collector.evil")
+                .unwrap_err()
+                .diag()
+                .code,
+            "invalid_value"
+        );
+        // A remote host that merely starts with `127.` is not loopback.
+        assert!(validate_base_url("http://127.0.0.1.evil.com").is_err());
+        assert!(validate_base_url("ftp://example.com").is_err());
     }
 
     #[test]

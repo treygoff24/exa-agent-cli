@@ -4562,12 +4562,39 @@ fn admin_keys_create_safety_edges() {
     let stderr: serde_json::Value = serde_json::from_slice(&raw.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
 
+    let base_url = closed_local_base_url();
+
+    // Without --secret-output the minted key would be unretrievable (it is never
+    // printed to stdout), so the command is refused before any network call.
+    let no_capture = run_with_env(
+        &["admin", "keys", "create", "--name", "ci-key", "--compact"],
+        &[
+            ("EXA_SERVICE_KEY", "svc-admin-secret"),
+            ("EXA_ADMIN_BASE_URL", base_url.as_str()),
+        ],
+    );
+    assert!(!no_capture.status.success());
+    let stderr: serde_json::Value = serde_json::from_slice(&no_capture.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "missing_required_argument");
+
+    // With --secret-output the file is reserved before the request; an ambiguous
+    // failure against the closed endpoint records a pending-run for recovery.
     let dir = temp_path("admin-key-create-pending");
     let pending_path = dir.join("pending-runs.jsonl");
     let pending_path_string = pending_path.to_string_lossy().into_owned();
-    let base_url = closed_local_base_url();
+    let secret_path = dir.join("key.secret");
+    let secret_path_string = secret_path.to_string_lossy().into_owned();
     let output = run_with_env(
-        &["admin", "keys", "create", "--name", "ci-key", "--compact"],
+        &[
+            "admin",
+            "keys",
+            "create",
+            "--name",
+            "ci-key",
+            "--secret-output",
+            secret_path_string.as_str(),
+            "--compact",
+        ],
         &[
             ("EXA_SERVICE_KEY", "svc-admin-secret"),
             ("EXA_ADMIN_BASE_URL", base_url.as_str()),
@@ -4578,6 +4605,57 @@ fn admin_keys_create_safety_edges() {
     let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
     assert_pending_record(&pending_path, "admin keys create", "/api-keys");
+    // The reservation is rolled back when the request never succeeds.
+    assert!(!secret_path.exists());
+}
+
+#[test]
+fn admin_keys_create_captures_key_to_file_and_redacts_stdout() {
+    let response = br#"{"id":"key_test","apiKey":"exa_minted_live_secret_123"}"#;
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /api-keys "));
+        },
+        response,
+    );
+    let secret_path = temp_path("admin-key-secret").join("key.secret");
+    let secret_path_string = secret_path.to_string_lossy().into_owned();
+    let output = run_with_env(
+        &[
+            "admin",
+            "keys",
+            "create",
+            "--name",
+            "ci",
+            "--secret-output",
+            secret_path_string.as_str(),
+            "--compact",
+        ],
+        &[
+            ("EXA_SERVICE_KEY", "svc-admin-secret"),
+            ("EXA_ADMIN_BASE_URL", base_url.as_str()),
+        ],
+    );
+    server.join().expect("local admin create server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        !stdout.contains("exa_minted_live_secret_123"),
+        "minted key must never appear on stdout: {stdout}"
+    );
+    let secret = fs::read_to_string(&secret_path).expect("secret file");
+    assert_eq!(secret, "exa_minted_live_secret_123");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&secret_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }
 
 #[test]

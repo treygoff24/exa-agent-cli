@@ -10,6 +10,10 @@ use crate::error::{CliError, Diag};
 use crate::registry::{FieldKind, OperationDef};
 
 const MAX_SET_ARRAY_INDEX: usize = 10_000;
+// `set_at_segments` recurses once per dotted segment; cap depth so a hostile
+// `--set a.a.a.…=1` returns a clean error instead of overflowing the stack.
+// Real request bodies nest only a few levels deep.
+const MAX_SET_PATH_DEPTH: usize = 64;
 
 /// A resolved, ready-to-preview request.
 #[derive(Debug)]
@@ -247,6 +251,15 @@ pub fn set_at_path(body: &mut Value, path: &str, value: Value) -> Result<(), Cli
         ));
     }
     let segments: Vec<&str> = path.split('.').collect();
+    if segments.len() > MAX_SET_PATH_DEPTH {
+        return Err(usage(
+            "invalid_value",
+            format!(
+                "`--set` path is {} segments deep, exceeding the limit of {MAX_SET_PATH_DEPTH}: `{path}`",
+                segments.len()
+            ),
+        ));
+    }
     set_at_segments(body, &segments, value)
 }
 

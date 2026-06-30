@@ -861,18 +861,114 @@ fn dispatch_admin_keys_create(
     let op = registry::lookup_by_segments(&["admin", "keys", "create"])
         .expect("admin keys create is in registry");
     with_typed_error_context(op, globals, || {
+        if args.secret_output.as_deref() == Some("-") {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_value",
+                "Refusing to write the created API key to stdout; use a file path for --secret-output",
+            )));
+        }
         let spec = build_admin_keys_create_spec(args, globals)?;
-        if globals.raw && !(globals.dry_run || globals.print_request) {
+        if globals.print_request || globals.dry_run {
+            return dispatch_typed_command(spec, globals, pretty);
+        }
+        if globals.raw {
             return Err(CliError::Usage(
                 Diag::new(
                     "invalid_flag_combination",
-                    "`--raw` cannot be combined with `admin keys create`; create responses may include sensitive key material",
+                    "`--raw` cannot be combined with `admin keys create`; create responses include a one-time API key",
                 )
-                .with_suggestion("Use the default JSON envelope so sensitive fields remain structured."),
+                .with_suggestion("Use `--secret-output FILE` and the default JSON envelope."),
             ));
         }
-        dispatch_typed_command(spec, globals, pretty)
+        let Some(secret_path) = args.secret_output.as_deref() else {
+            return Err(CliError::NoInput(
+                Diag::new(
+                    "missing_required_argument",
+                    "admin keys create returns the new key once and never prints it to stdout; pass --secret-output FILE to capture it",
+                )
+                .with_suggestion(
+                    "exa-agent admin keys create --name ci --secret-output ./exa-key.secret",
+                ),
+            ));
+        };
+        let secret_output = reserve_webhook_secret_file(secret_path)?;
+        dispatch_admin_keys_create_live(spec, secret_output, globals, pretty)
     })
+}
+
+fn dispatch_admin_keys_create_live(
+    spec: request::RequestSpec,
+    secret_output: SecretOutputReservation,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    parse_user_headers(&globals.headers)?;
+    let credential = resolve_operation_credential(spec.op, globals)?;
+    let cfg = config::Config::load()?;
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
+    let transport = UreqTransport::new(timeout);
+    let request_id = transport::new_request_id();
+    let warnings = typed_command_warnings(spec.op);
+    let result = match execute_raw_with_request_id(
+        &transport,
+        RawExecuteParams {
+            method: spec.op.method.as_str(),
+            path: spec.op.api_path,
+            query_raw: &[],
+            body: typed_wire_body(&spec),
+            globals,
+            credential: &credential,
+            request_id: request_id.clone(),
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(maybe_record_pending_run_on_create_failure(
+                err,
+                &spec,
+                globals,
+                &request_id,
+                spec.op.api_path,
+            ));
+        }
+    };
+    let mut data = transport::parse_response_data(&result.response.body);
+    let secret = data
+        .get("apiKey")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            CliError::Upstream(
+                Diag::new(
+                    "upstream_malformed",
+                    "admin keys create response did not include string `apiKey`; reserved --secret-output file was not written",
+                )
+                .with_suggestion("exa-agent admin keys list"),
+            )
+        })?;
+    secret_output.commit(secret)?;
+    redaction::redact_json_value(&mut data);
+    let count = transport::primary_count(&data);
+    let hash = transport::data_hash(&data);
+    let envelope = response_envelope(ResponseEnvelopeArgs {
+        command: &spec.op.command(),
+        method: &result.method,
+        path: &result.path,
+        operation: Some(spec.op),
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        data,
+        count,
+        data_hash: hash,
+        retries: result.retries,
+        warnings: &warnings,
+    });
+    if globals.ndjson {
+        emit_ndjson(&envelope);
+    } else {
+        emit_stdout(&envelope, pretty);
+    }
+    Ok(0)
 }
 
 fn build_admin_keys_create_spec(
@@ -1793,7 +1889,7 @@ fn dispatch_monitor_create_live(
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg);
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     let request_id = transport::new_request_id();
     let mut warnings = typed_command_warnings(spec.op);
@@ -3837,7 +3933,7 @@ fn dispatch_websets_webhooks_create_live(
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg);
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     let request_id = transport::new_request_id();
     let mut warnings = typed_command_warnings(spec.op);
@@ -4578,7 +4674,7 @@ fn dispatch_typed_inner(
         .unwrap_or_else(|| globals.clone());
     let credential = resolve_operation_credential(spec.op, &effective_globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(&effective_globals, &cfg);
+    let timeout = transport::resolve_timeout(&effective_globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     execute_typed_live(
         &transport,
@@ -4618,7 +4714,7 @@ fn dispatch_paginated_typed_command(
     parse_user_headers(&globals.headers)?;
     let credential = resolve_operation_credential(spec.op, globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg);
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     execute_paginated_live(
         &transport,
@@ -4903,7 +4999,7 @@ fn dispatch_typed_chunks_inner(
         .expect("contents chunking creates at least one spec");
     let credential = resolve_operation_credential(op, globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg);
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     let mut exit_code = 0;
     for spec in &specs {
@@ -5026,7 +5122,14 @@ fn execute_typed_live<T: Transport>(
         return Ok(0);
     }
 
-    let data = transport::parse_response_data(&result.response.body);
+    let mut data = transport::parse_response_data(&result.response.body);
+    // Defense in depth: a create response may carry secret material (e.g. a freshly
+    // minted key). Secret-capturing creates use their own --secret-output path; this
+    // scrubs secret-named/shaped fields on the generic typed create path so nothing
+    // sensitive is echoed to stdout.
+    if spec.op.idempotency_sensitive {
+        redaction::redact_json_value(&mut data);
+    }
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
     let exit_code = if command == "contents" {
@@ -5106,7 +5209,10 @@ fn execute_streaming_live<T: Transport>(
     }
 
     if frames.is_empty() {
-        let data = transport::parse_response_data(&result.response.body);
+        let mut data = transport::parse_response_data(&result.response.body);
+        if operation.is_some_and(|op| op.idempotency_sensitive) {
+            redaction::redact_json_value(&mut data);
+        }
         let envelope = response_envelope(ResponseEnvelopeArgs {
             command,
             method: &result.method,
@@ -6143,7 +6249,7 @@ fn dispatch_raw_inner(
     reject_mismatched_credential_scope(&credential)?;
     let body = raw_body(globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg);
+    let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     if body_wants_stream(&body) {
         return execute_streaming_live(
@@ -6187,7 +6293,11 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
-    let data = transport::parse_response_data(&result.response.body);
+    let mut data = transport::parse_response_data(&result.response.body);
+    // `raw` is the escape hatch; `--raw` above already emits exact upstream bytes for
+    // callers who want them. The enveloped form scrubs secret-named/shaped fields so an
+    // agent that hits a key/secret-minting endpoint via `raw` never prints credentials.
+    redaction::redact_json_value(&mut data);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
     let envelope = response_envelope(ResponseEnvelopeArgs {
@@ -6593,7 +6703,7 @@ mod tests {
             "--api-key",
             "test-key-abcdef12",
             "--base-url",
-            "http://example.test",
+            "https://example.test",
         ]);
         let op = registry::lookup_by_segments(&["research", "list"]).unwrap();
         let spec = request::build_body(op, &[]).unwrap();

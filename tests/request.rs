@@ -386,6 +386,15 @@ fn overflowing_array_index_is_rejected_without_panicking() {
 }
 
 #[test]
+fn deep_set_path_is_rejected_without_stack_overflow() {
+    let mut body = json!({});
+    let deep = vec!["a"; 50_000].join(".");
+    let err = request::set_at_path(&mut body, &deep, json!(1)).unwrap_err();
+    assert!(matches!(err, CliError::Usage(_)));
+    assert_eq!(err.diag().code, "invalid_value");
+}
+
+#[test]
 fn agent_runs_create_fields_map_query_effort_and_stream() {
     let spec = request::build_request(
         agent_runs_create_op(),

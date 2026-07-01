@@ -51,7 +51,17 @@ struct OpMeta {
     #[serde(default)]
     source_version: Option<String>,
     #[serde(default)]
+    secret_capture: Option<SecretCaptureMeta>,
+    #[serde(default)]
     fields: Vec<FieldMeta>,
+}
+
+#[derive(Clone, Deserialize)]
+struct SecretCaptureMeta {
+    response_field: String,
+    output_flag: String,
+    #[serde(default)]
+    required: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -165,6 +175,7 @@ struct OpRow {
     dangerous: bool,
     namespace: &'static str,
     confirm: Option<ConfirmMeta>,
+    secret_capture: Option<SecretCaptureMeta>,
     idempotency_sensitive: bool,
     deprecated: bool,
     source: String,
@@ -229,6 +240,7 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         dangerous: meta.dangerous,
         namespace,
         confirm: meta.confirm.clone(),
+        secret_capture: meta.secret_capture.clone(),
         idempotency_sensitive: meta.idempotency_sensitive,
         deprecated,
         source,
@@ -270,7 +282,7 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
             f.required
         )?;
     }
-    let capabilities = confirm_capabilities(r)?;
+    let capabilities = capabilities(r)?;
     writeln!(
         out,
         "    OperationDef {{ cli_path: &[{cli_path}], operation_id: {oid:?}, method: {method}, \
@@ -292,24 +304,38 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
     Ok(())
 }
 
-fn confirm_capabilities(r: &OpRow) -> Result<String> {
-    let Some(confirm) = &r.confirm else {
-        return Ok(String::new());
-    };
-    let protocol = match confirm {
-        ConfirmMeta::Simple(ConfirmKind::Yes) => "ConfirmProtocol::Yes".to_string(),
-        ConfirmMeta::Simple(ConfirmKind::EchoId) => "ConfirmProtocol::EchoId".to_string(),
-        ConfirmMeta::YesPlusEcho { yes_plus_echo } => {
-            if yes_plus_echo.is_empty() {
-                return Err(anyhow!(
-                    "op {}: confirm yes_plus_echo token cannot be empty",
-                    r.operation_id
-                ));
+fn capabilities(r: &OpRow) -> Result<String> {
+    let mut out = String::new();
+    if let Some(confirm) = &r.confirm {
+        let protocol = match confirm {
+            ConfirmMeta::Simple(ConfirmKind::Yes) => "ConfirmProtocol::Yes".to_string(),
+            ConfirmMeta::Simple(ConfirmKind::EchoId) => "ConfirmProtocol::EchoId".to_string(),
+            ConfirmMeta::YesPlusEcho { yes_plus_echo } => {
+                if yes_plus_echo.is_empty() {
+                    return Err(anyhow!(
+                        "op {}: confirm yes_plus_echo token cannot be empty",
+                        r.operation_id
+                    ));
+                }
+                format!("ConfirmProtocol::YesPlusEcho({yes_plus_echo:?})")
             }
-            format!("ConfirmProtocol::YesPlusEcho({yes_plus_echo:?})")
+        };
+        write!(out, "Capability::Confirm({protocol}), ")?;
+    }
+    if let Some(sc) = &r.secret_capture {
+        if sc.response_field.is_empty() || sc.output_flag.is_empty() {
+            return Err(anyhow!(
+                "op {}: secret_capture response_field/output_flag cannot be empty",
+                r.operation_id
+            ));
         }
-    };
-    Ok(format!("Capability::Confirm({protocol}), "))
+        write!(
+            out,
+            "Capability::SecretCapture {{ response_field: {:?}, output_flag: {:?}, required: {} }}, ",
+            sc.response_field, sc.output_flag, sc.required
+        )?;
+    }
+    Ok(out)
 }
 
 fn method_variant(m: &str) -> Result<&'static str> {

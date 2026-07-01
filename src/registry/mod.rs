@@ -146,6 +146,21 @@ impl OperationDef {
             })
     }
 
+    /// The `(response_field, output_flag, required)` triple if this op mints a
+    /// one-time secret that must be captured to a file rather than echoed.
+    pub fn secret_capture(&self) -> Option<(&'static str, &'static str, bool)> {
+        self.capabilities
+            .iter()
+            .find_map(|capability| match capability {
+                Capability::SecretCapture {
+                    response_field,
+                    output_flag,
+                    required,
+                } => Some((*response_field, *output_flag, *required)),
+                _ => None,
+            })
+    }
+
     /// Space-joined command path, e.g. `agent runs create`.
     pub fn command(&self) -> String {
         self.cli_path.join(" ")

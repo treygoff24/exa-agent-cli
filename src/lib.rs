@@ -89,6 +89,15 @@ struct TypedExecution<'a> {
     command_override: Option<&'a str>,
 }
 
+/// Owned/borrowed extras threaded into the live typed path that cannot ride the
+/// `Copy` option structs: a one-time-secret file reservation (moved so it can be
+/// committed mid-pipeline before redaction) and per-invocation dynamic warnings.
+#[derive(Default)]
+struct LiveExtras<'a> {
+    secret_output: Option<SecretOutputReservation>,
+    extra_warnings: &'a [serde_json::Value],
+}
+
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
     let cli = match Cli::try_parse() {
@@ -951,83 +960,17 @@ fn dispatch_admin_keys_create(
             ));
         };
         let secret_output = reserve_webhook_secret_file(secret_path)?;
-        dispatch_admin_keys_create_live(spec, secret_output, globals, pretty)
-    })
-}
-
-fn dispatch_admin_keys_create_live(
-    spec: request::RequestSpec,
-    secret_output: SecretOutputReservation,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    parse_user_headers(&globals.headers)?;
-    let credential = resolve_operation_credential(spec.op, globals)?;
-    let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
-    let request_id = transport::new_request_id();
-    let warnings = typed_command_warnings(spec.op);
-    let result = match execute_raw_with_request_id(
-        &transport,
-        RawExecuteParams {
-            method: spec.op.method.as_str(),
-            path: spec.op.api_path,
-            query_raw: &[],
-            body: typed_wire_body(&spec),
+        dispatch_typed_command_with_extras(
+            spec,
             globals,
-            credential: &credential,
-            request_id: request_id.clone(),
-        },
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            return Err(maybe_record_pending_run_on_create_failure(
-                err,
-                &spec,
-                globals,
-                &request_id,
-                spec.op.api_path,
-            ));
-        }
-    };
-    let mut data = transport::parse_response_data(&result.response.body);
-    let secret = data
-        .get("apiKey")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            CliError::Upstream(
-                Diag::new(
-                    "upstream_malformed",
-                    "admin keys create response did not include string `apiKey`; reserved --secret-output file was not written",
-                )
-                .with_suggestion("exa-agent admin keys list"),
-            )
-        })?;
-    secret_output.commit(secret)?;
-    redaction::redact_json_value(&mut data);
-    let count = transport::primary_count(&data);
-    let hash = transport::data_hash(&data);
-    let envelope = response_envelope(ResponseEnvelopeArgs {
-        command: &spec.op.command(),
-        method: &result.method,
-        path: &result.path,
-        operation: Some(spec.op),
-        request_id: &result.request_id,
-        profile: &result.profile,
-        correlation_id: result.correlation_id.as_deref(),
-        data,
-        count,
-        data_hash: hash,
-        retries: result.retries,
-        warnings: &warnings,
-    });
-    if globals.ndjson {
-        emit_ndjson(&envelope);
-    } else {
-        emit_stdout(&envelope, pretty);
-    }
-    Ok(0)
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                secret_output: Some(secret_output),
+                extra_warnings: &[],
+            },
+        )
+    })
 }
 
 fn build_admin_keys_create_spec(
@@ -1813,7 +1756,16 @@ fn dispatch_monitor_create(
             .as_deref()
             .map(reserve_webhook_secret_file)
             .transpose()?;
-        dispatch_monitor_create_live(spec, secret_output, globals, pretty, extra_warnings)
+        dispatch_typed_command_with_extras(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                secret_output,
+                extra_warnings: &extra_warnings,
+            },
+        )
     })
 }
 
@@ -1914,87 +1866,6 @@ fn apply_request_overrides(
         request::set_at_path(&mut body, &path, value)?;
     }
     Ok(body)
-}
-
-fn dispatch_monitor_create_live(
-    spec: request::RequestSpec,
-    secret_output: Option<SecretOutputReservation>,
-    globals: &GlobalArgs,
-    pretty: bool,
-    extra_warnings: Vec<serde_json::Value>,
-) -> Result<i32, CliError> {
-    parse_user_headers(&globals.headers)?;
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
-    let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
-    let request_id = transport::new_request_id();
-    let mut warnings = typed_command_warnings(spec.op);
-    warnings.extend(extra_warnings);
-    let result = match execute_raw_with_request_id(
-        &transport,
-        RawExecuteParams {
-            method: spec.op.method.as_str(),
-            path: spec.op.api_path,
-            query_raw: &[],
-            body: typed_wire_body(&spec),
-            globals,
-            credential: &credential,
-            request_id: request_id.clone(),
-        },
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            return Err(maybe_record_pending_run_on_create_failure(
-                err,
-                &spec,
-                globals,
-                &request_id,
-                spec.op.api_path,
-            ));
-        }
-    };
-    let mut data = transport::parse_response_data(&result.response.body);
-    if let Some(output) = secret_output {
-        let secret = data
-            .get("webhookSecret")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                CliError::Upstream(
-                    Diag::new(
-                        "upstream_malformed",
-                        "monitor create response did not include string `webhookSecret`; reserved --secret-output file was not written",
-                    )
-                    .with_suggestion("exa-agent monitor list --limit 10"),
-                )
-            })?;
-        output.commit(secret)?;
-    }
-    redaction::redact_json_value(&mut data);
-    let count = transport::primary_count(&data);
-    let hash = transport::data_hash(&data);
-    let envelope = response_envelope(ResponseEnvelopeArgs {
-        command: &spec.op.command(),
-        method: &result.method,
-        path: &result.path,
-        operation: Some(spec.op),
-        request_id: &result.request_id,
-        profile: &result.profile,
-        correlation_id: result.correlation_id.as_deref(),
-        data,
-        count,
-        data_hash: hash,
-        retries: result.retries,
-        warnings: &warnings,
-    });
-    if globals.ndjson {
-        emit_ndjson(&envelope);
-    } else {
-        emit_stdout(&envelope, pretty);
-    }
-    Ok(0)
 }
 
 struct SecretOutputReservation {
@@ -3905,84 +3776,6 @@ fn websets_webhook_secret_warnings(args: &WebsetsWebhooksCreateArgs) -> Vec<serd
     }
 }
 
-fn dispatch_websets_webhooks_create_live(
-    spec: request::RequestSpec,
-    secret_output: Option<SecretOutputReservation>,
-    globals: &GlobalArgs,
-    pretty: bool,
-    extra_warnings: Vec<serde_json::Value>,
-) -> Result<i32, CliError> {
-    parse_user_headers(&globals.headers)?;
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
-    let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
-    let request_id = transport::new_request_id();
-    let mut warnings = typed_command_warnings(spec.op);
-    warnings.extend(extra_warnings);
-    let result = match execute_raw_with_request_id(
-        &transport,
-        RawExecuteParams {
-            method: spec.op.method.as_str(),
-            path: spec.op.api_path,
-            query_raw: &[],
-            body: typed_wire_body(&spec),
-            globals,
-            credential: &credential,
-            request_id: request_id.clone(),
-        },
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            return Err(maybe_record_pending_run_on_create_failure(
-                err,
-                &spec,
-                globals,
-                &request_id,
-                spec.op.api_path,
-            ));
-        }
-    };
-    let mut data = transport::parse_response_data(&result.response.body);
-    if let Some(output) = secret_output {
-        let secret = data.get("secret").and_then(|value| value.as_str()).ok_or_else(|| {
-            CliError::Upstream(
-                Diag::new(
-                    "upstream_malformed",
-                    "websets webhooks create response did not include string `secret`; reserved --secret-output file was not written",
-                )
-                .with_suggestion("exa-agent websets webhooks list --limit 10"),
-            )
-        })?;
-        output.commit(secret)?;
-    }
-    redaction::redact_json_value(&mut data);
-    let count = transport::primary_count(&data);
-    let hash = transport::data_hash(&data);
-    let envelope = response_envelope(ResponseEnvelopeArgs {
-        command: &spec.op.command(),
-        method: &result.method,
-        path: &result.path,
-        operation: Some(spec.op),
-        request_id: &result.request_id,
-        profile: &result.profile,
-        correlation_id: result.correlation_id.as_deref(),
-        data,
-        count,
-        data_hash: hash,
-        retries: result.retries,
-        warnings: &warnings,
-    });
-    if globals.ndjson {
-        emit_ndjson(&envelope);
-    } else {
-        emit_stdout(&envelope, pretty);
-    }
-    Ok(0)
-}
-
 fn dispatch_websets_webhooks_create(
     args: &WebsetsWebhooksCreateArgs,
     globals: &GlobalArgs,
@@ -4022,7 +3815,16 @@ fn dispatch_websets_webhooks_create(
             .as_deref()
             .map(reserve_webhook_secret_file)
             .transpose()?;
-        dispatch_websets_webhooks_create_live(spec, secret_output, globals, pretty, extra_warnings)
+        dispatch_typed_command_with_extras(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                secret_output,
+                extra_warnings: &extra_warnings,
+            },
+        )
     })
 }
 
@@ -4639,6 +4441,16 @@ fn dispatch_typed_command_with_options(
     pretty: bool,
     options: TypedDispatchOptions<'_>,
 ) -> Result<i32, CliError> {
+    dispatch_typed_command_with_extras(spec, globals, pretty, options, LiveExtras::default())
+}
+
+fn dispatch_typed_command_with_extras(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    options: TypedDispatchOptions<'_>,
+    extras: LiveExtras<'_>,
+) -> Result<i32, CliError> {
     let op = spec.op;
     let method = op.method.as_str();
     let path = options.path_override.unwrap_or(op.api_path);
@@ -4647,7 +4459,7 @@ fn dispatch_typed_command_with_options(
     } else {
         transport::new_request_id()
     };
-    match dispatch_typed_inner(&spec, globals, pretty, &request_id, path, options) {
+    match dispatch_typed_inner(&spec, globals, pretty, &request_id, path, options, extras) {
         Ok(code) => Ok(code),
         Err(err) => {
             let code = err.category() as i32;
@@ -4693,10 +4505,12 @@ fn dispatch_typed_inner(
     request_id: &str,
     path: &str,
     options: TypedDispatchOptions<'_>,
+    extras: LiveExtras<'_>,
 ) -> Result<i32, CliError> {
     parse_user_headers(&globals.headers)?;
     if globals.print_request || globals.dry_run {
-        let warnings = typed_command_warnings(spec.op);
+        let mut warnings = typed_command_warnings(spec.op);
+        warnings.extend_from_slice(extras.extra_warnings);
         emit_stdout(
             &redacted_preview_expanded(
                 spec,
@@ -4740,6 +4554,7 @@ fn dispatch_typed_inner(
             },
             command_override: options.command_override,
         },
+        extras,
     )
 }
 
@@ -5068,6 +4883,7 @@ fn dispatch_typed_chunks_inner(
                 },
                 command_override: None,
             },
+            LiveExtras::default(),
         ) {
             Ok(10) => exit_code = 10,
             Ok(_) => {}
@@ -5093,6 +4909,7 @@ fn execute_typed_live<T: Transport>(
     globals: &GlobalArgs,
     credential: &auth::ResolvedCredential,
     execution: TypedExecution<'_>,
+    extras: LiveExtras<'_>,
 ) -> Result<i32, CliError> {
     let body = typed_wire_body(spec);
     let stream_requested = body_wants_stream(&body) || execution.route.sse_accept;
@@ -5106,7 +4923,21 @@ fn execute_typed_live<T: Transport>(
         .command_override
         .map(str::to_string)
         .unwrap_or_else(|| spec.op.command());
-    let warnings = typed_command_warnings(spec.op);
+    let mut warnings = typed_command_warnings(spec.op);
+    warnings.extend_from_slice(extras.extra_warnings);
+    // A one-time secret must ride a plain JSON response so the capture hook below reads it
+    // before redaction. Streaming/raw both early-return past that hook and would silently drop
+    // the reserved secret (the reservation's Drop deletes the file), so reject the combination
+    // before any network call rather than minting an uncapturable secret.
+    if extras.secret_output.is_some() && (stream_requested || globals.raw) {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_flag_combination",
+            format!(
+                "`{command}` returns a one-time secret and cannot be streamed or emitted raw; \
+                 remove `stream` from the request body and drop `--raw`"
+            ),
+        )));
+    }
     if stream_requested {
         let params = RawExecuteParams {
             method: spec.op.method.as_str(),
@@ -5172,10 +5003,39 @@ fn execute_typed_live<T: Transport>(
     }
 
     let mut data = transport::parse_response_data(&result.response.body);
-    // Defense in depth: a create response may carry secret material (e.g. a freshly
-    // minted key). Secret-capturing creates use their own --secret-output path; this
-    // scrubs secret-named/shaped fields on the generic typed create path so nothing
-    // sensitive is echoed to stdout.
+    // A one-time secret (e.g. a freshly minted key) is captured to the reserved
+    // --secret-output file from the raw response, *before* redaction scrubs it below.
+    if let Some(reservation) = extras.secret_output {
+        let (field, _flag, _required) = spec
+            .op
+            .secret_capture()
+            .expect("secret_output reservation implies the op carries a SecretCapture capability");
+        let secret = data
+            .get(field)
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                let diag = Diag::new(
+                    "upstream_malformed",
+                    format!(
+                        "{} response did not include string `{field}`; reserved --secret-output file was not written",
+                        spec.op.command()
+                    ),
+                );
+                let diag = match spec.op.command().as_str() {
+                    "admin keys create" => diag.with_suggestion("exa-agent admin keys list"),
+                    "monitor create" => diag.with_suggestion("exa-agent monitor list --limit 10"),
+                    "websets webhooks create" => {
+                        diag.with_suggestion("exa-agent websets webhooks list --limit 10")
+                    }
+                    _ => diag,
+                };
+                CliError::Upstream(diag)
+            })?;
+        reservation.commit(secret)?;
+    }
+    // Defense in depth: a create response may carry secret material. Secret-capturing
+    // creates commit it above; this scrubs secret-named/shaped fields on the generic
+    // typed create path so nothing sensitive is echoed to stdout.
     if spec.op.idempotency_sensitive {
         redaction::redact_json_value(&mut data);
     }
@@ -6989,6 +6849,7 @@ mod tests {
                     },
                     command_override: None,
                 },
+                LiveExtras::default(),
             )
             .unwrap(),
             0
@@ -7031,6 +6892,7 @@ mod tests {
                     },
                     command_override: None,
                 },
+                LiveExtras::default(),
             )
             .unwrap(),
             0
@@ -7148,6 +7010,7 @@ mod tests {
                 },
                 command_override: None,
             },
+            LiveExtras::default(),
         )
         .unwrap_err();
 
@@ -7224,6 +7087,7 @@ mod tests {
                 },
                 command_override: None,
             },
+            LiveExtras::default(),
         )
         .unwrap_err();
         assert_eq!(unkeyed.recorded_requests().len(), 1);
@@ -7263,6 +7127,7 @@ mod tests {
                     },
                     command_override: None,
                 },
+                LiveExtras::default(),
             )
             .unwrap(),
             0
@@ -7275,6 +7140,170 @@ mod tests {
             .any(|(name, value)| name == "Idempotency-Key" && value == "idem-admin-create")));
 
         let _ = std::fs::remove_file(&pending_path);
+    }
+
+    #[test]
+    fn secret_capture_capability_seeded_for_the_three_creates() {
+        let expected: &[(&[&str], &str, &str, bool)] = &[
+            (
+                &["admin", "keys", "create"],
+                "apiKey",
+                "--secret-output",
+                true,
+            ),
+            (
+                &["monitor", "create"],
+                "webhookSecret",
+                "--secret-output",
+                false,
+            ),
+            (
+                &["websets", "webhooks", "create"],
+                "secret",
+                "--secret-output",
+                false,
+            ),
+        ];
+        for (segments, field, flag, required) in expected {
+            let op = registry::lookup_by_segments(segments).unwrap();
+            let (f, fl, req) = op.secret_capture().unwrap_or_else(|| {
+                panic!(
+                    "{} must carry a SecretCapture capability",
+                    segments.join(" ")
+                )
+            });
+            assert_eq!(f, *field);
+            assert_eq!(fl, *flag);
+            assert_eq!(req, *required);
+            // stdout-safety: the captured field name is redaction-recognized, and the op is
+            // idempotency_sensitive, so redact_json_value scrubs it from the response envelope.
+            assert!(
+                redaction::is_secret_name(field),
+                "{field} must be redaction-recognized so it never reaches stdout"
+            );
+            assert!(
+                op.idempotency_sensitive,
+                "{} must be idempotency_sensitive for redaction to fire",
+                segments.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn secret_capture_writes_reserved_file_with_raw_secret_before_redaction() {
+        let op = registry::lookup_by_segments(&["admin", "keys", "create"]).unwrap();
+        let spec = request::RequestSpec {
+            op,
+            body: serde_json::json!({"name": "ci-key"}),
+        };
+        let credential = auth::resolve_service_credential(
+            &CredentialInput {
+                explicit: Some("svc-admin-secret".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, r#"{"id":"key_1","apiKey":"SUPER_SECRET_XYZ"}"#);
+
+        let secret_path = std::env::temp_dir().join(format!(
+            "exa-agent-secret-test-{}-{}.secret",
+            std::process::id(),
+            transport::new_request_id()
+        ));
+        let _ = std::fs::remove_file(&secret_path);
+        let reservation = reserve_webhook_secret_file(secret_path.to_str().unwrap()).unwrap();
+        let globals = parse_globals(&["--format", "json", "--service-key", "svc-admin-secret"]);
+
+        let code = execute_typed_live(
+            &fake,
+            &spec,
+            &globals,
+            &credential,
+            TypedExecution {
+                request_id: "req_secret",
+                pretty: false,
+                route: TypedRoute {
+                    path: spec.op.api_path,
+                    query: &[],
+                    sse_accept: false,
+                },
+                command_override: None,
+            },
+            LiveExtras {
+                secret_output: Some(reservation),
+                extra_warnings: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+
+        // Captured BEFORE redaction: the file holds the raw secret, not the REDACTED sentinel.
+        let written = std::fs::read_to_string(&secret_path).unwrap();
+        assert_eq!(written, "SUPER_SECRET_XYZ");
+        assert_ne!(written, redaction::REDACTED);
+        let _ = std::fs::remove_file(&secret_path);
+    }
+
+    #[test]
+    fn secret_capture_create_rejects_streaming_and_leaves_no_file() {
+        let op = registry::lookup_by_segments(&["admin", "keys", "create"]).unwrap();
+        let spec = request::RequestSpec {
+            op,
+            body: serde_json::json!({"name": "ci-key", "stream": true}),
+        };
+        let credential = auth::resolve_service_credential(
+            &CredentialInput {
+                explicit: Some("svc-admin-secret".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        // No responses pushed: the guard must reject before any request is sent.
+        let fake = FakeTransport::default();
+        let secret_path = std::env::temp_dir().join(format!(
+            "exa-agent-secret-stream-{}-{}.secret",
+            std::process::id(),
+            transport::new_request_id()
+        ));
+        let _ = std::fs::remove_file(&secret_path);
+        let reservation = reserve_webhook_secret_file(secret_path.to_str().unwrap()).unwrap();
+        let globals = parse_globals(&["--format", "json", "--service-key", "svc-admin-secret"]);
+
+        let err = execute_typed_live(
+            &fake,
+            &spec,
+            &globals,
+            &credential,
+            TypedExecution {
+                request_id: "req_stream",
+                pretty: false,
+                route: TypedRoute {
+                    path: spec.op.api_path,
+                    query: &[],
+                    sse_accept: false,
+                },
+                command_override: None,
+            },
+            LiveExtras {
+                secret_output: Some(reservation),
+                extra_warnings: &[],
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.diag().code, "invalid_flag_combination");
+        assert_eq!(
+            fake.recorded_requests().len(),
+            0,
+            "must reject before any network call"
+        );
+        assert!(
+            !secret_path.exists(),
+            "reserved file must be cleaned up, not left as an empty/partial secret"
+        );
     }
 
     #[test]

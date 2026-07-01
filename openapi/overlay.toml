@@ -58,6 +58,7 @@ confirm = { yes_plus_echo = "delete" }
 cli_path = "monitor create"
 namespace = "api"
 idempotency_sensitive = true
+secret_capture = { response_field = "webhookSecret", output_flag = "--secret-output", required = false }
 
 [operations."deleteMonitor"]
 cli_path = "monitor delete"
@@ -281,6 +282,7 @@ cursor = "cursor"
 cli_path = "websets webhooks create"
 namespace = "api"
 idempotency_sensitive = true
+secret_capture = { response_field = "secret", output_flag = "--secret-output", required = false }
 
 [operations."webhooks-delete"]
 cli_path = "websets webhooks delete"
@@ -305,6 +307,7 @@ namespace = "api"
 cli_path = "admin keys create"
 namespace = "service"
 idempotency_sensitive = true
+secret_capture = { response_field = "apiKey", output_flag = "--secret-output", required = true }
 
 [operations."delete-api-key"]
 cli_path = "admin keys delete"

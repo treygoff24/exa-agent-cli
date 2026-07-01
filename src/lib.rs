@@ -3308,6 +3308,7 @@ fn build_websets_monitors_create_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["websets", "monitors", "create"])
         .expect("websets monitors create is in registry");
+    // Intentionally deferred conditional-body tail; migrate with a future body_builder.
     let body = build_websets_monitors_create_named_body(args);
     let body = apply_request_overrides(body, globals)?;
     validate_websets_monitor_create_body(&body)?;
@@ -3672,26 +3673,6 @@ fn dispatch_websets_events(
     }
 }
 
-fn build_websets_webhooks_create_named_body(args: &WebsetsWebhooksCreateArgs) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    if let Some(url) = &args.url {
-        body.insert("url".to_string(), serde_json::Value::String(url.clone()));
-    }
-    if !args.events.is_empty() {
-        body.insert(
-            "events".to_string(),
-            serde_json::Value::Array(
-                args.events
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-    }
-    serde_json::Value::Object(body)
-}
-
 fn websets_webhooks_create_has_required_fields(body: &serde_json::Value) -> bool {
     let has_url = body
         .get("url")
@@ -3718,9 +3699,12 @@ fn build_websets_webhooks_create_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["websets", "webhooks", "create"])
         .expect("websets webhooks create is in registry");
-    let body = build_websets_webhooks_create_named_body(args);
-    let body = apply_request_overrides(body, globals)?;
-    if !websets_webhooks_create_has_required_fields(&body) {
+    let flag_values = [
+        ("url", Some(args.url.clone().unwrap_or_default())),
+        ("event", Some(request::encode_str_array(&args.events))),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    if !websets_webhooks_create_has_required_fields(&spec.body) {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -3731,7 +3715,7 @@ fn build_websets_webhooks_create_spec(
             ),
         ));
     }
-    Ok(request::RequestSpec { op, body })
+    Ok(spec)
 }
 
 fn websets_webhook_secret_warnings(args: &WebsetsWebhooksCreateArgs) -> Vec<serde_json::Value> {
@@ -3831,35 +3815,25 @@ fn dispatch_websets_webhooks_get(
     })
 }
 
-fn build_websets_webhooks_update_named_body(args: &WebsetsWebhooksUpdateArgs) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    if let Some(url) = &args.url {
-        body.insert("url".to_string(), serde_json::Value::String(url.clone()));
-    }
-    if !args.events.is_empty() {
-        body.insert(
-            "events".to_string(),
-            serde_json::Value::Array(
-                args.events
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-    }
-    serde_json::Value::Object(body)
-}
-
 fn build_websets_webhooks_update_spec(
     args: &WebsetsWebhooksUpdateArgs,
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["websets", "webhooks", "update"])
         .expect("websets webhooks update is in registry");
-    let body = build_websets_webhooks_update_named_body(args);
-    let body = apply_request_overrides(body, globals)?;
-    if body.as_object().is_some_and(|object| object.is_empty()) {
+    let flag_values = [
+        ("url", args.url.clone()),
+        (
+            "event",
+            (!args.events.is_empty()).then(|| request::encode_str_array(&args.events)),
+        ),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    if spec
+        .body
+        .as_object()
+        .is_some_and(|object| object.is_empty())
+    {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -3870,13 +3844,13 @@ fn build_websets_webhooks_update_spec(
             ),
         ));
     }
-    if body.get("events").is_some() && !websets_webhook_events_are_valid(&body) {
+    if spec.body.get("events").is_some() && !websets_webhook_events_are_valid(&spec.body) {
         return Err(CliError::Usage(Diag::new(
             "invalid_value",
             "websets webhooks update events must be a non-empty array of non-empty strings when provided",
         )));
     }
-    Ok(request::RequestSpec { op, body })
+    Ok(spec)
 }
 
 fn dispatch_websets_webhooks_update(

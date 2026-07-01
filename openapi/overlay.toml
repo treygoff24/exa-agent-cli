@@ -334,6 +334,18 @@ namespace = "api"
 idempotency_sensitive = true
 secret_capture = { response_field = "secret", output_flag = "--secret-output", required = false }
 
+[[operations."webhooks-create".fields]]
+flag = "url"
+body_path = "url"
+kind = "str"
+required = true
+
+[[operations."webhooks-create".fields]]
+flag = "event"
+body_path = "events"
+kind = "str_array"
+required = true
+
 [operations."webhooks-delete"]
 cli_path = "websets webhooks delete"
 namespace = "api"
@@ -352,6 +364,16 @@ cursor = "cursor"
 [operations."webhooks-update"]
 cli_path = "websets webhooks update"
 namespace = "api"
+
+[[operations."webhooks-update".fields]]
+flag = "url"
+body_path = "url"
+kind = "str"
+
+[[operations."webhooks-update".fields]]
+flag = "event"
+body_path = "events"
+kind = "str_array"
 
 [operations."create-api-key"]
 cli_path = "admin keys create"

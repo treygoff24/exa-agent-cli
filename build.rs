@@ -132,6 +132,20 @@ fn main() -> Result<()> {
         println!("cargo:rerun-if-changed={input}");
     }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // Re-bake GIT_SHA when HEAD moves. Without this, cargo only re-runs build.rs
+    // when a spec input changes, so the baked SHA freezes on commits that don't
+    // touch a spec — and the binary reports a commit it wasn't built from. Absent
+    // in a published tarball (no .git), where git_sha() falls back to "unknown".
+    let git_head = manifest.join(".git/HEAD");
+    println!("cargo:rerun-if-changed={}", git_head.display());
+    if let Ok(head) = std::fs::read_to_string(&git_head) {
+        if let Some(reference) = head.strip_prefix("ref: ") {
+            println!(
+                "cargo:rerun-if-changed={}",
+                manifest.join(".git").join(reference.trim()).display()
+            );
+        }
+    }
 
     let exa_bytes = std::fs::read(manifest.join(EXA_SPEC)).context("read exa-openapi.json")?;
     let admin_bytes =

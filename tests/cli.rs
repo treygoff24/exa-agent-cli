@@ -1620,6 +1620,19 @@ fn research_accepts_all_but_rejects_orphaned_pagination_flags_and_create_stream(
     let stderr: serde_json::Value = serde_json::from_slice(&page_delay.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
 
+    let max_pages_zero = run(&[
+        "research",
+        "list",
+        "--all",
+        "--max-pages",
+        "0",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(max_pages_zero.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&max_pages_zero.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
     let create_stream = run(&[
         "research",
         "create",
@@ -2054,6 +2067,70 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         body["metadata"],
         serde_json::json!({"ticket":"T1","owner":"ops"})
     );
+}
+
+#[test]
+fn agent_runs_create_rejects_bad_structured_create_fields() {
+    let input_row = run(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--input-row",
+        r#"["not","object"]"#,
+        "--compact",
+    ]);
+    assert_eq!(input_row.status.code(), Some(1));
+    let stderr = stderr_json(&input_row);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("JSON object"));
+
+    let too_many_sources = run(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--data-source",
+        "a",
+        "--data-source",
+        "b",
+        "--data-source",
+        "c",
+        "--data-source",
+        "d",
+        "--data-source",
+        "e",
+        "--data-source",
+        "f",
+        "--compact",
+    ]);
+    assert_eq!(too_many_sources.status.code(), Some(1));
+    let stderr = stderr_json(&too_many_sources);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("at most 5"));
+
+    let empty_source = run(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--data-source",
+        "",
+        "--compact",
+    ]);
+    assert_eq!(empty_source.status.code(), Some(1));
+    let stderr = stderr_json(&empty_source);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("must not be empty"));
 }
 
 #[cfg(unix)]

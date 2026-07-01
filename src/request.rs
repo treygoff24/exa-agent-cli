@@ -699,16 +699,28 @@ mod tests {
         assert_eq!(plain, serde_json::json!({ "items": ["a", "b"] }));
     }
 
-    static BUILDER_FIELDS: &[FieldDef] = &[FieldDef {
-        flag: "modeled",
-        body_path: "layers.field",
-        kind: FieldKind::Str,
-        required: false,
-        co_fields: &[],
-        item_template: None,
-        enum_values: &[],
-        range: None,
-    }];
+    static BUILDER_FIELDS: &[FieldDef] = &[
+        FieldDef {
+            flag: "modeled",
+            body_path: "sentinel.modeled",
+            kind: FieldKind::Int,
+            required: false,
+            co_fields: &[],
+            item_template: None,
+            enum_values: &[],
+            range: None,
+        },
+        FieldDef {
+            flag: "field-only",
+            body_path: "layers.field",
+            kind: FieldKind::Str,
+            required: false,
+            co_fields: &[],
+            item_template: None,
+            enum_values: &[],
+            range: None,
+        },
+    ];
 
     static BUILDER_OP: OperationDef = OperationDef {
         cli_path: &["synthetic", "builder"],
@@ -734,16 +746,36 @@ mod tests {
     #[test]
     fn sentinel_builder_layers_between_fields_body_and_set() {
         let flags = &[
-            ("modeled", Some("field-layer".into())),
+            ("modeled", Some("7".into())),
+            ("field-only", Some("field-layer".into())),
             ("builder-flag", Some("builder-layer".into())),
             ("ignored", None),
         ];
-        let sets = ["layers.set=set-layer".into()];
+        let body = BodySource::Inline(
+            r#"{"sentinel":{"modeled":"body-layer"},"layers":{"body":"body-layer"}}"#,
+        );
+        let sets = [
+            "sentinel.modeled=set-layer".into(),
+            "layers.set=set-layer".into(),
+        ];
+        let builder_over_field = build_request(&BUILDER_OP, flags, RequestOverrides::default())
+            .unwrap()
+            .body;
+        let body_over_builder = build_request(
+            &BUILDER_OP,
+            flags,
+            RequestOverrides {
+                body: Some(body),
+                sets: &[],
+            },
+        )
+        .unwrap()
+        .body;
         let first = build_request(
             &BUILDER_OP,
             flags,
             RequestOverrides {
-                body: Some(BodySource::Inline(r#"{"layers":{"body":"body-layer"}}"#)),
+                body: Some(body),
                 sets: &sets,
             },
         )
@@ -753,13 +785,25 @@ mod tests {
             &BUILDER_OP,
             flags,
             RequestOverrides {
-                body: Some(BodySource::Inline(r#"{"layers":{"body":"body-layer"}}"#)),
+                body: Some(body),
                 sets: &sets,
             },
         )
         .unwrap()
         .body;
 
+        assert_eq!(
+            builder_over_field,
+            serde_json::json!({
+                "layers": { "field": "field-layer" },
+                "sentinel": {
+                    "modeled": "7",
+                    "field-only": "field-layer",
+                    "builder-flag": "builder-layer"
+                }
+            })
+        );
+        assert_eq!(body_over_builder["sentinel"]["modeled"], "body-layer");
         assert_eq!(first, second);
         assert_eq!(
             first,
@@ -770,7 +814,8 @@ mod tests {
                     "set": "set-layer"
                 },
                 "sentinel": {
-                    "modeled": "field-layer",
+                    "modeled": "set-layer",
+                    "field-only": "field-layer",
                     "builder-flag": "builder-layer"
                 }
             })

@@ -85,7 +85,7 @@ enum ConfirmKind {
 /// Overlay extension shapes:
 /// - field `co_fields = [["trigger.type", "interval"], ["trigger.active", true]]`
 /// - field `item_template = "description"`
-/// - op `body_builder = "Sentinel"` (unknown names fail the build)
+/// - op `body_builder = "SomeRealBuilder"` (unknown/test-only names fail the build)
 #[derive(Clone, Deserialize)]
 struct FieldMeta {
     flag: String,
@@ -250,6 +250,9 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
     };
 
     let read_only = method == "GET";
+    for field in &meta.fields {
+        validate_field(oid, field)?;
+    }
 
     Ok(OpRow {
         cli_path: meta
@@ -275,6 +278,44 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         fields: meta.fields.to_vec(),
         body_builder: meta.body_builder.clone(),
     })
+}
+
+fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
+    let who = || format!("op {oid} field --{}", field.flag);
+
+    if let Some(item_template) = &field.item_template {
+        if field.kind != "str_array" {
+            return Err(anyhow!("{}: item_template only valid on str_array", who()));
+        }
+        if item_template.is_empty() {
+            return Err(anyhow!("{}: item_template cannot be empty", who()));
+        }
+    }
+
+    if !field.enum_values.is_empty() && field.kind != "str" {
+        return Err(anyhow!("{}: enum_values only valid on str", who()));
+    }
+    if field.enum_values.iter().any(String::is_empty) {
+        return Err(anyhow!("{}: enum_values entries cannot be empty", who()));
+    }
+
+    if let Some([min, max]) = field.range {
+        if !matches!(field.kind.as_str(), "int" | "num") {
+            return Err(anyhow!("{}: range only valid on int or num", who()));
+        }
+        if !min.is_finite() || !max.is_finite() {
+            return Err(anyhow!("{}: range bounds must be finite", who()));
+        }
+        if min > max {
+            return Err(anyhow!("{}: range min must be <= max", who()));
+        }
+    }
+
+    if field.co_fields.iter().any(|(path, _)| path.is_empty()) {
+        return Err(anyhow!("{}: co_fields paths cannot be empty", who()));
+    }
+
+    Ok(())
 }
 
 fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
@@ -449,10 +490,12 @@ fn field_kind_variant(k: &str) -> Result<&'static str> {
 }
 
 fn builder_variant(oid: &str, name: &str) -> Result<&'static str> {
-    Ok(match name {
-        "Sentinel" => "BuilderId::Sentinel",
-        other => return Err(anyhow!("op {oid}: unknown body_builder {other:?}")),
-    })
+    match name {
+        "Sentinel" => Err(anyhow!(
+            "op {oid}: body_builder \"Sentinel\" is a test-only sentinel and cannot be assigned to an operation"
+        )),
+        other => Err(anyhow!("op {oid}: unknown body_builder {other:?}")),
+    }
 }
 
 fn parse_spec(bytes: &[u8]) -> Result<SpecInfo> {

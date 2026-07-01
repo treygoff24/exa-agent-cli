@@ -370,7 +370,7 @@ pub enum Command {
     Raw(RawArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, IntoFlagValues)]
 pub struct SearchArgs {
     /// The search query.
     pub query: String,
@@ -389,6 +389,7 @@ pub struct SearchArgs {
     pub text: bool,
     /// Search type.
     #[arg(long, value_enum, ignore_case = true)]
+    #[flag(with = "search_type_flag")]
     pub r#type: Option<SearchType>,
     /// Result category.
     ///
@@ -416,6 +417,7 @@ pub struct SearchArgs {
         default_missing_value = "",
         allow_negative_numbers = true
     )]
+    #[flag(skip)]
     pub limit: Option<String>,
     /// Common mistake: search uses --num-results, not --count.
     #[arg(
@@ -426,16 +428,23 @@ pub struct SearchArgs {
         default_missing_value = "",
         allow_negative_numbers = true
     )]
+    #[flag(skip)]
     pub count: Option<String>,
     /// Common mistake: search is not cursor-paginated.
     #[arg(long, hide = true)]
+    #[flag(skip)]
     pub all: bool,
     /// Common mistake: use typed filter flags instead.
     #[arg(long, hide = true, value_name = "FILTER")]
+    #[flag(skip)]
     pub filter: Option<String>,
 }
 
-#[derive(Args, Debug)]
+fn search_type_flag(value: &Option<SearchType>) -> Option<String> {
+    value.map(|kind| kind.as_str().to_string())
+}
+
+#[derive(Args, Debug, IntoFlagValues)]
 pub struct ContentsArgs {
     /// URLs to fetch.
     #[arg(required_unless_present = "ids", conflicts_with = "ids", num_args = 1..)]
@@ -447,6 +456,7 @@ pub struct ContentsArgs {
     #[arg(long)]
     pub summary_query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+    #[flag(skip)]
     pub chunk_size: Option<u32>,
 }
 

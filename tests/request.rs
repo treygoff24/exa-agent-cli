@@ -395,7 +395,7 @@ fn deep_set_path_is_rejected_without_stack_overflow() {
 }
 
 #[test]
-fn agent_runs_create_fields_map_query_effort_and_stream() {
+fn agent_runs_create_fields_map_query_effort_and_omits_stream_body() {
     let spec = request::build_request(
         agent_runs_create_op(),
         &[
@@ -423,7 +423,6 @@ fn agent_runs_create_fields_map_query_effort_and_stream() {
                 Some(json!([{"provider":"similarweb"}]).to_string()),
             ),
             ("metadata", Some(json!({"ticket":"T1"}).to_string())),
-            ("stream", Some("true".into())),
         ],
         RequestOverrides::default(),
     )
@@ -446,6 +445,6 @@ fn agent_runs_create_fields_map_query_effort_and_stream() {
     assert_eq!(spec.body["effort"], "medium");
     assert_eq!(spec.body["dataSources"], json!([{"provider":"similarweb"}]));
     assert_eq!(spec.body["metadata"], json!({"ticket":"T1"}));
-    assert_eq!(spec.body["stream"], true);
+    assert!(spec.body.get("stream").is_none());
     assert_eq!(agent_runs_create_op().api_path, "/agent/runs");
 }

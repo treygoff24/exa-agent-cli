@@ -1104,7 +1104,7 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     let url = build_url(&base_url, params.path, &query)?;
 
     let mut headers = parse_user_headers(&params.globals.headers)?;
-    if body_wants_stream(&params.body) {
+    if body_wants_stream(&params.body) && !has_header(&headers, "Accept") {
         headers.push(("Accept".to_string(), "text/event-stream".to_string()));
     }
     if let Some(key) = &params.globals.idempotency_key {

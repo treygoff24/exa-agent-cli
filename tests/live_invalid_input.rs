@@ -152,21 +152,21 @@ fn modeled_live_invalid_inputs_fail_locally() {
             ],
         },
         InvalidCase {
-            name: "agent runs create wrong stream type",
+            name: "agent runs create wrong previousRunId type",
             args: &[
                 "agent",
                 "runs",
                 "create",
                 "find eval tools",
                 "--set",
-                "stream=maybe",
+                "previousRunId=123",
                 "--compact",
             ],
             code: "invalid_field_type",
             details: &[
-                ("field", Str("stream")),
-                ("flag", Str("stream")),
-                ("expected", Str("boolean")),
+                ("field", Str("previousRunId")),
+                ("flag", Str("previous-run-id")),
+                ("expected", Str("string")),
             ],
         },
         InvalidCase {

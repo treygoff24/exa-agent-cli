@@ -266,25 +266,7 @@ fn build_search_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     validate_search_intent_args(args)?;
-    let flag_values = [
-        ("query", Some(args.query.clone())),
-        ("num-results", args.num_results.clone()),
-        ("text", args.text.then_some("true".to_string())),
-        ("type", args.r#type.map(|t| t.as_str().to_string())),
-        ("category", args.category.clone()),
-        (
-            "include-domain",
-            (!args.include_domain.is_empty())
-                .then(|| request::encode_str_array(&args.include_domain)),
-        ),
-        (
-            "exclude-domain",
-            (!args.exclude_domain.is_empty())
-                .then(|| request::encode_str_array(&args.exclude_domain)),
-        ),
-        ("start-published-date", args.start_published_date.clone()),
-        ("end-published-date", args.end_published_date.clone()),
-    ];
+    let flag_values = args.into_flag_values();
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     Ok(spec)
@@ -685,18 +667,7 @@ fn build_contents_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
-    let flag_values = [
-        (
-            "urls",
-            (!args.urls.is_empty()).then(|| request::encode_str_array(&args.urls)),
-        ),
-        (
-            "ids",
-            (!args.ids.is_empty()).then(|| request::encode_str_array(&args.ids)),
-        ),
-        ("text", args.text.then_some("true".to_string())),
-        ("summary-query", args.summary_query.clone()),
-    ];
+    let flag_values = args.into_flag_values();
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_contents_body_shape(&spec.body)?;
     Ok(spec)
@@ -1341,12 +1312,28 @@ fn dispatch_agent_runs_create(
     let op = registry::lookup_by_segments(&["agent", "runs", "create"]).expect("agent runs create");
     with_typed_error_context(op, globals, || {
         let spec = build_agent_run_spec(args, globals)?;
-        if expands_to.is_some() || command_override.is_some() {
-            dispatch_typed_command_expanded(spec, globals, pretty, expands_to, command_override)
-        } else {
-            dispatch_typed_command(spec, globals, pretty)
-        }
+        let extra_headers = agent_run_create_headers(args);
+        dispatch_typed_command_with_options(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions {
+                expands_to,
+                sse_accept: args.stream,
+                extra_headers: (!extra_headers.is_empty()).then_some(extra_headers.as_slice()),
+                command_override,
+                ..TypedDispatchOptions::default()
+            },
+        )
     })
+}
+
+fn agent_run_create_headers(args: &AgentRunArgs) -> Vec<(String, String)> {
+    if args.stream {
+        vec![("Accept".to_string(), "text/event-stream".to_string())]
+    } else {
+        Vec::new()
+    }
 }
 
 fn build_agent_run_spec(
@@ -1393,7 +1380,6 @@ fn build_agent_run_spec(
         ),
         ("data-source", data_sources),
         ("metadata", metadata),
-        ("stream", args.stream.then_some("true".to_string())),
     ];
     build_typed_spec(op, &flag_values, globals)
 }
@@ -7653,6 +7639,56 @@ mod tests {
     #[test]
     fn pilot_into_flag_values_match_previous_hand_mappers() {
         assert_eq!(
+            SearchArgs {
+                query: "rust cli".into(),
+                num_results: Some("7".into()),
+                text: true,
+                r#type: Some(SearchType::DeepLite),
+                category: Some("research-paper".into()),
+                include_domain: vec!["exa.ai".into(), "example.com".into()],
+                exclude_domain: vec!["blocked.example".into()],
+                start_published_date: Some("2024-01-01".into()),
+                end_published_date: Some("2024-12-31".into()),
+                limit: Some("10".into()),
+                count: Some("11".into()),
+                all: true,
+                filter: Some("category=news".into()),
+            }
+            .into_flag_values(),
+            vec![
+                ("query", Some("rust cli".to_string())),
+                ("num-results", Some("7".to_string())),
+                ("text", Some("true".to_string())),
+                ("type", Some("deep-lite".to_string())),
+                ("category", Some("research-paper".to_string())),
+                (
+                    "include-domain",
+                    Some(r#"["exa.ai","example.com"]"#.to_string()),
+                ),
+                ("exclude-domain", Some(r#"["blocked.example"]"#.to_string()),),
+                ("start-published-date", Some("2024-01-01".to_string())),
+                ("end-published-date", Some("2024-12-31".to_string())),
+            ]
+        );
+
+        assert_eq!(
+            ContentsArgs {
+                urls: vec!["https://example.com".into()],
+                ids: Vec::new(),
+                text: true,
+                summary_query: Some("summarize".into()),
+                chunk_size: Some(10),
+            }
+            .into_flag_values(),
+            vec![
+                ("urls", Some(r#"["https://example.com"]"#.to_string())),
+                ("ids", None),
+                ("text", Some("true".to_string())),
+                ("summary-query", Some("summarize".to_string())),
+            ]
+        );
+
+        assert_eq!(
             ContextArgs {
                 query: "rust cli".into(),
                 tokens: Some("1000".into()),
@@ -7734,6 +7770,40 @@ mod tests {
             values.iter().map(|(flag, _)| *flag).collect()
         }
 
+        assert_eq!(
+            flag_keys(
+                &SearchArgs {
+                    query: "q".into(),
+                    num_results: None,
+                    text: false,
+                    r#type: None,
+                    category: None,
+                    include_domain: Vec::new(),
+                    exclude_domain: Vec::new(),
+                    start_published_date: None,
+                    end_published_date: None,
+                    limit: None,
+                    count: None,
+                    all: false,
+                    filter: None,
+                }
+                .into_flag_values()
+            ),
+            registry_flags(&["search"])
+        );
+        assert_eq!(
+            flag_keys(
+                &ContentsArgs {
+                    urls: vec!["https://example.com".into()],
+                    ids: Vec::new(),
+                    text: false,
+                    summary_query: None,
+                    chunk_size: None,
+                }
+                .into_flag_values()
+            ),
+            registry_flags(&["contents"])
+        );
         assert_eq!(
             flag_keys(
                 &ContextArgs {

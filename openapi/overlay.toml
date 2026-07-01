@@ -512,11 +512,6 @@ flag = "metadata"
 body_path = "metadata"
 kind = "json"
 
-[[operations."createAgentRun".fields]]
-flag = "stream"
-body_path = "stream"
-kind = "bool"
-
 [[operations."ResearchController_createResearch".fields]]
 flag = "query"
 body_path = "instructions"

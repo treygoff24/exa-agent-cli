@@ -1890,8 +1890,12 @@ fn agent_runs_dry_run_builds_create_list_get_events_cancel_and_delete() {
         "find eval tools"
     );
     assert_eq!(create["data"]["request"]["body"]["effort"], "medium");
-    assert_eq!(create["data"]["request"]["body"]["stream"], true);
+    assert!(create["data"]["request"]["body"].get("stream").is_none());
     assert_eq!(create["data"]["request"]["headers"][0]["name"], "Accept");
+    assert_eq!(
+        create["data"]["request"]["headers"][0]["value"],
+        "text/event-stream"
+    );
 
     let run_macro = run_ok_json(&["agent", "run", "macro query", "--dry-run", "--compact"]);
     assert_eq!(run_macro["command"], "agent run");

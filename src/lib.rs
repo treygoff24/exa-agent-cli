@@ -958,10 +958,17 @@ fn build_admin_keys_create_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["admin", "keys", "create"])
         .expect("admin keys create is in registry");
-    let body = admin_keys_body(args.name.as_deref(), args.rate_limit, args.budget_cents);
-    let body = merge_manual_body_overrides(body, globals)?;
-    validate_admin_keys_body(&body, "admin keys create")?;
-    Ok(request::RequestSpec { op, body })
+    let flag_values = [
+        ("name", args.name.clone()),
+        ("rate-limit", args.rate_limit.map(|value| value.to_string())),
+        (
+            "budget-cents",
+            args.budget_cents.map(|value| value.to_string()),
+        ),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_admin_keys_body(&spec.body, "admin keys create")?;
+    Ok(spec)
 }
 
 fn dispatch_admin_keys_list(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -999,13 +1006,17 @@ fn dispatch_admin_keys_update(
     let op = registry::lookup_by_segments(&["admin", "keys", "update"])
         .expect("admin keys update is in registry");
     with_typed_error_context(op, globals, || {
-        let mut body = admin_keys_body(name, rate_limit, budget_cents);
+        let flag_values = [
+            ("name", name.map(str::to_string)),
+            ("rate-limit", rate_limit.map(|value| value.to_string())),
+            ("budget-cents", budget_cents.map(|value| value.to_string())),
+        ];
+        let mut spec = build_typed_spec(op, &flag_values, globals)?;
         if clear_budget_cents {
-            body["budgetCents"] = serde_json::Value::Null;
+            spec.body["budgetCents"] = serde_json::Value::Null;
         }
-        let body = merge_manual_body_overrides(body, globals)?;
-        validate_admin_keys_body(&body, "admin keys update")?;
-        if body.as_object().is_some_and(serde_json::Map::is_empty) {
+        validate_admin_keys_body(&spec.body, "admin keys update")?;
+        if spec.body.as_object().is_some_and(serde_json::Map::is_empty) {
             return Err(CliError::Usage(
                 Diag::new(
                     "missing_required_argument",
@@ -1014,7 +1025,6 @@ fn dispatch_admin_keys_update(
                 .with_suggestion("exa-agent admin keys update <id> --name renamed"),
             ));
         }
-        let spec = request::RequestSpec { op, body };
         let path = checked_substitute_path(op.api_path, &[("id", key_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
@@ -1076,53 +1086,6 @@ fn dispatch_admin_keys_usage(
             None,
         )
     })
-}
-
-fn admin_keys_body(
-    name: Option<&str>,
-    rate_limit: Option<u32>,
-    budget_cents: Option<u64>,
-) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    if let Some(name) = name {
-        body.insert(
-            "name".to_string(),
-            serde_json::Value::String(name.to_string()),
-        );
-    }
-    if let Some(rate_limit) = rate_limit {
-        body.insert("rateLimit".to_string(), serde_json::json!(rate_limit));
-    }
-    if let Some(budget_cents) = budget_cents {
-        body.insert("budgetCents".to_string(), serde_json::json!(budget_cents));
-    }
-    serde_json::Value::Object(body)
-}
-
-fn merge_manual_body_overrides(
-    mut body: serde_json::Value,
-    globals: &GlobalArgs,
-) -> Result<serde_json::Value, CliError> {
-    if let Some(source) = globals
-        .body
-        .as_deref()
-        .map(request::parse_body_source)
-        .transpose()?
-    {
-        let overlay = request::read_body_source(source)?;
-        if !overlay.is_object() {
-            return Err(CliError::Usage(Diag::new(
-                "invalid_value",
-                "`--body` must be a JSON object when merging with named flags",
-            )));
-        }
-        request::deep_merge(&mut body, overlay);
-    }
-    for entry in &globals.set {
-        let (path, value) = request::parse_set(entry)?;
-        request::set_at_path(&mut body, &path, value)?;
-    }
-    Ok(body)
 }
 
 fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(), CliError> {

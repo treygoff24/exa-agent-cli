@@ -381,6 +381,21 @@ namespace = "service"
 idempotency_sensitive = true
 secret_capture = { response_field = "apiKey", output_flag = "--secret-output", required = true }
 
+[[operations."create-api-key".fields]]
+flag = "name"
+body_path = "name"
+kind = "str"
+
+[[operations."create-api-key".fields]]
+flag = "rate-limit"
+body_path = "rateLimit"
+kind = "int"
+
+[[operations."create-api-key".fields]]
+flag = "budget-cents"
+body_path = "budgetCents"
+kind = "int"
+
 [operations."delete-api-key"]
 cli_path = "admin keys delete"
 namespace = "service"
@@ -398,6 +413,21 @@ namespace = "service"
 [operations."update-api-key"]
 cli_path = "admin keys update"
 namespace = "service"
+
+[[operations."update-api-key".fields]]
+flag = "name"
+body_path = "name"
+kind = "str"
+
+[[operations."update-api-key".fields]]
+flag = "rate-limit"
+body_path = "rateLimit"
+kind = "int"
+
+[[operations."update-api-key".fields]]
+flag = "budget-cents"
+body_path = "budgetCents"
+kind = "int"
 
 [operations."get-api-key-usage"]
 cli_path = "admin keys usage"

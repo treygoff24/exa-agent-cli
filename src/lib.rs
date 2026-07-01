@@ -4562,6 +4562,8 @@ fn execute_paginated_live<T: Transport>(
     let mut all_items = Vec::new();
     let mut first_request_id = String::new();
     let mut total_retries = 0u32;
+    let mut total_duration_ms = 0u64;
+    let mut total_cost_dollars = 0.0f64;
     let mut page = 0u32;
 
     let (mut last_data, last_next, last_has_more) = loop {
@@ -4587,7 +4589,15 @@ fn execute_paginated_live<T: Transport>(
             },
         )?;
         total_retries = total_retries.saturating_add(result.retries);
+        total_duration_ms = total_duration_ms.saturating_add(result.duration_ms);
         let data = transport::parse_response_data(&result.response.body);
+        if let Some(cost) = data
+            .get("costDollars")
+            .and_then(|c| c.get("total"))
+            .and_then(|t| t.as_f64())
+        {
+            total_cost_dollars += cost;
+        }
         let next = next_cursor(&data);
         let mut more = has_more(&data, next.as_deref());
         let reached_cap = more && page >= max_pages;
@@ -4619,7 +4629,6 @@ fn execute_paginated_live<T: Transport>(
                 &command,
                 &result,
                 data.clone(),
-                result.retries,
                 &warnings,
                 PageInfo {
                     cursor: cursor.as_deref(),
@@ -4628,6 +4637,7 @@ fn execute_paginated_live<T: Transport>(
                     page,
                     page_count: page,
                 },
+                globals.max_output_bytes,
             ));
         }
         if !more || reached_cap {
@@ -4660,6 +4670,7 @@ fn execute_paginated_live<T: Transport>(
             count,
             data_hash: hash,
             retries: total_retries,
+            duration_ms: total_duration_ms,
             warnings: &warnings,
         });
         set_pagination(
@@ -4672,6 +4683,14 @@ fn execute_paginated_live<T: Transport>(
                 page_count: page,
             },
         );
+        // `response_envelope()` derives costDollars from `data`, which here is only the LAST
+        // page's body — replace it with the sum across every page so an agent watching cost
+        // while looping `--all` sees the real total, not just the final page's cost. The
+        // per-page cost breakdown (e.g. `search.neural`) isn't summed field-by-field since its
+        // shape varies by endpoint; a stale single-page breakdown next to a multi-page total
+        // would be more misleading than showing only the total.
+        envelope["costDollars"] = serde_json::json!({ "total": total_cost_dollars });
+        apply_output_ceiling(&mut envelope, globals.max_output_bytes);
         emit_stdout(&envelope, pretty);
     }
     Ok(0)
@@ -4690,9 +4709,9 @@ fn page_envelope(
     command: &str,
     result: &transport::RawExecuteResult,
     data: serde_json::Value,
-    retries: u32,
     warnings: &[serde_json::Value],
     page: PageInfo<'_>,
+    max_output_bytes: u64,
 ) -> serde_json::Value {
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
@@ -4707,10 +4726,15 @@ fn page_envelope(
         data,
         count,
         data_hash: hash,
-        retries,
+        retries: result.retries,
+        duration_ms: result.duration_ms,
         warnings,
     });
     set_pagination(&mut envelope, page);
+    // A single oversized NDJSON page (e.g. `contents --text --all --ndjson` over long pages)
+    // must be ceiling-checked too, not just the final aggregated envelope — otherwise the
+    // per-page stream path bypasses `--max-output-bytes` entirely.
+    apply_output_ceiling(&mut envelope, max_output_bytes);
     envelope
 }
 
@@ -4724,6 +4748,101 @@ fn set_pagination(envelope: &mut serde_json::Value, page: PageInfo<'_>) {
         "pageCount": page.page_count,
         "total": null
     });
+}
+
+/// `--max-output-bytes N` (contracts §9, default 1 MiB, `0` disables). When the serialized
+/// `data` field exceeds the ceiling, spill it to a file under the CLI's state dir and elide it
+/// from the envelope so one accidental `contents --text` over long pages can't blow an agent's
+/// context window. `count` is left untouched by the caller (computed before this runs) so an
+/// agent can size a spilled result without reading the file (contracts §4).
+///
+/// Infallible by design: the ceiling is a convenience/safety feature, not a correctness
+/// requirement. If the spill file can't be written (disk full, unwritable state dir), the
+/// safer fallback for an agent is the full data inline despite the size, not a failed command
+/// — so on spill failure this leaves `data` untouched and adds a warning instead of erroring.
+fn apply_output_ceiling(envelope: &mut serde_json::Value, max_output_bytes: u64) {
+    if max_output_bytes == 0 {
+        return;
+    }
+    let Some(data) = envelope.get("data") else {
+        return;
+    };
+    if data.is_null() {
+        return;
+    }
+    let serialized = serde_json::to_vec(data).unwrap_or_default();
+    let size = serialized.len() as u64;
+    if size <= max_output_bytes {
+        return;
+    }
+
+    let warning = match spill_data_to_file(&serialized) {
+        Ok(path) => {
+            let path_str = path.display().to_string();
+            let Some(obj) = envelope.as_object_mut() else {
+                return;
+            };
+            obj.insert("data".to_string(), serde_json::Value::Null);
+            obj.insert("dataTruncated".to_string(), serde_json::Value::Bool(true));
+            obj.insert(
+                "dataPath".to_string(),
+                serde_json::Value::String(path_str.clone()),
+            );
+            obj.insert("bytes".to_string(), serde_json::json!(size));
+            serde_json::json!({
+                "code": "output_truncated",
+                "message": format!(
+                    "response data ({size} bytes) exceeded --max-output-bytes ({max_output_bytes}); \
+                     full payload written to {path_str}. Raise --max-output-bytes, pass --output FILE, \
+                     or narrow the requested fields."
+                )
+            })
+        }
+        Err(io_err) => {
+            eprintln!(
+                "warning: --max-output-bytes spill failed, returning full data inline: {io_err}"
+            );
+            serde_json::json!({
+                "code": "output_spill_failed",
+                "message": format!(
+                    "response data ({size} bytes) exceeded --max-output-bytes ({max_output_bytes}) \
+                     but could not be spilled to disk ({io_err}); returning it inline uncut."
+                )
+            })
+        }
+    };
+    let Some(obj) = envelope.as_object_mut() else {
+        return;
+    };
+    match obj.get_mut("warnings").and_then(|w| w.as_array_mut()) {
+        Some(warnings) => warnings.push(warning),
+        None => {
+            obj.insert(
+                "warnings".to_string(),
+                serde_json::Value::Array(vec![warning]),
+            );
+        }
+    }
+}
+
+/// Per-process counter guaranteeing spill filenames are unique even when `transport::new_request_id()`
+/// collides — which it will under `SOURCE_DATE_EPOCH` (fixed by design) or two spills landing in
+/// the same wall-clock millisecond (e.g. two oversized NDJSON pages in one paginated call). A
+/// collision would silently overwrite an earlier spill file out from under its already-printed
+/// `dataPath`, corrupting a result an agent may still be reading.
+static SPILL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn spill_data_to_file(serialized: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let dir = pending::state_dir().join("spill");
+    std::fs::create_dir_all(&dir)?;
+    let n = SPILL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!(
+        "{}-{}-{n}.json",
+        std::process::id(),
+        transport::new_request_id()
+    ));
+    std::fs::write(&path, serialized)?;
+    Ok(path)
 }
 
 fn dispatch_typed_chunks(
@@ -4966,7 +5085,7 @@ fn execute_typed_live<T: Transport>(
     } else {
         0
     };
-    let envelope = response_envelope(ResponseEnvelopeArgs {
+    let mut envelope = response_envelope(ResponseEnvelopeArgs {
         command: &command,
         method: &result.method,
         path: &result.path,
@@ -4978,8 +5097,10 @@ fn execute_typed_live<T: Transport>(
         count,
         data_hash: hash,
         retries: result.retries,
+        duration_ms: result.duration_ms,
         warnings: &warnings,
     });
+    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     if globals.ndjson {
         emit_ndjson(&envelope);
     } else {
@@ -5044,7 +5165,7 @@ fn execute_streaming_live<T: Transport>(
                 redaction::redact_named_field(&mut data, field);
             }
         }
-        let envelope = response_envelope(ResponseEnvelopeArgs {
+        let mut envelope = response_envelope(ResponseEnvelopeArgs {
             command,
             method: &result.method,
             path: &result.path,
@@ -5056,8 +5177,10 @@ fn execute_streaming_live<T: Transport>(
             data_hash: transport::data_hash(&data),
             data,
             retries: result.retries,
+            duration_ms: result.duration_ms,
             warnings,
         });
+        apply_output_ceiling(&mut envelope, globals.max_output_bytes);
         if ndjson {
             write_ndjson(&mut out, &envelope).map_err(|err| stream_write_error(err, None))?;
         } else {
@@ -5070,7 +5193,7 @@ fn execute_streaming_live<T: Transport>(
     let terminal_data = terminal_stream_data(&frames);
     let count = transport::primary_count(&terminal_data);
     let hash = transport::data_hash(&terminal_data);
-    let terminal = response_envelope(ResponseEnvelopeArgs {
+    let mut terminal = response_envelope(ResponseEnvelopeArgs {
         command,
         method: &result.method,
         path: &result.path,
@@ -5082,8 +5205,10 @@ fn execute_streaming_live<T: Transport>(
         count,
         data_hash: hash,
         retries: result.retries,
+        duration_ms: result.duration_ms,
         warnings,
     });
+    apply_output_ceiling(&mut terminal, globals.max_output_bytes);
     if ndjson {
         write_ndjson(&mut out, &terminal)
             .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
@@ -5343,6 +5468,7 @@ fn stream_ndjson_values(
         count,
         data_hash: hash,
         retries: result.retries,
+        duration_ms: result.duration_ms,
         warnings,
     }));
     values
@@ -6461,6 +6587,7 @@ fn redacted_preview_expanded(
         count,
         data_hash: hash,
         retries: 0,
+        duration_ms: 0,
         warnings: preview.warnings,
     })
 }
@@ -6550,6 +6677,7 @@ fn dispatch_raw_inner(
                 count: None,
                 data_hash: hash,
                 retries: 0,
+                duration_ms: 0,
                 warnings: &[],
             }),
             pretty,
@@ -6610,7 +6738,7 @@ fn dispatch_raw_inner(
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let envelope = response_envelope(ResponseEnvelopeArgs {
+    let mut envelope = response_envelope(ResponseEnvelopeArgs {
         command: "raw",
         method: &result.method,
         path: &result.path,
@@ -6622,8 +6750,10 @@ fn dispatch_raw_inner(
         count,
         data_hash: hash,
         retries: result.retries,
+        duration_ms: result.duration_ms,
         warnings: &[],
     });
+    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     emit_stdout(&envelope, pretty);
     Ok(0)
 }
@@ -6850,6 +6980,7 @@ mod tests {
                 body: b"id: evt-1\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\nid: evt-2\ndata: {\"answer\":\"done\",\"citations\":[]}\n\ndata: [DONE]\n\n".to_vec(),
             },
             retries: 0,
+            duration_ms: 0,
         };
         let frames = transport::parse_sse(&result.response.body);
         let terminal_data = terminal_stream_data(&frames);
@@ -7496,6 +7627,7 @@ mod tests {
             count: Some(1),
             data_hash: None,
             retries: 0,
+            duration_ms: 0,
             warnings: &[],
         });
         assert_eq!(envelope["data"]["id"], "key_1");
@@ -7583,6 +7715,7 @@ mod tests {
             count,
             data_hash: hash.clone(),
             retries: 0,
+            duration_ms: 0,
             warnings: &[],
         });
 
@@ -7881,5 +8014,79 @@ mod tests {
             substitute_path("/research/v1/{researchId}", &[("researchId", "abc/def")]),
             "/research/v1/abc%2Fdef"
         );
+    }
+
+    fn envelope_with_data(data: serde_json::Value) -> serde_json::Value {
+        response_envelope(ResponseEnvelopeArgs {
+            command: "search",
+            method: "POST",
+            path: "/search",
+            operation: None,
+            request_id: "req_test",
+            profile: "default",
+            correlation_id: None,
+            data,
+            count: None,
+            data_hash: None,
+            retries: 0,
+            duration_ms: 0,
+            warnings: &[],
+        })
+    }
+
+    #[test]
+    fn apply_output_ceiling_leaves_small_payloads_untouched() {
+        let mut envelope = envelope_with_data(serde_json::json!({"results": [1, 2, 3]}));
+        apply_output_ceiling(&mut envelope, 1_048_576);
+        assert_eq!(envelope["dataTruncated"], false);
+        assert_eq!(envelope["dataPath"], serde_json::Value::Null);
+        assert_eq!(envelope["data"]["results"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn apply_output_ceiling_zero_disables_the_ceiling() {
+        let big = serde_json::json!({"text": "x".repeat(200)});
+        let mut envelope = envelope_with_data(big.clone());
+        apply_output_ceiling(&mut envelope, 0);
+        assert_eq!(envelope["dataTruncated"], false);
+        assert_eq!(envelope["data"], big);
+    }
+
+    #[test]
+    fn apply_output_ceiling_spills_oversized_payload_and_elides_data() {
+        let _lock = PENDING_TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "exa-agent-spill-test-{}-{}",
+            std::process::id(),
+            transport::new_request_id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("EXA_AGENT_STATE", &dir);
+
+        let big = serde_json::json!({"text": "x".repeat(200)});
+        let serialized_len = serde_json::to_vec(&big).unwrap().len() as u64;
+        let mut envelope = envelope_with_data(big.clone());
+        apply_output_ceiling(&mut envelope, 50);
+
+        assert_eq!(envelope["dataTruncated"], true);
+        assert_eq!(envelope["data"], serde_json::Value::Null);
+        assert_eq!(envelope["bytes"], serialized_len);
+        let data_path = envelope["dataPath"]
+            .as_str()
+            .expect("dataPath must be set when truncated");
+        let spilled = std::fs::read_to_string(data_path).expect("spill file must exist");
+        let spilled_value: serde_json::Value = serde_json::from_str(&spilled).unwrap();
+        assert_eq!(
+            spilled_value, big,
+            "spilled file holds the FULL data, not a truncated copy"
+        );
+        assert!(envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "output_truncated"));
+
+        std::env::remove_var("EXA_AGENT_STATE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

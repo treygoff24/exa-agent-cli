@@ -82,10 +82,12 @@ pub fn pending_runs_path() -> PathBuf {
             return PathBuf::from(path);
         }
     }
-    pending_state_dir().join("pending-runs.jsonl")
+    state_dir().join("pending-runs.jsonl")
 }
 
-fn pending_state_dir() -> PathBuf {
+/// The CLI's local state directory (D19: writing here doesn't make the client a cache).
+/// Shared by pending-run records, `--trace` files, and `--max-output-bytes` spill files.
+pub fn state_dir() -> PathBuf {
     if let Ok(path) = std::env::var("EXA_AGENT_STATE") {
         if !path.trim().is_empty() {
             return PathBuf::from(path);

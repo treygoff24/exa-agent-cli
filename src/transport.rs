@@ -3,8 +3,9 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::io::Read;
-use std::time::Duration;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -44,6 +45,7 @@ pub struct RawExecuteResult {
     pub correlation_id: Option<String>,
     pub response: HttpResponse,
     pub retries: u32,
+    pub duration_ms: u64,
 }
 
 pub struct RawExecuteParams<'a> {
@@ -1085,8 +1087,15 @@ pub fn execute_raw_with_request_id<T: Transport>(
     params: RawExecuteParams<'_>,
 ) -> Result<RawExecuteResult, CliError> {
     let prepared = prepare_raw_request(&params)?;
-    let (response, retries) = send_with_retry(transport, &prepared.req, &prepared.send_opts)?;
+    let start = Instant::now();
+    let outcome = send_with_retry(transport, &prepared.req, &prepared.send_opts);
+    let duration_ms = elapsed_ms(start);
 
+    if let Some(trace_path) = params.globals.trace.as_deref() {
+        write_trace_record(trace_path, &prepared, duration_ms, &outcome);
+    }
+
+    let (response, retries) = outcome?;
     Ok(RawExecuteResult {
         request_id: prepared.request_id,
         method: prepared.method,
@@ -1095,7 +1104,12 @@ pub fn execute_raw_with_request_id<T: Transport>(
         correlation_id: prepared.correlation_id,
         response,
         retries,
+        duration_ms,
     })
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 pub fn execute_raw_stream_with_request_id<T, F>(
@@ -1108,6 +1122,7 @@ where
     F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
 {
     let prepared = prepare_raw_request(&params)?;
+    let start = Instant::now();
     let mut body = Vec::new();
     let mut frames = Vec::new();
     let mut callback = |item: StreamItem<'_>| -> Result<(), CliError> {
@@ -1124,6 +1139,13 @@ where
     };
     let (_outcome, retries) =
         transport.send_sse(&prepared.req, &prepared.send_opts, &mut callback)?;
+    let duration_ms = elapsed_ms(start);
+
+    // ponytail: --trace capture for streaming calls is out of scope for this pass — the
+    // SSE path accumulates frames rather than a single HttpResponse, so the same
+    // write_trace_record shape doesn't apply directly. Non-streaming calls (the large
+    // majority: search/contents/answer/context/websets/monitor/admin/etc.) are covered.
+    // Add streaming trace support if/when an agent needs to debug a stream specifically.
 
     Ok((
         RawExecuteResult {
@@ -1138,6 +1160,7 @@ where
                 body,
             },
             retries,
+            duration_ms,
         },
         frames,
     ))
@@ -1205,6 +1228,119 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
         profile: params.credential.profile.clone(),
         correlation_id: params.globals.correlation_id.clone(),
     })
+}
+
+/// Redacted, best-effort JSONL trace record for `--trace FILE` (commands.md "--trace FILE",
+/// architecture.md §"Redaction"). Never fails the command — a trace-write problem is a
+/// diagnostic-path issue, not a reason to abort a live API call.
+fn write_trace_record(
+    trace_path: &str,
+    prepared: &PreparedRawRequest,
+    duration_ms: u64,
+    outcome: &Result<(HttpResponse, u32), CliError>,
+) {
+    let record = serde_json::json!({
+        "schema": "exa.cli.trace.v1",
+        "ts": trace_timestamp(),
+        "correlationId": prepared.correlation_id,
+        "requestId": prepared.request_id,
+        "method": prepared.req.method,
+        "url": prepared.req.url,
+        "requestHeaders": redact_headers_json(&prepared.req.headers),
+        "requestBody": prepared.req.body.as_deref().map(redact_body_bytes),
+        "durationMs": duration_ms,
+        "outcome": match outcome {
+            Ok((response, retries)) => serde_json::json!({
+                "status": response.status,
+                "responseHeaders": redact_headers_json(&response.headers),
+                "responseBody": redact_body_bytes(&response.body),
+                "retries": retries,
+            }),
+            Err(err) => {
+                let diag = err.diag();
+                serde_json::json!({ "error": { "code": diag.code.clone(), "message": diag.message.clone() } })
+            }
+        },
+    });
+    if let Err(io_err) = append_trace_line(trace_path, &record) {
+        eprintln!("warning: --trace could not write to {trace_path}: {io_err}");
+    }
+}
+
+fn append_trace_line(path: &str, record: &Value) -> std::io::Result<()> {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut line = serde_json::to_vec(record).unwrap_or_default();
+    line.push(b'\n');
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&line)?;
+    file.flush()
+}
+
+/// `--trace` must never leak a credential. Redact any header whose name matches
+/// [`redaction::is_secret_name`] — this generically covers `Authorization`, `x-api-key`,
+/// `x-exa-service-key`, etc. without enumerating them here.
+fn redact_headers_json(headers: &[(String, String)]) -> Value {
+    let map: serde_json::Map<String, Value> = headers
+        .iter()
+        .map(|(name, value)| {
+            let shown = if redaction::is_secret_name(name) {
+                redaction::REDACTED.to_string()
+            } else {
+                value.clone()
+            };
+            (name.clone(), Value::String(shown))
+        })
+        .collect();
+    Value::Object(map)
+}
+
+/// Parse a request/response body as JSON and recursively redact secret-named fields at any
+/// depth — a top-level-only pass would miss a secret nested inside a sub-object or wrapped in
+/// an array (e.g. `{"nested":{"apiKey":"..."}}` or `[{"webhookSecret":"..."}]`). This also
+/// covers every current one-time `secret_capture` response field (`apiKey`, `secret`,
+/// `webhookSecret` — see `openapi/overlay.toml`) because all three already match
+/// [`redaction::is_secret_name`]'s generic substring checks; a future secret-bearing field only
+/// needs a sensible name, not a new redaction rule. Non-JSON bodies are recorded as a byte count
+/// rather than raw bytes, so binary/opaque payloads can't smuggle something unredacted into trace.
+fn redact_body_bytes(bytes: &[u8]) -> Value {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => redact_json_recursive(value),
+        Err(_) => serde_json::json!({ "nonJsonBytes": bytes.len() }),
+    }
+}
+
+fn redact_json_recursive(value: Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| {
+                    if redaction::is_secret_name(&key) {
+                        (key, Value::String(redaction::REDACTED.to_string()))
+                    } else {
+                        (key, redact_json_recursive(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_json_recursive).collect()),
+        other => other,
+    }
+}
+
+fn trace_timestamp() -> u64 {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        })
 }
 
 #[cfg(test)]
@@ -1543,5 +1679,138 @@ mod tests {
         let err = fake.send_sse(&req, &opts, &mut callback).unwrap_err();
         assert_eq!(err.category(), 12);
         assert_eq!(err.diag().details.as_ref().unwrap()["lastEventId"], "evt-1");
+    }
+
+    /// Delegates to an inner [`FakeTransport`] after a fixed sleep, so tests can prove
+    /// `duration_ms` reflects real elapsed wall-clock time rather than a hardcoded constant.
+    struct SlowTransport(FakeTransport);
+
+    impl Transport for SlowTransport {
+        fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
+            std::thread::sleep(Duration::from_millis(20));
+            self.0.send(req)
+        }
+    }
+
+    #[test]
+    fn execute_raw_measures_real_duration_ms_not_hardcoded_zero() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, r#"{"results":[]}"#);
+        let slow = SlowTransport(fake);
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            "test-key-12345678",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+        let cred = auth::resolve_api_credential(
+            &auth::CredentialInput {
+                explicit: Some("test-key-12345678".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        let result = execute_raw(
+            &slow,
+            "POST",
+            "/search",
+            &[],
+            serde_json::json!({"query": "hi"}),
+            &cli.globals,
+            &cred,
+        )
+        .unwrap();
+        assert!(
+            result.duration_ms >= 15,
+            "expected duration_ms to reflect the 20ms sleep, got {}",
+            result.duration_ms
+        );
+    }
+
+    #[test]
+    fn execute_raw_trace_file_redacts_credential_and_secret_response_fields() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, r#"{"apiKey":"sk-should-not-leak","id":"key_1"}"#);
+        let dir = std::env::temp_dir().join(format!(
+            "exa-agent-trace-test-{}-{}",
+            std::process::id(),
+            trace_timestamp()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let trace_path = dir.join("trace.jsonl");
+        let credential_value = "test-key-should-not-leak-98765432";
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            credential_value,
+            "--trace",
+            trace_path.to_str().unwrap(),
+            "raw",
+            "POST",
+            "/admin/keys",
+        ])
+        .unwrap();
+        let cred = auth::resolve_api_credential(
+            &auth::CredentialInput {
+                explicit: Some(credential_value.to_string()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap();
+        execute_raw(
+            &fake,
+            "POST",
+            "/admin/keys",
+            &[],
+            serde_json::json!({"name": "ci"}),
+            &cli.globals,
+            &cred,
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&trace_path).expect("--trace file must be written");
+        assert_eq!(contents.lines().count(), 1, "one record per HTTP call");
+        assert!(
+            !contents.contains(credential_value),
+            "the live credential must never appear in a --trace file"
+        );
+        assert!(
+            !contents.contains("sk-should-not-leak"),
+            "a secret-named response field must be redacted in the trace, not just stdout"
+        );
+
+        let record: Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(record["schema"], "exa.cli.trace.v1");
+        assert_eq!(record["method"], "POST");
+        assert!(record["url"].as_str().unwrap().ends_with("/admin/keys"));
+        assert_eq!(record["outcome"]["responseBody"]["apiKey"], "<redacted>");
+        assert_eq!(record["outcome"]["responseBody"]["id"], "key_1");
+        assert!(record["durationMs"].is_u64());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redact_body_bytes_catches_secrets_nested_in_objects_and_arrays() {
+        // A top-level-only redaction pass would miss both of these shapes.
+        let nested = redact_body_bytes(br#"{"nested":{"apiKey":"sk-leak-1"},"id":"ok"}"#);
+        assert_eq!(nested["nested"]["apiKey"], redaction::REDACTED);
+        assert_eq!(nested["id"], "ok");
+
+        let in_array =
+            redact_body_bytes(br#"[{"webhookSecret":"sk-leak-2"},{"name":"safe-item"}]"#);
+        assert_eq!(in_array[0]["webhookSecret"], redaction::REDACTED);
+        assert_eq!(in_array[1]["name"], "safe-item");
+
+        let doubly_nested = redact_body_bytes(br#"{"items":[{"deep":{"secret":"sk-leak-3"}}]}"#);
+        assert_eq!(
+            doubly_nested["items"][0]["deep"]["secret"],
+            redaction::REDACTED
+        );
     }
 }

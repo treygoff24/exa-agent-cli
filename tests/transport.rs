@@ -346,6 +346,7 @@ fn streaming_ndjson_shape_from_canned_sse() {
             count: primary_count(&accumulated),
             data_hash: data_hash(&accumulated),
             retries: 0,
+            duration_ms: 0,
             warnings: &[],
         }))
         .unwrap(),

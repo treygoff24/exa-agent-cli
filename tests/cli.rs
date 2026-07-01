@@ -334,14 +334,22 @@ fn local_sse_stall_server(
 }
 
 fn local_paginated_agent_runs_server() -> (String, thread::JoinHandle<()>) {
+    local_paginated_agent_runs_server_with_bodies([
+        r#"{"data":[{"id":"agent_run_1"}],"hasMore":true,"nextCursor":"cur2"}"#.to_string(),
+        r#"{"data":[{"id":"agent_run_2"}],"hasMore":false,"nextCursor":null}"#.to_string(),
+    ])
+}
+
+/// Same two-page `GET /agent/runs?limit=1[&cursor=cur2]` fixture as
+/// [`local_paginated_agent_runs_server`], with caller-supplied response bodies so tests can
+/// cover cost aggregation and `--max-output-bytes` behavior across pages.
+fn local_paginated_agent_runs_server_with_bodies(
+    responses: [String; 2],
+) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let responses = [
-            r#"{"data":[{"id":"agent_run_1"}],"hasMore":true,"nextCursor":"cur2"}"#,
-            r#"{"data":[{"id":"agent_run_2"}],"hasMore":false,"nextCursor":null}"#,
-        ];
         for (idx, response_body) in responses.iter().enumerate() {
             let started = Instant::now();
             let (mut stream, _) = loop {
@@ -2345,6 +2353,125 @@ fn golden_paginated_all_ndjson() {
     assert_eq!(second["pagination"]["hasMore"], false);
     assert_eq!(second["pagination"]["autoPaginated"], true);
     assert_eq!(second["pagination"]["page"], 2);
+}
+
+#[test]
+fn golden_paginated_all_sums_cost_across_pages() {
+    // response_envelope() derives costDollars from `data`, but the aggregated `--all` envelope
+    // uses only the LAST page's body — without summing, a 2-page pull that cost $0.01 + $0.02
+    // upstream would report $0.02, silently under-billing an agent watching cost while looping.
+    let (base_url, server) = local_paginated_agent_runs_server_with_bodies([
+        r#"{"data":[{"id":"agent_run_1"}],"hasMore":true,"nextCursor":"cur2","costDollars":{"total":0.01}}"#.to_string(),
+        r#"{"data":[{"id":"agent_run_2"}],"hasMore":false,"nextCursor":null,"costDollars":{"total":0.02}}"#.to_string(),
+    ]);
+    let output = run_owned(&[
+        "agent".into(),
+        "runs".into(),
+        "list".into(),
+        "--all".into(),
+        "--limit".into(),
+        "1".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let total = envelope["costDollars"]["total"]
+        .as_f64()
+        .expect("costDollars.total must be a number");
+    assert!(
+        (total - 0.03).abs() < 1e-9,
+        "expected summed cost ~0.03 across both pages, got {total}"
+    );
+}
+
+#[test]
+fn golden_paginated_all_ndjson_applies_output_ceiling_per_page_with_unique_spill_files() {
+    // Two distinct oversized pages in one `--all --ndjson` run must each spill to their OWN
+    // file — a shared/colliding filename would let the second page's spill silently overwrite
+    // the first page's already-printed dataPath.
+    let (base_url, server) = local_paginated_agent_runs_server_with_bodies([
+        format!(
+            r#"{{"data":[{{"id":"agent_run_1","note":"{}"}}],"hasMore":true,"nextCursor":"cur2"}}"#,
+            "a".repeat(200)
+        ),
+        format!(
+            r#"{{"data":[{{"id":"agent_run_2","note":"{}"}}],"hasMore":false,"nextCursor":null}}"#,
+            "b".repeat(200)
+        ),
+    ]);
+    let state_dir =
+        std::env::temp_dir().join(format!("exa-agent-spill-cli-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let output = run_with_env(
+        &[
+            "agent",
+            "runs",
+            "list",
+            "--all",
+            "--limit",
+            "1",
+            "--ndjson",
+            "--max-output-bytes",
+            "80",
+            "--base-url",
+            &base_url,
+            "--api-key",
+            "test-key-abcdef12",
+            "--compact",
+        ],
+        &[("EXA_AGENT_STATE", state_dir.to_str().unwrap())],
+    );
+    server
+        .join()
+        .expect("local pagination test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "stdout:\n{stdout}");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+
+    assert_eq!(first["dataTruncated"], true, "page 1 envelope:\n{first}");
+    assert_eq!(second["dataTruncated"], true, "page 2 envelope:\n{second}");
+    let path1 = first["dataPath"]
+        .as_str()
+        .expect("page 1 dataPath")
+        .to_string();
+    let path2 = second["dataPath"]
+        .as_str()
+        .expect("page 2 dataPath")
+        .to_string();
+    assert_ne!(
+        path1, path2,
+        "each spilled page must get a distinct file, not overwrite the prior one"
+    );
+
+    let spilled1: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path1).unwrap()).unwrap();
+    let spilled2: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path2).unwrap()).unwrap();
+    assert_eq!(spilled1["data"][0]["id"], "agent_run_1");
+    assert_eq!(spilled2["data"][0]["id"], "agent_run_2");
+
+    let _ = std::fs::remove_dir_all(&state_dir);
 }
 
 #[test]

@@ -189,6 +189,7 @@ pub struct ResponseEnvelopeArgs<'a> {
     pub count: Option<u64>,
     pub data_hash: Option<String>,
     pub retries: u32,
+    pub duration_ms: u64,
     pub warnings: &'a [serde_json::Value],
 }
 
@@ -198,6 +199,14 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
     let source_version = args
         .operation
         .map_or(registry::SPEC_VERSION, |op| op.source_version);
+    // "costDollars always present; { total: 0.0 } when upstream reports none" (contracts §4).
+    // Exa's live responses carry a real costDollars object (openapi/exa-openapi.json); pass it
+    // through as-is so an agent sees the same cost breakdown Exa reported, not just the total.
+    let cost_dollars = args
+        .data
+        .get("costDollars")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "total": 0.0 }));
     serde_json::json!({
         "schema": "exa.cli.response.v1",
         "ok": true,
@@ -222,10 +231,10 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         "data": args.data,
         "dataHash": args.data_hash,
         "pagination": null,
-        "costDollars": { "total": 0.0 },
+        "costDollars": cost_dollars,
         "nextActions": [],
         "warnings": args.warnings,
-        "diagnostics": { "durationMs": 0, "retries": args.retries },
+        "diagnostics": { "durationMs": args.duration_ms, "retries": args.retries },
         "dataTruncated": false,
         "dataPath": null,
         "bytes": null,
@@ -316,11 +325,55 @@ fn command_entry(op: &OperationDef) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::unix_epoch_to_rfc3339;
+    use super::{response_envelope, unix_epoch_to_rfc3339, ResponseEnvelopeArgs};
+
+    fn base_args(data: serde_json::Value) -> ResponseEnvelopeArgs<'static> {
+        ResponseEnvelopeArgs {
+            command: "search",
+            method: "POST",
+            path: "/search",
+            operation: None,
+            request_id: "req_test",
+            profile: "default",
+            correlation_id: None,
+            data,
+            count: None,
+            data_hash: None,
+            retries: 0,
+            duration_ms: 0,
+            warnings: &[],
+        }
+    }
 
     #[test]
     fn unix_epoch_timestamp_format_is_reproducible() {
         assert_eq!(unix_epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_epoch_to_rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn cost_dollars_passes_through_real_upstream_value() {
+        let data = serde_json::json!({
+            "results": [],
+            "costDollars": { "total": 0.007, "search": { "neural": 0.007 } }
+        });
+        let envelope = response_envelope(base_args(data));
+        assert_eq!(envelope["costDollars"]["total"], 0.007);
+        assert_eq!(envelope["costDollars"]["search"]["neural"], 0.007);
+    }
+
+    #[test]
+    fn cost_dollars_defaults_to_zero_when_upstream_reports_none() {
+        let data = serde_json::json!({ "results": [] });
+        let envelope = response_envelope(base_args(data));
+        assert_eq!(envelope["costDollars"], serde_json::json!({ "total": 0.0 }));
+    }
+
+    #[test]
+    fn duration_ms_reflects_the_supplied_value_not_a_hardcoded_zero() {
+        let mut args = base_args(serde_json::json!({}));
+        args.duration_ms = 842;
+        let envelope = response_envelope(args);
+        assert_eq!(envelope["diagnostics"]["durationMs"], 842);
     }
 }

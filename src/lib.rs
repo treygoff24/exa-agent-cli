@@ -2311,19 +2311,6 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
     }
 }
 
-fn insert_search_field(
-    body: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    value: serde_json::Value,
-) {
-    let search = body
-        .entry("search".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(obj) = search.as_object_mut() {
-        obj.insert(key.to_string(), value);
-    }
-}
-
 fn websets_body_is_non_empty_object(body: &serde_json::Value) -> bool {
     body.as_object().is_some_and(|object| !object.is_empty())
 }
@@ -2336,17 +2323,6 @@ fn websets_search_has_query(body: &serde_json::Value) -> bool {
         .is_some_and(|query| !query.is_empty())
 }
 
-fn build_websets_create_named_body(args: &WebsetsCreateArgs) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    if let Some(query) = &args.query {
-        insert_search_field(&mut body, "query", serde_json::Value::String(query.clone()));
-    }
-    if let Some(count) = args.count {
-        insert_search_field(&mut body, "count", serde_json::json!(count));
-    }
-    serde_json::Value::Object(body)
-}
-
 fn build_websets_create_spec(
     args: &WebsetsCreateArgs,
     globals: &GlobalArgs,
@@ -2354,9 +2330,12 @@ fn build_websets_create_spec(
     let op = registry::lookup_by_segments(&["websets", "create"])
         .expect("websets create is in registry");
     validate_websets_create_intent_args(args)?;
-    let mut body = build_websets_create_named_body(args);
-    body = apply_request_overrides(body, globals)?;
-    if !websets_body_is_non_empty_object(&body) {
+    let flag_values = [
+        ("query", args.query.clone()),
+        ("count", args.count.map(|count| count.to_string())),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    if !websets_body_is_non_empty_object(&spec.body) {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -2365,7 +2344,7 @@ fn build_websets_create_spec(
             .with_suggestion("exa-agent websets create --query \"SF startups\""),
         ));
     }
-    if body.get("search").is_some() && !websets_search_has_query(&body) {
+    if spec.body.get("search").is_some() && !websets_search_has_query(&spec.body) {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -2374,7 +2353,7 @@ fn build_websets_create_spec(
             .with_suggestion("exa-agent websets create --query \"SF startups\""),
         ));
     }
-    Ok(request::RequestSpec { op, body })
+    Ok(spec)
 }
 
 fn validate_websets_create_intent_args(args: &WebsetsCreateArgs) -> Result<(), CliError> {
@@ -2407,17 +2386,6 @@ fn dispatch_websets_create(
     })
 }
 
-fn build_websets_preview_named_body(args: &WebsetsPreviewArgs) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    if let Some(query) = &args.query {
-        insert_search_field(&mut body, "query", serde_json::Value::String(query.clone()));
-    }
-    if let Some(count) = args.count {
-        insert_search_field(&mut body, "count", serde_json::json!(count));
-    }
-    serde_json::Value::Object(body)
-}
-
 fn build_websets_preview_spec(
     args: &WebsetsPreviewArgs,
     globals: &GlobalArgs,
@@ -2435,9 +2403,13 @@ fn build_websets_preview_spec(
             ),
         ));
     }
-    let body = build_websets_preview_named_body(args);
-    let body = apply_request_overrides(body, globals)?;
-    if !websets_search_has_query(&body) {
+    let flag_values = [
+        // `search` is required upstream, but this validator owns the body/set-aware envelope.
+        ("query", Some(args.query.clone().unwrap_or_default())),
+        ("count", args.count.map(|count| count.to_string())),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    if !websets_search_has_query(&spec.body) {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -2446,7 +2418,7 @@ fn build_websets_preview_spec(
             .with_suggestion("exa-agent websets preview --query \"AI tools\" --count 3"),
         ));
     }
-    Ok(request::RequestSpec { op, body })
+    Ok(spec)
 }
 
 fn websets_preview_query(body: &serde_json::Value) -> Vec<(String, String)> {

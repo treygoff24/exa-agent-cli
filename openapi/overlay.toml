@@ -495,6 +495,27 @@ flag = "end-published-date"
 body_path = "endPublishedDate"
 kind = "str"
 
+[[operations."websets-create".fields]]
+flag = "query"
+body_path = "search.query"
+kind = "str"
+
+[[operations."websets-create".fields]]
+flag = "count"
+body_path = "search.count"
+kind = "int"
+
+[[operations."websets-preview".fields]]
+flag = "query"
+body_path = "search.query"
+kind = "str"
+required = true
+
+[[operations."websets-preview".fields]]
+flag = "count"
+body_path = "search.count"
+kind = "int"
+
 [[operations."getContents".fields]]
 flag = "urls"
 body_path = "urls"

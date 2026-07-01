@@ -2462,6 +2462,23 @@ fn monitor_create_dry_run_builds_nested_body() {
         .unwrap()
         .iter()
         .any(|warning| warning["code"] == "webhook_secret_ephemeral"));
+
+    let create_without_schedule = run_ok_json(&[
+        "monitor",
+        "create",
+        "--query",
+        "AI news",
+        "--webhook-url",
+        "https://example.com/hook",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(
+        create_without_schedule["data"]["request"]["body"]
+            .get("trigger")
+            .is_none(),
+        "absent --schedule must not synthesize a trigger object"
+    );
 }
 
 #[test]

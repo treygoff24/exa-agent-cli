@@ -61,6 +61,29 @@ namespace = "api"
 idempotency_sensitive = true
 secret_capture = { response_field = "webhookSecret", output_flag = "--secret-output", required = false }
 
+[[operations."createMonitor".fields]]
+flag = "name"
+body_path = "name"
+kind = "str"
+
+[[operations."createMonitor".fields]]
+flag = "query"
+body_path = "search.query"
+kind = "str"
+required = true
+
+[[operations."createMonitor".fields]]
+flag = "schedule"
+body_path = "trigger.period"
+kind = "str"
+co_fields = [["trigger.type", "interval"]]
+
+[[operations."createMonitor".fields]]
+flag = "webhook-url"
+body_path = "webhook.url"
+kind = "str"
+required = true
+
 [operations."deleteMonitor"]
 cli_path = "monitor delete"
 namespace = "api"
@@ -92,6 +115,32 @@ namespace = "api"
 [operations."updateMonitor"]
 cli_path = "monitor update"
 namespace = "api"
+
+[[operations."updateMonitor".fields]]
+flag = "name"
+body_path = "name"
+kind = "str"
+
+[[operations."updateMonitor".fields]]
+flag = "query"
+body_path = "search.query"
+kind = "str"
+
+[[operations."updateMonitor".fields]]
+flag = "schedule"
+body_path = "trigger.period"
+kind = "str"
+co_fields = [["trigger.type", "interval"]]
+
+[[operations."updateMonitor".fields]]
+flag = "status"
+body_path = "status"
+kind = "str"
+
+[[operations."updateMonitor".fields]]
+flag = "webhook-url"
+body_path = "webhook.url"
+kind = "str"
 
 [operations."ResearchController_createResearch"]
 cli_path = "research create"

@@ -1769,9 +1769,27 @@ fn build_monitor_create_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["monitor", "create"])
         .expect("monitor create is in registry");
-    let mut body = build_monitor_create_named_body(args);
-    body = apply_request_overrides(body, globals)?;
-    if !monitor_create_has_required_fields(&body) {
+    // `query`/`webhook-url` are `required = true` in the overlay (for OpenAPI parity docs), but the
+    // real gate is the bespoke `monitor_create_has_required_fields` below, which owns the exact
+    // multi-field error envelope. We pass `Some(... .unwrap_or_default())` so build_flag_body never
+    // sees `None` for these fields — that neutralizes the generic per-field required check
+    // (missing input becomes an empty string, which the bespoke check treats as absent). Do NOT
+    // simplify to `args.query.clone()`: that would activate generic validation and emit a different,
+    // earlier error envelope for a missing query.
+    let flag_values = [
+        ("name", args.name.clone()),
+        ("query", Some(args.query.clone().unwrap_or_default())),
+        ("schedule", args.schedule.clone()),
+        (
+            "webhook-url",
+            Some(args.webhook_url.clone().unwrap_or_default()),
+        ),
+    ];
+    let mut spec = build_typed_spec(op, &flag_values, globals)?;
+    if args.schedule.is_some() {
+        preserve_named_schedule_trigger_order(&mut spec.body);
+    }
+    if !monitor_create_has_required_fields(&spec.body) {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -1782,27 +1800,30 @@ fn build_monitor_create_spec(
             ),
         ));
     }
-    Ok(request::RequestSpec { op, body })
+    Ok(spec)
 }
 
-fn build_monitor_create_named_body(args: &MonitorCreateArgs) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    if let Some(name) = &args.name {
-        body.insert("name".to_string(), serde_json::Value::String(name.clone()));
+fn preserve_named_schedule_trigger_order(body: &mut serde_json::Value) {
+    let Some(trigger) = body
+        .get_mut("trigger")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(kind) = trigger.remove("type") else {
+        return;
+    };
+    let Some(period) = trigger.remove("period") else {
+        trigger.insert("type".to_string(), kind);
+        return;
+    };
+
+    let rest = std::mem::take(trigger);
+    trigger.insert("type".to_string(), kind);
+    trigger.insert("period".to_string(), period);
+    for (key, value) in rest {
+        trigger.insert(key, value);
     }
-    if let Some(query) = &args.query {
-        body.insert("search".to_string(), serde_json::json!({ "query": query }));
-    }
-    if let Some(schedule) = &args.schedule {
-        body.insert(
-            "trigger".to_string(),
-            serde_json::json!({ "type": "interval", "period": schedule }),
-        );
-    }
-    if let Some(url) = &args.webhook_url {
-        body.insert("webhook".to_string(), serde_json::json!({ "url": url }));
-    }
-    serde_json::Value::Object(body)
 }
 
 fn monitor_create_has_required_fields(body: &serde_json::Value) -> bool {
@@ -2053,33 +2074,22 @@ fn build_monitor_update_spec(
     fields: MonitorUpdateFields<'_>,
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
-    let mut body = serde_json::Map::new();
-    if let Some(name) = fields.name {
-        body.insert(
-            "name".to_string(),
-            serde_json::Value::String(name.to_string()),
-        );
+    let flag_values = [
+        ("name", fields.name.map(str::to_string)),
+        ("query", fields.query.map(str::to_string)),
+        ("schedule", fields.schedule.map(str::to_string)),
+        ("status", fields.status.map(str::to_string)),
+        ("webhook-url", fields.webhook_url.map(str::to_string)),
+    ];
+    let mut spec = build_typed_spec(op, &flag_values, globals)?;
+    if fields.schedule.is_some() {
+        preserve_named_schedule_trigger_order(&mut spec.body);
     }
-    if let Some(query) = fields.query {
-        body.insert("search".to_string(), serde_json::json!({ "query": query }));
-    }
-    if let Some(schedule) = fields.schedule {
-        body.insert(
-            "trigger".to_string(),
-            serde_json::json!({ "type": "interval", "period": schedule }),
-        );
-    }
-    if let Some(status) = fields.status {
-        body.insert(
-            "status".to_string(),
-            serde_json::Value::String(status.to_string()),
-        );
-    }
-    if let Some(url) = fields.webhook_url {
-        body.insert("webhook".to_string(), serde_json::json!({ "url": url }));
-    }
-    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
-    if body.as_object().is_some_and(|object| object.is_empty()) {
+    if spec
+        .body
+        .as_object()
+        .is_some_and(|object| object.is_empty())
+    {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -2088,7 +2098,7 @@ fn build_monitor_update_spec(
             .with_suggestion("exa-agent monitor update <id> --status paused"),
         ));
     }
-    Ok(request::RequestSpec { op, body })
+    Ok(spec)
 }
 
 fn dispatch_monitor_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {

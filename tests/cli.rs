@@ -46,15 +46,21 @@ fn run_owned(args: &[String]) -> Output {
 }
 
 fn command(args: &[&str]) -> ProcessCommand {
+    // Isolate from the developer's real ~/.config: default config/creds to paths that do not
+    // exist so tests start from clean defaults, not whatever is in the user's config. Tests
+    // that need a config/creds file set EXA_AGENT_CONFIG/EXA_AGENT_CREDENTIALS explicitly,
+    // which overrides these. Without this, a `profiles.default.api_key_env` in the real config
+    // would silently change which env var credential resolution reads.
+    let isolated = std::env::temp_dir().join(format!("exa-agent-hermetic-{}", std::process::id()));
     let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_exa-agent"));
     cmd.args(args)
         .env_remove("EXA_OUTPUT")
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")
         .env_remove("EXA_ADMIN_BASE_URL")
-        .env_remove("EXA_AGENT_CREDENTIALS")
-        .env_remove("EXA_AGENT_CONFIG")
-        .env_remove("EXA_PROFILE");
+        .env_remove("EXA_PROFILE")
+        .env("EXA_AGENT_CONFIG", isolated.join("config.toml"))
+        .env("EXA_AGENT_CREDENTIALS", isolated.join("credentials.json"));
     cmd
 }
 
@@ -621,7 +627,8 @@ fn auth_test_dry_run_previews_without_touching_network() {
     assert_eq!(output.status.code(), Some(0));
     let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(stdout["dryRun"], true);
-    assert_eq!(stdout["endpoint"], "/v0/teams/me");
+    assert_eq!(stdout["endpoint"], "/search");
+    assert_eq!(stdout["method"], "POST");
     // Proof it never reached the network: no upstream HTTP status / HTML body leaked in.
     let raw = String::from_utf8_lossy(&output.stdout);
     assert!(!raw.contains("httpStatus") && !raw.contains("DOCTYPE"));
@@ -812,6 +819,58 @@ fn config_set_get_roundtrip_uses_config_override() {
     let json: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
     assert_eq!(json["schema"], "exa.cli.config_get.v1");
     assert_eq!(json["value"], "https://example.com");
+}
+
+#[test]
+fn credential_env_var_name_follows_profile_api_key_env() {
+    // A profile's api_key_env names the env var the CLI reads; the global EXA_API_KEY is
+    // ignored when a different var is named. Exercises the real from_env + Config::load path.
+    let dir = temp_path("api-key-env");
+    let config = dir.join("config.toml");
+    fs::write(
+        &config,
+        "[profiles.default]\napi_key_env = \"MY_CUSTOM_EXA_KEY\"\n",
+    )
+    .unwrap();
+    let output = run_with_env(
+        &["auth", "status", "--compact"],
+        &[
+            ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+            ("MY_CUSTOM_EXA_KEY", "exakey-custom-1234"),
+            ("EXA_API_KEY", "exakey-ignored-9999"),
+        ],
+    );
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["source"], "MY_CUSTOM_EXA_KEY");
+    assert_eq!(json["last4"], "1234");
+}
+
+#[test]
+fn credential_resolution_honors_active_profile_for_env_var() {
+    // With no --profile/EXA_PROFILE, credential resolution must follow active_profile the same
+    // way base-url resolution does — otherwise a switched profile silently reads the wrong key.
+    let dir = temp_path("active-profile-key");
+    let config = dir.join("config.toml");
+    fs::write(
+        &config,
+        "active_profile = \"work\"\n\n[profiles.work]\napi_key_env = \"WORK_EXA_KEY\"\n",
+    )
+    .unwrap();
+    let output = run_with_env(
+        &["auth", "status", "--compact"],
+        &[
+            ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+            ("WORK_EXA_KEY", "exakey-work-5678"),
+        ],
+    );
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["source"], "WORK_EXA_KEY");
+    assert_eq!(json["profile"], "work");
+    assert_eq!(json["last4"], "5678");
 }
 
 #[test]

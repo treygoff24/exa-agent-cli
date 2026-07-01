@@ -228,7 +228,10 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 online: args.online,
                 checks,
             };
-            let ctx = doctor::DoctorCtx::from_process();
+            let mut ctx = doctor::DoctorCtx::from_process();
+            if options.online {
+                ctx.online_probes = Some(run_doctor_online_probes(&cli.globals));
+            }
             let report = doctor::run_doctor(&options, &ctx);
             emit_stdout(&report.to_json(), pretty);
             Ok(doctor::doctor_exit_code(&report))
@@ -5432,7 +5435,9 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "ok": true,
                     "authenticated": authenticated,
                     "source": source,
-                    "profile": auth::resolve_profile(globals.profile.as_deref(), std::env::var("EXA_PROFILE").ok().as_deref()),
+                    // `from_env` already resolved the effective profile (honoring active_profile),
+                    // so report that rather than recomputing without config context.
+                    "profile": api_input.profile.clone().unwrap_or_else(|| "default".to_string()),
                     "keyFingerprint": key_fingerprint,
                     "last4": last4,
                     "canAdmin": can_admin,
@@ -5480,19 +5485,45 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
     }
 }
 
+/// Run the networked doctor detectors. Config problems are reported by the `config.parse`
+/// detector, so they must not corrupt these results: config is loaded best-effort, the base
+/// URL and timeout fall back to defaults, and the auth probe runs whenever a credential
+/// resolves (which tolerates a broken config the same way real commands do). Connectivity
+/// needs no key; auth is `None` only when no credential resolves at all.
+fn run_doctor_online_probes(globals: &GlobalArgs) -> doctor::OnlineProbes {
+    let cfg = config::Config::load().unwrap_or_default();
+    let base_url =
+        transport::resolve_base_url_for_namespace(globals, &cfg, auth::CredentialNamespace::Api)
+            .unwrap_or_else(|_| config::DEFAULT_BASE_URL.to_string());
+    let timeout =
+        transport::resolve_timeout(globals, &cfg).unwrap_or_else(|_| Duration::from_secs(30));
+    let transport = UreqTransport::new(timeout);
+    let connectivity =
+        transport::probe_connectivity(&transport, &base_url).map_err(|e| e.diag().message.clone());
+    let auth = credential_input(auth::CredentialNamespace::Api, globals)
+        .ok()
+        .and_then(|input| auth::resolve_api_credential(&input, &auth::NoopKeyring).ok())
+        .map(|cred| {
+            transport::probe_auth(&transport, &base_url, &cred.secret)
+                .map_err(|e| e.diag().message.clone())
+        });
+    doctor::OnlineProbes { connectivity, auth }
+}
+
 fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["team", "info"]).expect("team info is in the registry");
+    // The probe is a billing-free `POST /search` with an empty body: Exa validates auth before
+    // the body, so a bad key returns 401/403 and a good key returns 400 without running a search.
+    const PROBE_ENDPOINT: &str = "/search";
     // Honor the universal contract: --dry-run/--print-request never touch the network.
-    // `auth test` makes a live probe, so a preview just describes the request it would send.
     if globals.print_request || globals.dry_run {
         emit_stdout(
             &serde_json::json!({
                 "schema": "exa.cli.auth_test.v1",
                 "ok": true,
                 "dryRun": true,
-                "method": op.method.as_str(),
-                "endpoint": op.api_path,
-                "note": "auth test makes a live authenticated request to verify the credential; run without --dry-run to probe.",
+                "method": "POST",
+                "endpoint": PROBE_ENDPOINT,
+                "note": "auth test verifies the credential with a billing-free validation probe (empty POST /search); run without --dry-run to probe.",
             }),
             pretty,
         );
@@ -5503,36 +5534,41 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
     reject_mismatched_credential_scope(&credential)?;
     let cfg = config::Config::load()?;
+    let base_url =
+        transport::resolve_base_url_for_namespace(globals, &cfg, auth::CredentialNamespace::Api)?;
     let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
-    let request_id = transport::new_request_id();
-    let result = execute_raw_with_request_id(
-        &transport,
-        RawExecuteParams {
-            method: op.method.as_str(),
-            path: op.api_path,
-            query_raw: &[],
-            body: serde_json::Value::Null,
-            globals,
-            credential: &credential,
-            request_id: request_id.clone(),
-        },
-    )?;
-    let mut data = transport::parse_response_data(&result.response.body);
-    redaction::redact_json_value(&mut data);
-    emit_stdout(
-        &serde_json::json!({
-            "schema": "exa.cli.auth_test.v1",
-            "ok": true,
-            "authenticated": true,
-            "source": credential.source.label(),
-            "profile": credential.profile,
-            "endpoint": op.api_path,
-            "team": data,
-        }),
-        pretty,
-    );
-    Ok(0)
+    match transport::probe_auth(&transport, &base_url, &credential.secret)? {
+        transport::AuthProbe::Accepted { status } => {
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.auth_test.v1",
+                    "ok": true,
+                    "authenticated": true,
+                    "source": credential.source.label(),
+                    "profile": credential.profile,
+                    "endpoint": PROBE_ENDPOINT,
+                    "httpStatus": status,
+                }),
+                pretty,
+            );
+            Ok(0)
+        }
+        transport::AuthProbe::Rejected { status } => Err(CliError::Auth(
+            crate::error::Diag::new(
+                "not_authenticated",
+                format!("credential rejected upstream (HTTP {status})"),
+            )
+            .with_suggestion("exa-agent auth login"),
+        )),
+        transport::AuthProbe::Inconclusive { status } => Err(CliError::Upstream(
+            crate::error::Diag::new(
+                "probe_inconclusive",
+                format!("could not verify credential; upstream returned HTTP {status}"),
+            )
+            .with_suggestion("exa-agent auth test"),
+        )),
+    }
 }
 
 fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {

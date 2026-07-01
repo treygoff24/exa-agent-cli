@@ -3,6 +3,7 @@
 //! This module is deliberately dispatcher-free: parent code chooses the namespace, supplies
 //! one-shot stdin when present, and wires any real OS keyring implementation.
 
+use crate::config::Config;
 use crate::error::{CliError, Diag};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fmt;
@@ -124,7 +125,7 @@ impl CredentialNamespace {
 pub enum CredentialSource {
     Explicit,
     Stdin,
-    Env(&'static str),
+    Env(String),
     CredentialFile { path: String },
     Keyring { service: String },
 }
@@ -134,7 +135,7 @@ impl CredentialSource {
         match self {
             Self::Explicit => "explicit".to_string(),
             Self::Stdin => "stdin".to_string(),
-            Self::Env(name) => (*name).to_string(),
+            Self::Env(name) => name.clone(),
             Self::CredentialFile { path } => format!("file:{path}"),
             Self::Keyring { service } => format!("keyring:{service}"),
         }
@@ -239,6 +240,9 @@ pub struct CredentialInput {
     pub explicit: Option<String>,
     pub stdin: Option<String>,
     pub env: Option<String>,
+    /// The env var name `env` was read from. `None` means the namespace default
+    /// (`EXA_API_KEY`/`EXA_SERVICE_KEY`); `Some` carries a profile's `api_key_env`.
+    pub env_var_name: Option<String>,
     pub credential_file: Option<String>,
     pub credential_file_path: Option<String>,
 }
@@ -250,12 +254,32 @@ impl CredentialInput {
         stdin: Option<String>,
         ns: CredentialNamespace,
     ) -> Self {
+        let env_profile = std::env::var("EXA_PROFILE").ok();
+        let config = Config::load().ok();
+        // Select the profile the same way base-url resolution does: explicit --profile / EXA_PROFILE,
+        // else the config's active_profile, else "default". Config load failures fall back to the
+        // explicit selection (a broken config surfaces via `doctor`/`config`, not here).
+        let selected = clean(profile.as_deref()).or_else(|| clean(env_profile.as_deref()));
+        let profile_name = match &config {
+            Some(cfg) => cfg.effective_profile_name(selected),
+            None => selected.unwrap_or(DEFAULT_PROFILE).to_string(),
+        };
+        let env_var_name = config
+            .as_ref()
+            .and_then(|cfg| match ns {
+                CredentialNamespace::Api => cfg.api_key_env_for_profile(&profile_name),
+                CredentialNamespace::Service => cfg.service_key_env_for_profile(&profile_name),
+            })
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| ns.env_var().to_string());
         Self {
-            profile,
-            env_profile: std::env::var("EXA_PROFILE").ok(),
+            profile: Some(profile_name),
+            env_profile,
             explicit,
             stdin,
-            env: std::env::var(ns.env_var()).ok(),
+            env: std::env::var(&env_var_name).ok(),
+            env_var_name: Some(env_var_name),
             credential_file: credential_file_value(ns).ok().flatten(),
             credential_file_path: Some(credentials_path().display().to_string()),
         }
@@ -527,12 +551,16 @@ pub fn resolve_credential<K: Keyring>(
         return Ok(found(namespace, profile, CredentialSource::Stdin, secret));
     }
 
-    checked.push(namespace.env_var().to_string());
+    let env_var_name = input
+        .env_var_name
+        .clone()
+        .unwrap_or_else(|| namespace.env_var().to_string());
+    checked.push(env_var_name.clone());
     if let Some(secret) = input.env.as_deref().and_then(Secret::new) {
         return Ok(found(
             namespace,
             profile,
-            CredentialSource::Env(namespace.env_var()),
+            CredentialSource::Env(env_var_name),
             secret,
         ));
     }

@@ -3,10 +3,34 @@
 use exa_agent_cli::config::Config;
 use exa_agent_cli::doctor::{
     doctor_exit_code, run_doctor, validate_check_ids, DoctorCtx, DoctorOptions, DoctorStatus,
-    FindingStatus,
+    FindingStatus, OnlineProbes,
 };
+use exa_agent_cli::transport::AuthProbe;
 use std::fs;
 use std::path::PathBuf;
+
+fn online_ctx(name: &str, probes: OnlineProbes) -> DoctorCtx {
+    let path = temp_config_path(name);
+    fs::write(&path, "base_url = \"https://api.exa.ai\"\n").unwrap();
+    DoctorCtx {
+        config_path: path.clone(),
+        config_load: Config::load_from_path(&path),
+        api_key: Some("exa-test".to_string()),
+        service_key: None,
+        stdout_is_tty: false,
+        expected_spec_sha256: None,
+        online_probes: Some(probes),
+    }
+}
+
+fn finding_status(report: &exa_agent_cli::doctor::DoctorReport, id: &str) -> FindingStatus {
+    report
+        .findings
+        .iter()
+        .find(|f| f.id == id)
+        .unwrap_or_else(|| panic!("missing finding {id}"))
+        .status
+}
 
 fn temp_config_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -29,6 +53,7 @@ fn doctor_healthy_when_config_and_key_ok() {
         service_key: None,
         stdout_is_tty: false,
         expected_spec_sha256: None,
+        online_probes: None,
     };
     let report = run_doctor(&DoctorOptions::default(), &ctx);
     assert_eq!(report.status, DoctorStatus::Healthy);
@@ -48,6 +73,7 @@ fn doctor_findings_when_config_malformed() {
         service_key: None,
         stdout_is_tty: false,
         expected_spec_sha256: None,
+        online_probes: None,
     };
     let report = run_doctor(&DoctorOptions::default(), &ctx);
     assert_eq!(report.status, DoctorStatus::Findings);
@@ -71,6 +97,7 @@ fn doctor_service_key_scope_finding() {
         service_key: Some("exa-not-a-service-key".to_string()),
         stdout_is_tty: false,
         expected_spec_sha256: None,
+        online_probes: None,
     };
     let report = run_doctor(&DoctorOptions::default(), &ctx);
     assert_eq!(report.status, DoctorStatus::Findings);
@@ -88,6 +115,7 @@ fn doctor_warn_findings_make_report_non_healthy() {
         service_key: None,
         stdout_is_tty: false,
         expected_spec_sha256: None,
+        online_probes: None,
     };
     let report = run_doctor(
         &DoctorOptions {
@@ -119,11 +147,72 @@ fn doctor_report_serializes_contract_fields() {
         service_key: None,
         stdout_is_tty: false,
         expected_spec_sha256: None,
+        online_probes: None,
     };
     let report = run_doctor(&DoctorOptions::default(), &ctx);
     let json = report.to_json();
     assert_eq!(json["schema"], "exa.cli.doctor.v1");
     assert!(json["findings"].is_array());
+}
+
+#[test]
+fn doctor_online_reports_reachable_host_and_accepted_credential() {
+    let ctx = online_ctx(
+        "online-ok",
+        OnlineProbes {
+            connectivity: Ok(404),
+            auth: Some(Ok(AuthProbe::Accepted { status: 400 })),
+        },
+    );
+    let report = run_doctor(
+        &DoctorOptions {
+            online: true,
+            checks: vec![],
+        },
+        &ctx,
+    );
+    assert_eq!(finding_status(&report, "connectivity"), FindingStatus::Ok);
+    assert_eq!(finding_status(&report, "auth.online"), FindingStatus::Ok);
+}
+
+#[test]
+fn doctor_online_flags_unreachable_host_and_rejected_credential() {
+    let ctx = online_ctx(
+        "online-bad",
+        OnlineProbes {
+            connectivity: Err("dns failure".to_string()),
+            auth: Some(Ok(AuthProbe::Rejected { status: 401 })),
+        },
+    );
+    let report = run_doctor(
+        &DoctorOptions {
+            online: true,
+            checks: vec![],
+        },
+        &ctx,
+    );
+    assert_eq!(report.status, DoctorStatus::Findings);
+    assert_eq!(finding_status(&report, "connectivity"), FindingStatus::Fail);
+    assert_eq!(finding_status(&report, "auth.online"), FindingStatus::Fail);
+}
+
+#[test]
+fn doctor_online_auth_skips_when_no_credential_resolves() {
+    let ctx = online_ctx(
+        "online-nokey",
+        OnlineProbes {
+            connectivity: Ok(404),
+            auth: None,
+        },
+    );
+    let report = run_doctor(
+        &DoctorOptions {
+            online: true,
+            checks: vec![],
+        },
+        &ctx,
+    );
+    assert_eq!(finding_status(&report, "auth.online"), FindingStatus::Skip);
 }
 
 #[test]
@@ -137,6 +226,7 @@ fn doctor_skips_online_detectors_by_default() {
         service_key: None,
         stdout_is_tty: false,
         expected_spec_sha256: None,
+        online_probes: None,
     };
     let report = run_doctor(&DoctorOptions::default(), &ctx);
     let connectivity = report

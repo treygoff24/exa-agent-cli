@@ -356,6 +356,30 @@ impl Config {
             .and_then(|name| self.profiles.get(name))
             .or_else(|| self.active_profile())
     }
+
+    /// The effective profile *name* for a selection: explicit choice, else `active_profile`,
+    /// else `"default"`. Credential resolution uses this so a profile's key follows the same
+    /// selection as its base URL (which resolves through [`Self::selected_profile`]).
+    pub fn effective_profile_name(&self, selected: Option<&str>) -> String {
+        selected
+            .map(str::to_string)
+            .or_else(|| self.active_profile.clone())
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// The env var a profile reads its API key from, if it sets one.
+    pub fn api_key_env_for_profile(&self, profile: &str) -> Option<&str> {
+        self.profiles
+            .get(profile)
+            .and_then(|p| p.api_key_env.as_deref())
+    }
+
+    /// The env var a profile reads its service key from, if it sets one.
+    pub fn service_key_env_for_profile(&self, profile: &str) -> Option<&str> {
+        self.profiles
+            .get(profile)
+            .and_then(|p| p.service_key_env.as_deref())
+    }
 }
 
 fn profile_to_json(profile: &ProfileConfig) -> serde_json::Value {

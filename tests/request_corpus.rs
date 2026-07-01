@@ -172,8 +172,18 @@ fn run_preview(entry: &CorpusEntry) -> Output {
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")
         .env_remove("EXA_ADMIN_BASE_URL")
-        .env_remove("EXA_AGENT_CREDENTIALS")
-        .env_remove("EXA_AGENT_CONFIG")
+        .env(
+            "EXA_AGENT_CONFIG",
+            std::env::temp_dir()
+                .join(format!("exa-agent-hermetic-{}", std::process::id()))
+                .join("config.toml"),
+        )
+        .env(
+            "EXA_AGENT_CREDENTIALS",
+            std::env::temp_dir()
+                .join(format!("exa-agent-hermetic-{}", std::process::id()))
+                .join("credentials.json"),
+        )
         .env_remove("EXA_PROFILE");
     for (key, value) in &entry.env {
         cmd.env(key, value);

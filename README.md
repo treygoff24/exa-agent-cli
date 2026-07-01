@@ -74,7 +74,7 @@ exa-agent doctor                # read-only health checks (add --online for a li
 - **Research** — `research create|get|list` (the `/research/v1` API).
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
 - **Websets** — the full tree: websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events.
-- **Team and admin** — `team info` for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host.
+- **Team and admin** — `team info` models Exa's documented `/v0/teams/me` endpoint, which upstream does not yet serve (it returns `not_found` until Exa ships it); `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, plus `auth` and `config`, and the `ask`/`fetch` convenience macros.
 

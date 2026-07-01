@@ -19,8 +19,18 @@ fn run(args: &[&str]) -> Output {
         .env("EXA_API_KEY", "test-fake-key")
         .env_remove("EXA_SERVICE_KEY")
         .env_remove("EXA_ADMIN_BASE_URL")
-        .env_remove("EXA_AGENT_CREDENTIALS")
-        .env_remove("EXA_AGENT_CONFIG")
+        .env(
+            "EXA_AGENT_CONFIG",
+            std::env::temp_dir()
+                .join(format!("exa-agent-hermetic-{}", std::process::id()))
+                .join("config.toml"),
+        )
+        .env(
+            "EXA_AGENT_CREDENTIALS",
+            std::env::temp_dir()
+                .join(format!("exa-agent-hermetic-{}", std::process::id()))
+                .join("credentials.json"),
+        )
         .env_remove("EXA_PROFILE");
     cmd.output()
         .unwrap_or_else(|e| panic!("failed to run exa-agent {args:?}: {e}"))

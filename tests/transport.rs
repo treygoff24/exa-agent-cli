@@ -1,13 +1,62 @@
 //! Transport seam tests (Wave 1D): fake transport, retry policy, header refusal.
 
 use clap::Parser;
-use exa_agent_cli::auth::{self, CredentialInput, NoopKeyring};
+use exa_agent_cli::auth::{self, CredentialInput, NoopKeyring, Secret};
 use exa_agent_cli::cli::GlobalArgs;
-use exa_agent_cli::error::CliError;
+use exa_agent_cli::error::{CliError, Diag};
 use exa_agent_cli::transport::{
-    build_url, classify_http_status, execute_raw, parse_user_headers, send_with_retry,
-    FakeTransport, HttpRequest, SendOptions,
+    build_url, classify_http_status, execute_raw, parse_user_headers, probe_auth,
+    probe_connectivity, send_with_retry, AuthProbe, FakeTransport, HttpRequest, SendOptions,
 };
+
+#[test]
+fn probe_auth_classifies_credential_by_status_without_billing() {
+    let secret = Secret::new("exa-probe-key-123456").unwrap();
+
+    // 400 INVALID_REQUEST_BODY: auth passed, the empty body failed validation, no search ran.
+    let ok = FakeTransport::default();
+    ok.push_ok_json(400, r#"{"tag":"INVALID_REQUEST_BODY"}"#);
+    assert_eq!(
+        probe_auth(&ok, "https://api.exa.ai", &secret).unwrap(),
+        AuthProbe::Accepted { status: 400 }
+    );
+    let req = &ok.recorded_requests()[0];
+    assert_eq!(req.method, "POST");
+    assert!(req.url.ends_with("/search"));
+    assert_eq!(req.body.as_deref(), Some(&b"{}"[..]));
+    assert!(req.headers.iter().any(|(k, _)| k == "x-api-key"));
+
+    // 401 INVALID_API_KEY: rejected upstream.
+    let rejected = FakeTransport::default();
+    rejected.push_ok_json(401, r#"{"tag":"INVALID_API_KEY"}"#);
+    assert_eq!(
+        probe_auth(&rejected, "https://api.exa.ai", &secret).unwrap(),
+        AuthProbe::Rejected { status: 401 }
+    );
+
+    // 503 outage: says nothing about the key — must NOT report a valid credential.
+    let outage = FakeTransport::default();
+    outage.push_ok_json(503, "service unavailable");
+    assert_eq!(
+        probe_auth(&outage, "https://api.exa.ai", &secret).unwrap(),
+        AuthProbe::Inconclusive { status: 503 }
+    );
+}
+
+#[test]
+fn probe_connectivity_ok_on_any_status_fails_only_on_transport_error() {
+    // Even an unrouted 404 proves DNS+TLS+reachability.
+    let reachable = FakeTransport::default();
+    reachable.push_ok_json(404, "not found");
+    assert_eq!(
+        probe_connectivity(&reachable, "https://api.exa.ai").unwrap(),
+        404
+    );
+
+    let down = FakeTransport::default();
+    down.push_err(CliError::Network(Diag::new("network", "dns failure")));
+    assert!(probe_connectivity(&down, "https://api.exa.ai").is_err());
+}
 
 #[test]
 fn user_headers_allow_non_secret_and_refuse_auth() {

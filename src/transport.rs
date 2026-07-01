@@ -634,6 +634,64 @@ fn inject_auth_headers(headers: &mut Vec<(String, String)>, secret: &Secret) {
     headers.push(("x-api-key".to_string(), secret.expose().to_string()));
 }
 
+/// Outcome of the online auth probe (arch §9, `doctor --online` / `auth test`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthProbe {
+    /// Upstream authenticated the key (2xx or the expected 400/422 body-validation failure).
+    Accepted { status: u16 },
+    /// Upstream rejected the credential (401/403).
+    Rejected { status: u16 },
+    /// The response neither confirms nor denies the key — a 5xx outage, a 429, or any other
+    /// unexpected status. Reported as inconclusive rather than a false "valid".
+    Inconclusive { status: u16 },
+}
+
+/// Verify a credential upstream without spending anything. Exa validates auth *before* the
+/// request body, so `POST /search` with an empty body returns 401/403 for a bad key and 400
+/// (`INVALID_REQUEST_BODY`) for a good one — no search runs, so nothing is billed. This is the
+/// single probe path shared by `auth test` and `doctor --online`; do not add a second.
+pub fn probe_auth<T: Transport>(
+    transport: &T,
+    base_url: &str,
+    secret: &Secret,
+) -> Result<AuthProbe, CliError> {
+    let url = build_url(base_url, "/search", &[])?;
+    let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+    inject_auth_headers(&mut headers, secret);
+    let req = HttpRequest {
+        method: "POST".to_string(),
+        url,
+        headers,
+        body: Some(b"{}".to_vec()),
+    };
+    let resp = transport.send(&req)?;
+    Ok(match resp.status {
+        401 | 403 => AuthProbe::Rejected {
+            status: resp.status,
+        },
+        // Auth passed: a 2xx, or the expected body-validation failure for the empty `{}`.
+        200..=299 | 400 | 422 => AuthProbe::Accepted {
+            status: resp.status,
+        },
+        // 5xx / 429 / anything else says nothing definite about the key's validity.
+        status => AuthProbe::Inconclusive { status },
+    })
+}
+
+/// Prove the base host is reachable: DNS resolves, TLS handshakes, an HTTP response comes back.
+/// Any status counts (the unrouted `GET /search` returns 404 and that is fine); only a
+/// transport-level failure — DNS, TLS, timeout, connection refused — is a connectivity failure.
+pub fn probe_connectivity<T: Transport>(transport: &T, base_url: &str) -> Result<u16, CliError> {
+    let url = build_url(base_url, "/search", &[])?;
+    let req = HttpRequest {
+        method: "GET".to_string(),
+        url,
+        headers: Vec::new(),
+        body: None,
+    };
+    transport.send(&req).map(|resp| resp.status)
+}
+
 pub fn new_request_id() -> String {
     let epoch = std::env::var("SOURCE_DATE_EPOCH")
         .ok()

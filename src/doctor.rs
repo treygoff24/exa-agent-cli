@@ -9,6 +9,17 @@ use crate::config::{self, Config};
 use crate::error::CliError;
 use crate::redaction;
 use crate::registry::{BUILD_DATE, EMBEDDED_SPEC_SHA256, GIT_SHA, SPEC_VERSION, TARGET};
+use crate::transport::AuthProbe;
+
+/// Results of the networked probes, computed by dispatch when `--online` is set and injected
+/// into [`DoctorCtx`] so the detectors stay pure. `None` on a field means "not probed".
+#[derive(Debug)]
+pub struct OnlineProbes {
+    /// `Ok(status)` if the base host answered; `Err(message)` on a transport-level failure.
+    pub connectivity: Result<u16, String>,
+    /// `None` when no credential resolved (nothing to test); else the auth-probe outcome.
+    pub auth: Option<Result<AuthProbe, String>>,
+}
 
 pub const DOCTOR_SCHEMA: &str = "exa.cli.doctor.v1";
 
@@ -41,6 +52,8 @@ pub struct DoctorCtx {
     pub stdout_is_tty: bool,
     /// When set (tests), `spec.hash` compares against this instead of always passing.
     pub expected_spec_sha256: Option<String>,
+    /// Populated by dispatch when `--online`; `None` offline. Detectors read, never probe.
+    pub online_probes: Option<OnlineProbes>,
 }
 
 impl DoctorCtx {
@@ -60,6 +73,7 @@ impl DoctorCtx {
             }),
             stdout_is_tty: crate::output::stdout_is_tty(),
             expected_spec_sha256: None,
+            online_probes: None,
         }
     }
 
@@ -383,16 +397,44 @@ fn detect_tty_discipline(ctx: &DoctorCtx) -> Finding {
     }
 }
 
-fn detect_auth_online(options: &DoctorOptions, _ctx: &DoctorCtx) -> Finding {
+fn detect_auth_online(options: &DoctorOptions, ctx: &DoctorCtx) -> Finding {
     if !options.online {
         return skipped_online("auth.online");
     }
+    let probe = ctx.online_probes.as_ref().and_then(|p| p.auth.as_ref());
+    let (status, message, suggested) = match probe {
+        Some(Ok(AuthProbe::Accepted { status })) => (
+            FindingStatus::Ok,
+            format!("credential accepted upstream (HTTP {status})"),
+            None,
+        ),
+        Some(Ok(AuthProbe::Rejected { status })) => (
+            FindingStatus::Fail,
+            format!("credential rejected upstream (HTTP {status})"),
+            Some("exa-agent auth login".to_string()),
+        ),
+        Some(Ok(AuthProbe::Inconclusive { status })) => (
+            FindingStatus::Warn,
+            format!("could not verify credential; upstream returned HTTP {status}"),
+            Some("exa-agent doctor --online".to_string()),
+        ),
+        Some(Err(err)) => (
+            FindingStatus::Warn,
+            format!("auth probe could not complete: {err}"),
+            Some("exa-agent doctor --online".to_string()),
+        ),
+        None => (
+            FindingStatus::Skip,
+            "no credential resolved to probe (see key.present)".to_string(),
+            Some("exa-agent auth login".to_string()),
+        ),
+    };
     Finding {
         id: "auth.online",
-        status: FindingStatus::Skip,
+        status,
         category: "auth",
-        message: "online auth probe not wired in this build".to_string(),
-        suggested_command: Some("exa-agent auth test".to_string()),
+        message,
+        suggested_command: suggested,
     }
 }
 
@@ -405,12 +447,29 @@ fn detect_connectivity(options: &DoctorOptions, ctx: &DoctorCtx) -> Finding {
         .as_ref()
         .map(|cfg| cfg.effective_base_url().to_string())
         .unwrap_or_else(|_| config::DEFAULT_BASE_URL.to_string());
+    let (status, message, suggested) = match ctx.online_probes.as_ref().map(|p| &p.connectivity) {
+        Some(Ok(http_status)) => (
+            FindingStatus::Ok,
+            format!("`{base}` reachable (HTTP {http_status})"),
+            None,
+        ),
+        Some(Err(err)) => (
+            FindingStatus::Fail,
+            format!("cannot reach `{base}`: {err}"),
+            Some("exa-agent doctor --online".to_string()),
+        ),
+        None => (
+            FindingStatus::Skip,
+            format!("connectivity to `{base}` was not probed"),
+            Some("exa-agent doctor --online".to_string()),
+        ),
+    };
     Finding {
         id: "connectivity",
-        status: FindingStatus::Skip,
+        status,
         category: "network",
-        message: format!("connectivity check for `{base}` not wired in this build"),
-        suggested_command: Some("exa-agent doctor --online".to_string()),
+        message,
+        suggested_command: suggested,
     }
 }
 

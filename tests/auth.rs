@@ -95,7 +95,10 @@ fn source_precedence_is_flag_then_stdin_then_env_then_keyring() {
         &keyring,
     )
     .unwrap();
-    assert_eq!(from_env.source, CredentialSource::Env("EXA_API_KEY"));
+    assert_eq!(
+        from_env.source,
+        CredentialSource::Env("EXA_API_KEY".to_string())
+    );
     assert_eq!(from_env.secret.last4(), "3333");
 
     let from_file = resolve_api_credential(
@@ -161,8 +164,52 @@ fn api_and_service_scopes_use_distinct_env_and_keyring_namespaces() {
         &NoopKeyring,
     )
     .unwrap();
-    assert_eq!(api_env.source, CredentialSource::Env("EXA_API_KEY"));
-    assert_eq!(service_env.source, CredentialSource::Env("EXA_SERVICE_KEY"));
+    assert_eq!(
+        api_env.source,
+        CredentialSource::Env("EXA_API_KEY".to_string())
+    );
+    assert_eq!(
+        service_env.source,
+        CredentialSource::Env("EXA_SERVICE_KEY".to_string())
+    );
+}
+
+#[test]
+fn profile_env_var_name_is_reported_and_falls_through_when_unset() {
+    // A profile's `api_key_env` names a custom var: when set, the source label reflects
+    // that name (not the default); when empty, the env rung is skipped so a lower rung wins.
+    let hit = resolve_api_credential(
+        &CredentialInput {
+            env: Some("custom-env-5555".to_string()),
+            env_var_name: Some("EXA_AGENT_API_KEY".to_string()),
+            ..CredentialInput::default()
+        },
+        &NoopKeyring,
+    )
+    .unwrap();
+    assert_eq!(
+        hit.source,
+        CredentialSource::Env("EXA_AGENT_API_KEY".to_string())
+    );
+
+    let fell_through = resolve_api_credential(
+        &CredentialInput {
+            env: None,
+            env_var_name: Some("EXA_AGENT_API_KEY".to_string()),
+            credential_file: Some("file-key-6666".to_string()),
+            credential_file_path: Some("/tmp/credentials.json".to_string()),
+            ..CredentialInput::default()
+        },
+        &NoopKeyring,
+    )
+    .unwrap();
+    assert_eq!(
+        fell_through.source,
+        CredentialSource::CredentialFile {
+            path: "/tmp/credentials.json".to_string()
+        }
+    );
+    assert_eq!(fell_through.secret.last4(), "6666");
 }
 
 #[test]

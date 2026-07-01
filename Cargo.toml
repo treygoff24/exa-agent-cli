@@ -46,6 +46,7 @@ toml = "0.8"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 sha2 = "0.10"
 ctrlc = "3"
+exa-agent-macros = { path = "exa-agent-macros" }
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -57,7 +58,7 @@ anyhow = "1"
 [dev-dependencies]
 
 [workspace]
-members = ["xtask"]
+members = ["exa-agent-macros", "xtask"]
 
 [profile.release]
 strip = true

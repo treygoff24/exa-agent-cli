@@ -1,0 +1,5 @@
+error: #[flag(skip)] cannot be combined with #[flag(with = ...)]
+ --> tests/compile_fail/skip_with_conflict.rs:5:25
+  |
+5 |     #[flag(skip, with = "format_value")]
+  |                         ^^^^^^^^^^^^^^

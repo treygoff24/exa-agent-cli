@@ -732,15 +732,7 @@ fn build_similar_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
-    let flag_values = [
-        ("url", Some(args.url.clone())),
-        ("num-results", args.num_results.map(|n| n.to_string())),
-        (
-            "exclude-source-domain",
-            args.exclude_source_domain.then_some("true".to_string()),
-        ),
-        ("category", args.category.map(|c| c.as_str().to_string())),
-    ];
+    let flag_values = args.into_flag_values();
     build_typed_spec(op, &flag_values, globals)
 }
 
@@ -763,12 +755,9 @@ fn build_answer_spec(
         .map(|raw| request::read_json_value_arg(raw, "output-schema"))
         .transpose()?
         .map(|value| value.to_string());
-    let flag_values = [
-        ("question", Some(args.question.clone())),
-        ("text", args.text.then_some("true".to_string())),
-        ("stream", args.stream.then_some("true".to_string())),
-        ("output-schema", output_schema),
-    ];
+    let mut flag_values = args.into_flag_values();
+    // Override contract: skip the source field and push once, or mutate the existing entry; never push a duplicate flag.
+    flag_values.push(("output-schema", output_schema));
     build_typed_spec(op, &flag_values, globals)
 }
 
@@ -826,14 +815,14 @@ fn build_context_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["context"]).expect("context is in the registry");
-    let tokens = args
-        .tokens
-        .as_deref()
-        .map(context_tokens_value)
-        .transpose()?
-        .flatten()
-        .map(|n| n.to_string());
-    let flag_values = [("query", Some(args.query.clone())), ("tokens", tokens)];
+    let mut flag_values = args.into_flag_values();
+    if let Some(raw) = args.tokens.as_deref() {
+        let tokens = context_tokens_value(raw)?.map(|n| n.to_string());
+        // Override contract: skip the source field and push once, or mutate the existing entry; never push a duplicate flag.
+        if let Some((_, value)) = flag_values.iter_mut().find(|(flag, _)| *flag == "tokens") {
+            *value = tokens;
+        }
+    }
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_context_query_length(&spec.body)?;
     Ok(spec)
@@ -7654,6 +7643,148 @@ mod tests {
             &ContextArgs {
                 query: "é".repeat(2_001),
                 tokens: None,
+            },
+            &globals,
+        )
+        .unwrap_err();
+        assert_eq!(err.diag().code, "invalid_value");
+    }
+
+    #[test]
+    fn pilot_into_flag_values_match_previous_hand_mappers() {
+        assert_eq!(
+            ContextArgs {
+                query: "rust cli".into(),
+                tokens: Some("1000".into()),
+            }
+            .into_flag_values(),
+            vec![
+                ("query", Some("rust cli".to_string())),
+                ("tokens", Some("1000".to_string())),
+            ]
+        );
+        assert_eq!(
+            ContextArgs {
+                query: "rust cli".into(),
+                tokens: None,
+            }
+            .into_flag_values(),
+            vec![("query", Some("rust cli".to_string())), ("tokens", None)]
+        );
+
+        assert_eq!(
+            SimilarArgs {
+                url: "https://example.com".into(),
+                num_results: Some(7),
+                exclude_source_domain: true,
+                category: Some(SearchCategory::ResearchPaper),
+            }
+            .into_flag_values(),
+            vec![
+                ("url", Some("https://example.com".to_string())),
+                ("num-results", Some("7".to_string())),
+                ("exclude-source-domain", Some("true".to_string())),
+                ("category", Some("research paper".to_string())),
+            ]
+        );
+        assert_eq!(
+            SimilarArgs {
+                url: "https://example.com".into(),
+                num_results: None,
+                exclude_source_domain: false,
+                category: None,
+            }
+            .into_flag_values(),
+            vec![
+                ("url", Some("https://example.com".to_string())),
+                ("num-results", None),
+                ("exclude-source-domain", None),
+                ("category", None),
+            ]
+        );
+
+        assert_eq!(
+            AnswerArgs {
+                question: "what is exa?".into(),
+                text: true,
+                stream: false,
+                output_schema: Some(r#"{"type":"object"}"#.into()),
+            }
+            .into_flag_values(),
+            vec![
+                ("question", Some("what is exa?".to_string())),
+                ("text", Some("true".to_string())),
+                ("stream", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn pilot_flag_values_cover_registry_flags() {
+        fn registry_flags(segments: &[&str]) -> BTreeSet<&'static str> {
+            registry::lookup_by_segments(segments)
+                .unwrap()
+                .fields
+                .iter()
+                .map(|field| field.flag)
+                .collect()
+        }
+
+        fn flag_keys(values: &[(&'static str, Option<String>)]) -> BTreeSet<&'static str> {
+            values.iter().map(|(flag, _)| *flag).collect()
+        }
+
+        assert_eq!(
+            flag_keys(
+                &ContextArgs {
+                    query: "q".into(),
+                    tokens: None,
+                }
+                .into_flag_values()
+            ),
+            registry_flags(&["context"])
+        );
+        assert_eq!(
+            flag_keys(
+                &SimilarArgs {
+                    url: "https://example.com".into(),
+                    num_results: None,
+                    exclude_source_domain: false,
+                    category: None,
+                }
+                .into_flag_values()
+            ),
+            registry_flags(&["similar"])
+        );
+
+        let mut answer_values = AnswerArgs {
+            question: "q".into(),
+            text: false,
+            stream: false,
+            output_schema: None,
+        }
+        .into_flag_values();
+        answer_values.push(("output-schema", None));
+        assert_eq!(flag_keys(&answer_values), registry_flags(&["answer"]));
+    }
+
+    #[test]
+    fn context_tokens_dynamic_and_range_validation_survive_pilot() {
+        let globals = parse_globals(&[]);
+        let dynamic = build_context_spec(
+            &ContextArgs {
+                query: "q".into(),
+                tokens: Some("dynamic".into()),
+            },
+            &globals,
+        )
+        .unwrap();
+        assert!(dynamic.body.get("tokensNum").is_none());
+
+        let err = build_context_spec(
+            &ContextArgs {
+                query: "q".into(),
+                tokens: Some("5".into()),
             },
             &globals,
         )

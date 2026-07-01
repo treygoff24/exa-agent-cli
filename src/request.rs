@@ -124,6 +124,15 @@ fn build_flag_body(
     op: &'static OperationDef,
     flag_values: &[(&str, Option<String>)],
 ) -> Result<Value, CliError> {
+    let mut seen = std::collections::HashSet::new();
+    for (flag, _) in flag_values {
+        if !seen.insert(*flag) {
+            panic!(
+                "duplicate flag `{flag}` in flag_values; a #[flag(skip)] is probably missing on an overridden field"
+            );
+        }
+    }
+
     let mut body = Value::Object(Map::new());
     for field in op.fields {
         let raw = flag_values

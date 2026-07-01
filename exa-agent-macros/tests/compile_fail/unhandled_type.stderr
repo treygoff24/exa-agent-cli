@@ -1,0 +1,5 @@
+error: field `count` requires #[flag(with = "path::fn")] or #[flag(skip)]
+ --> tests/compile_fail/unhandled_type.rs:5:12
+  |
+5 |     count: Option<u32>,
+  |            ^^^^^^^^^^^

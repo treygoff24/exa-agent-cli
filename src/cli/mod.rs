@@ -2,6 +2,7 @@
 //! collect flags; logic lives in `request`/`exec`/dispatch.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use exa_agent_macros::IntoFlagValues;
 
 #[derive(Parser)]
 #[command(
@@ -449,18 +450,28 @@ pub struct ContentsArgs {
     pub chunk_size: Option<u32>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, IntoFlagValues)]
 pub struct SimilarArgs {
     pub url: String,
     #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=100))]
+    #[flag(with = "similar_num_results_flag")]
     pub num_results: Option<u32>,
     #[arg(long)]
     pub exclude_source_domain: bool,
     #[arg(long, value_enum, ignore_case = true)]
+    #[flag(with = "similar_category_flag")]
     pub category: Option<SearchCategory>,
 }
 
-#[derive(Args, Debug)]
+fn similar_num_results_flag(value: &Option<u32>) -> Option<String> {
+    value.map(|n| n.to_string())
+}
+
+fn similar_category_flag(value: &Option<SearchCategory>) -> Option<String> {
+    value.map(|category| category.as_str().to_string())
+}
+
+#[derive(Args, Debug, IntoFlagValues)]
 pub struct AnswerArgs {
     pub question: String,
     #[arg(long)]
@@ -468,10 +479,11 @@ pub struct AnswerArgs {
     #[arg(long)]
     pub stream: bool,
     #[arg(long)]
+    #[flag(skip)]
     pub output_schema: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, IntoFlagValues)]
 pub struct ContextArgs {
     pub query: String,
     #[arg(long)]

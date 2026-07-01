@@ -505,6 +505,50 @@ flag = "count"
 body_path = "search.count"
 kind = "int"
 
+[[operations."websets-searches-create".fields]]
+flag = "query"
+body_path = "query"
+kind = "str"
+required = true
+
+[[operations."websets-searches-create".fields]]
+flag = "count"
+body_path = "count"
+kind = "int"
+required = true
+
+[[operations."websets-searches-create".fields]]
+flag = "criteria"
+body_path = "criteria"
+kind = "str_array"
+item_template = "description"
+
+[[operations."websets-enrichments-create".fields]]
+flag = "description"
+body_path = "description"
+kind = "str"
+required = true
+
+[[operations."websets-enrichments-create".fields]]
+flag = "enrichment-format"
+body_path = "format"
+kind = "str"
+
+[[operations."websets-enrichments-update".fields]]
+flag = "description"
+body_path = "description"
+kind = "str"
+
+[[operations."websets-enrichments-update".fields]]
+flag = "enrichment-format"
+body_path = "format"
+kind = "str"
+
+[[operations."imports-create".fields]]
+flag = "source"
+body_path = "format"
+kind = "str"
+
 [[operations."websets-preview".fields]]
 flag = "query"
 body_path = "search.query"

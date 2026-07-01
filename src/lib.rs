@@ -2692,25 +2692,27 @@ fn build_websets_searches_create_spec(
 ) -> Result<(request::RequestSpec, String), CliError> {
     let op = registry::lookup_by_segments(&["websets", "searches", "create"])
         .expect("websets searches create is in registry");
-    let mut body = serde_json::Map::new();
-    if let Some(query) = query {
-        body.insert(
-            "query".to_string(),
-            serde_json::Value::String(query.to_string()),
-        );
-    }
-    if let Some(count) = count {
-        body.insert("count".to_string(), serde_json::json!(count));
-    }
-    if !criteria.is_empty() {
-        let criteria: Vec<serde_json::Value> = criteria
-            .iter()
-            .map(|description| serde_json::json!({ "description": description }))
-            .collect();
-        body.insert("criteria".to_string(), serde_json::Value::Array(criteria));
-    }
-    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
-    if !websets_searches_create_has_query_and_count(&body) {
+    let flag_values = [
+        // `query`/`count` are required in the overlay for OpenAPI parity, but this
+        // bespoke validator owns the body/set-aware envelope. Missing count uses
+        // `-1`, which the old `as_u64` check treats as absent while still allowing
+        // raw `--body`/`--set count=0` to pass through as before.
+        ("query", Some(query.unwrap_or_default().to_string())),
+        (
+            "count",
+            Some(
+                count
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "-1".to_string()),
+            ),
+        ),
+        (
+            "criteria",
+            (!criteria.is_empty()).then(|| request::encode_str_array(criteria)),
+        ),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    if !websets_searches_create_has_query_and_count(&spec.body) {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -2722,7 +2724,7 @@ fn build_websets_searches_create_spec(
         ));
     }
     let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
-    Ok((request::RequestSpec { op, body }, path))
+    Ok((spec, path))
 }
 
 fn dispatch_websets_searches_create(
@@ -2828,21 +2830,21 @@ fn build_websets_enrichments_create_spec(
 ) -> Result<(request::RequestSpec, String), CliError> {
     let op = registry::lookup_by_segments(&["websets", "enrichments", "create"])
         .expect("websets enrichments create is in registry");
-    let mut body = serde_json::Map::new();
-    if let Some(description) = description {
-        body.insert(
-            "description".to_string(),
-            serde_json::Value::String(description.to_string()),
-        );
-    }
-    if let Some(format) = format {
-        body.insert(
-            "format".to_string(),
-            serde_json::Value::String(format.as_str().to_string()),
-        );
-    }
-    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
-    let has_description = body
+    let flag_values = [
+        // Required in the overlay for parity; the empty default preserves the
+        // custom body/set-aware missing-description envelope below.
+        (
+            "description",
+            Some(description.unwrap_or_default().to_string()),
+        ),
+        (
+            "enrichment-format",
+            format.map(|format| format.as_str().to_string()),
+        ),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    let has_description = spec
+        .body
         .get("description")
         .and_then(|value| value.as_str())
         .is_some_and(|value| !value.is_empty());
@@ -2858,7 +2860,7 @@ fn build_websets_enrichments_create_spec(
         ));
     }
     let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
-    Ok((request::RequestSpec { op, body }, path))
+    Ok((spec, path))
 }
 
 fn dispatch_websets_enrichments_create(
@@ -2902,21 +2904,19 @@ fn build_websets_enrichments_update_spec(
 ) -> Result<(request::RequestSpec, String), CliError> {
     let op = registry::lookup_by_segments(&["websets", "enrichments", "update"])
         .expect("websets enrichments update is in registry");
-    let mut body = serde_json::Map::new();
-    if let Some(description) = description {
-        body.insert(
-            "description".to_string(),
-            serde_json::Value::String(description.to_string()),
-        );
-    }
-    if let Some(format) = format {
-        body.insert(
-            "format".to_string(),
-            serde_json::Value::String(format.as_str().to_string()),
-        );
-    }
-    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
-    if body.as_object().is_some_and(|object| object.is_empty()) {
+    let flag_values = [
+        ("description", description.map(str::to_string)),
+        (
+            "enrichment-format",
+            format.map(|format| format.as_str().to_string()),
+        ),
+    ];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    if spec
+        .body
+        .as_object()
+        .is_some_and(|object| object.is_empty())
+    {
         return Err(CliError::Usage(
             Diag::new(
                 "missing_required_argument",
@@ -2929,7 +2929,7 @@ fn build_websets_enrichments_update_spec(
     }
     let path =
         checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", enrichment_id)])?;
-    Ok((request::RequestSpec { op, body }, path))
+    Ok((spec, path))
 }
 
 fn dispatch_websets_enrichments_update(
@@ -3043,16 +3043,10 @@ fn build_websets_imports_create_spec(
     }
     let op = registry::lookup_by_segments(&["websets", "imports", "create"])
         .expect("websets imports create is in registry");
-    let mut body = serde_json::Map::new();
-    if source == Some("csv") {
-        body.insert(
-            "format".to_string(),
-            serde_json::Value::String("csv".to_string()),
-        );
-    }
-    let body = apply_request_overrides(serde_json::Value::Object(body), globals)?;
-    validate_websets_import_create_body(&body)?;
-    Ok(request::RequestSpec { op, body })
+    let flag_values = [("source", source.map(str::to_string))];
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_websets_import_create_body(&spec.body)?;
+    Ok(spec)
 }
 
 fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), CliError> {

@@ -441,6 +441,31 @@ fn schema_commands_work_offline() {
     assert_eq!(validate["schema"], "exa.cli.schema_validate_input.v1");
     assert_eq!(validate["valid"], true);
 
+    let templated_array = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "websets searches create",
+        "--body",
+        r#"{"query":"founders","count":25,"criteria":[{"description":"has email"}]}"#,
+        "--compact",
+    ]);
+    assert_eq!(templated_array["valid"], true);
+
+    let wrong_template_shape = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "websets searches create",
+        "--body",
+        r#"{"query":"founders","count":25,"criteria":["has email"]}"#,
+        "--compact",
+    ]);
+    assert_eq!(wrong_template_shape["valid"], false);
+    assert_eq!(
+        wrong_template_shape["details"]["issue"],
+        "invalid_field_type"
+    );
+    assert_eq!(wrong_template_shape["details"]["field"], "criteria");
+
     let missing_query = run_ok_json(&[
         "schema",
         "validate-input",

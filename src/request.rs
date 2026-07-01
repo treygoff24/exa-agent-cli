@@ -127,9 +127,7 @@ fn build_flag_body(
     let mut seen = std::collections::HashSet::new();
     for (flag, _) in flag_values {
         if !seen.insert(*flag) {
-            panic!(
-                "duplicate flag `{flag}` in flag_values; a #[flag(skip)] is probably missing on an overridden field"
-            );
+            panic!("duplicate flag `{flag}` in flag_values; an overridden field was not skipped");
         }
     }
 

@@ -5956,18 +5956,30 @@ fn validate_field_kind(
     if value.is_null() {
         return None; // absence is the required-check's job, not a type error
     }
-    let (ok, expected) = match field.kind {
-        FieldKind::Str => (value.is_string(), "string"),
-        FieldKind::Int => (value.is_i64() || value.is_u64(), "integer"),
-        FieldKind::Num => (value.is_number(), "number"),
-        FieldKind::Bool => (value.is_boolean(), "boolean"),
-        FieldKind::StrArray => (
-            value
-                .as_array()
-                .is_some_and(|items| items.iter().all(serde_json::Value::is_string)),
-            "array of strings",
-        ),
-        FieldKind::Json => (true, "json"),
+    let (ok, expected): (bool, std::borrow::Cow<'static, str>) = match field.kind {
+        FieldKind::Str => (value.is_string(), "string".into()),
+        FieldKind::Int => (value.is_i64() || value.is_u64(), "integer".into()),
+        FieldKind::Num => (value.is_number(), "number".into()),
+        FieldKind::Bool => (value.is_boolean(), "boolean".into()),
+        FieldKind::StrArray => match field.item_template {
+            Some(key) => (
+                value.as_array().is_some_and(|items| {
+                    items.iter().all(|item| {
+                        item.as_object()
+                            .and_then(|object| object.get(key))
+                            .is_some_and(serde_json::Value::is_string)
+                    })
+                }),
+                format!("array of objects with string `{key}`").into(),
+            ),
+            None => (
+                value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(serde_json::Value::is_string)),
+                "array of strings".into(),
+            ),
+        },
+        FieldKind::Json => (true, "json".into()),
     };
     if ok {
         return None;

@@ -1,5 +1,0 @@
-error: unsupported flag attribute
- --> tests/compile_fail/unknown_flag_key.rs:5:12
-  |
-5 |     #[flag(bogus)]
-  |            ^^^^^

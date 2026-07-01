@@ -2,7 +2,6 @@
 //! collect flags; logic lives in `request`/`exec`/dispatch.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use exa_agent_macros::IntoFlagValues;
 
 #[derive(Parser)]
 #[command(
@@ -370,7 +369,7 @@ pub enum Command {
     Raw(RawArgs),
 }
 
-#[derive(Args, Debug, IntoFlagValues)]
+#[derive(Args, Debug)]
 pub struct SearchArgs {
     /// The search query.
     pub query: String,
@@ -389,7 +388,6 @@ pub struct SearchArgs {
     pub text: bool,
     /// Search type.
     #[arg(long, value_enum, ignore_case = true)]
-    #[flag(with = "search_type_flag")]
     pub r#type: Option<SearchType>,
     /// Result category.
     ///
@@ -417,7 +415,6 @@ pub struct SearchArgs {
         default_missing_value = "",
         allow_negative_numbers = true
     )]
-    #[flag(skip)]
     pub limit: Option<String>,
     /// Common mistake: search uses --num-results, not --count.
     #[arg(
@@ -428,15 +425,12 @@ pub struct SearchArgs {
         default_missing_value = "",
         allow_negative_numbers = true
     )]
-    #[flag(skip)]
     pub count: Option<String>,
     /// Common mistake: search is not cursor-paginated.
     #[arg(long, hide = true)]
-    #[flag(skip)]
     pub all: bool,
     /// Common mistake: use typed filter flags instead.
     #[arg(long, hide = true, value_name = "FILTER")]
-    #[flag(skip)]
     pub filter: Option<String>,
 }
 
@@ -444,7 +438,23 @@ fn search_type_flag(value: &Option<SearchType>) -> Option<String> {
     value.map(|kind| kind.as_str().to_string())
 }
 
-#[derive(Args, Debug, IntoFlagValues)]
+impl SearchArgs {
+    pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("query", Some(self.query.clone())),
+            ("num-results", self.num_results.clone()),
+            ("text", bool_flag(self.text)),
+            ("type", search_type_flag(&self.r#type)),
+            ("category", self.category.clone()),
+            ("include-domain", str_array_flag(&self.include_domain)),
+            ("exclude-domain", str_array_flag(&self.exclude_domain)),
+            ("start-published-date", self.start_published_date.clone()),
+            ("end-published-date", self.end_published_date.clone()),
+        ]
+    }
+}
+
+#[derive(Args, Debug)]
 pub struct ContentsArgs {
     /// URLs to fetch.
     #[arg(required_unless_present = "ids", conflicts_with = "ids", num_args = 1..)]
@@ -456,20 +466,28 @@ pub struct ContentsArgs {
     #[arg(long)]
     pub summary_query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
-    #[flag(skip)]
     pub chunk_size: Option<u32>,
 }
 
-#[derive(Args, Debug, IntoFlagValues)]
+impl ContentsArgs {
+    pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("urls", str_array_flag(&self.urls)),
+            ("ids", str_array_flag(&self.ids)),
+            ("text", bool_flag(self.text)),
+            ("summary-query", self.summary_query.clone()),
+        ]
+    }
+}
+
+#[derive(Args, Debug)]
 pub struct SimilarArgs {
     pub url: String,
     #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=100))]
-    #[flag(with = "similar_num_results_flag")]
     pub num_results: Option<u32>,
     #[arg(long)]
     pub exclude_source_domain: bool,
     #[arg(long, value_enum, ignore_case = true)]
-    #[flag(with = "similar_category_flag")]
     pub category: Option<SearchCategory>,
 }
 
@@ -481,7 +499,21 @@ fn similar_category_flag(value: &Option<SearchCategory>) -> Option<String> {
     value.map(|category| category.as_str().to_string())
 }
 
-#[derive(Args, Debug, IntoFlagValues)]
+impl SimilarArgs {
+    pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("url", Some(self.url.clone())),
+            ("num-results", similar_num_results_flag(&self.num_results)),
+            (
+                "exclude-source-domain",
+                bool_flag(self.exclude_source_domain),
+            ),
+            ("category", similar_category_flag(&self.category)),
+        ]
+    }
+}
+
+#[derive(Args, Debug)]
 pub struct AnswerArgs {
     pub question: String,
     #[arg(long)]
@@ -489,15 +521,41 @@ pub struct AnswerArgs {
     #[arg(long)]
     pub stream: bool,
     #[arg(long)]
-    #[flag(skip)]
     pub output_schema: Option<String>,
 }
 
-#[derive(Args, Debug, IntoFlagValues)]
+impl AnswerArgs {
+    pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("question", Some(self.question.clone())),
+            ("text", bool_flag(self.text)),
+            ("stream", bool_flag(self.stream)),
+        ]
+    }
+}
+
+#[derive(Args, Debug)]
 pub struct ContextArgs {
     pub query: String,
     #[arg(long)]
     pub tokens: Option<String>,
+}
+
+impl ContextArgs {
+    pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("query", Some(self.query.clone())),
+            ("tokens", self.tokens.clone()),
+        ]
+    }
+}
+
+fn bool_flag(value: bool) -> Option<String> {
+    value.then(|| "true".to_string())
+}
+
+fn str_array_flag(values: &[String]) -> Option<String> {
+    (!values.is_empty()).then(|| crate::request::encode_str_array(values))
 }
 
 #[derive(Subcommand, Debug)]

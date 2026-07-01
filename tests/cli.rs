@@ -1,7 +1,7 @@
 //! Parser tests for the v1 typed command tree (Wave 1A/1C skeleton).
 
 use clap::Parser;
-use exa_agent_cli::cli::{command_path, Cli, Command};
+use exa_agent_cli::cli::{command_path, Cli, Command, SEARCH_TYPE_VALUES};
 use exa_agent_cli::registry::{self, ConfirmProtocol};
 use exa_agent_cli::transport;
 use std::fs;
@@ -467,6 +467,10 @@ fn schema_commands_work_offline() {
     assert_eq!(invalid_type["valid"], false);
     assert_eq!(invalid_type["details"]["field"], "type");
     assert_eq!(invalid_type["details"]["issue"], "invalid_enum_value");
+    assert_eq!(
+        invalid_type["details"]["allowed"],
+        serde_json::json!(SEARCH_TYPE_VALUES)
+    );
 
     let unsupported = run_ok_json(&[
         "schema",

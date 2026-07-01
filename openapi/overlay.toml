@@ -407,16 +407,19 @@ required = true
 flag = "num-results"
 body_path = "numResults"
 kind = "int"
+range = [1, 100]
 
 [[operations."search".fields]]
 flag = "type"
 body_path = "type"
 kind = "str"
+enum_values = ["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
 
 [[operations."search".fields]]
 flag = "category"
 body_path = "category"
 kind = "str"
+enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
 
 [[operations."search".fields]]
 flag = "text"

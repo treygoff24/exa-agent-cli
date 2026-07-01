@@ -31,7 +31,6 @@ use cli::{
     WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
     WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
     WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
-    SEARCH_TYPE_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -5938,6 +5937,8 @@ fn validate_registry_input(
 
     // Reuse the live command's own value-range validator so validate-input never
     // reports `valid:true` for a body the command would reject (e.g. numResults:500).
+    // This must stay before the generic registry range check below: search owns
+    // a richer frozen error envelope for numResults.
     if op.command() == "search" {
         let query = body
             .get("query")
@@ -5967,6 +5968,19 @@ fn validate_registry_input(
                 suggested_command: diag.suggested_command.clone(),
                 note: None,
             };
+        }
+    }
+
+    for field in op.fields {
+        if let Some(value) = body_value_at_path(body, field.body_path) {
+            if let Some(issue) = validate_field_range(field, value) {
+                return ValidateInputOutcome {
+                    valid: serde_json::Value::Bool(false),
+                    details: Some(issue),
+                    suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                    note: None,
+                };
+            }
         }
     }
 
@@ -6078,6 +6092,40 @@ fn validate_field_kind(
     }))
 }
 
+fn validate_field_range(
+    field: &registry::FieldDef,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let (min, max) = field.range?;
+    let received = value.as_f64()?;
+    if (min..=max).contains(&received) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "issue": "invalid_value",
+        "field": field.body_path,
+        "flag": field.flag,
+        "message": format!(
+            "field `{}` (flag `--{}`) must be between {} and {}",
+            field.body_path,
+            field.flag,
+            format_range_bound(min),
+            format_range_bound(max)
+        ),
+        "min": min,
+        "max": max,
+        "received": value,
+    }))
+}
+
+fn format_range_bound(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
 fn body_field_present(body: &serde_json::Value, path: &str) -> bool {
     body_value_at_path(body, path).is_some_and(|value| !value.is_null())
 }
@@ -6125,16 +6173,13 @@ fn validate_enum_field(
 }
 
 fn enum_values_for_field(
-    op: &registry::OperationDef,
+    _op: &registry::OperationDef,
     field: &registry::FieldDef,
 ) -> Option<&'static [&'static str]> {
-    if op.command() != "search" {
-        return None;
-    }
-    match field.flag {
-        "type" => Some(SEARCH_TYPE_VALUES),
-        "category" => Some(SEARCH_CATEGORY_VALUES),
-        _ => None,
+    if field.enum_values.is_empty() {
+        None
+    } else {
+        Some(field.enum_values)
     }
 }
 
@@ -6733,8 +6778,11 @@ fn explicit_mode(g: &GlobalArgs) -> Option<OutputMode> {
 mod tests {
     use super::*;
     use crate::auth::{CredentialInput, NoopKeyring};
-    use crate::registry::{FieldDef, Method, Namespace, OperationDef, Pagination};
+    use crate::cli::{SearchCategory, SearchType};
+    use crate::registry::{FieldDef, FieldKind, Method, Namespace, OperationDef, Pagination};
     use crate::transport::{FakeTransport, HttpResponse, RawExecuteResult};
+    use clap::ValueEnum;
+    use std::collections::BTreeSet;
 
     static PENDING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -6753,6 +6801,38 @@ mod tests {
         source: "test",
         source_version: "0",
         fields: &[] as &[FieldDef],
+        capabilities: &[],
+        body_builder: None,
+        validators: &[],
+        mixed_status_exit: false,
+    };
+
+    static GENERIC_RANGE_FIELDS: &[FieldDef] = &[FieldDef {
+        flag: "limit",
+        body_path: "limit",
+        kind: FieldKind::Int,
+        required: false,
+        co_fields: &[],
+        item_template: None,
+        enum_values: &[],
+        range: Some((1.0, 5.0)),
+    }];
+
+    static GENERIC_RANGE_OP: OperationDef = OperationDef {
+        cli_path: &["range-test"],
+        operation_id: "rangeTest",
+        method: Method::Post,
+        api_path: "/range-test",
+        read_only: false,
+        streaming: false,
+        pagination: Pagination::None,
+        dangerous: false,
+        namespace: Namespace::Api,
+        idempotency_sensitive: false,
+        deprecated: false,
+        source: "test",
+        source_version: "0",
+        fields: GENERIC_RANGE_FIELDS,
         capabilities: &[],
         body_builder: None,
         validators: &[],
@@ -6780,6 +6860,27 @@ mod tests {
             .chain(std::iter::once("capabilities"))
             .collect();
         Cli::try_parse_from(argv).unwrap().globals
+    }
+
+    fn search_field(flag: &str) -> &'static FieldDef {
+        registry::lookup_by_segments(&["search"])
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.flag == flag)
+            .unwrap_or_else(|| panic!("search field `{flag}` missing"))
+    }
+
+    fn str_set(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn clap_value_set<T: ValueEnum>() -> BTreeSet<String> {
+        T::value_variants()
+            .iter()
+            .filter_map(|variant| variant.to_possible_value())
+            .map(|value| value.get_name().to_string())
+            .collect()
     }
 
     #[test]
@@ -7319,6 +7420,57 @@ mod tests {
                 .unwrap()
                 .mixed_status_exit,
             "search must not report partial-status exit codes"
+        );
+    }
+
+    #[test]
+    fn search_registry_enum_members_match_clap_value_enums() {
+        assert_eq!(
+            str_set(search_field("type").enum_values),
+            clap_value_set::<SearchType>()
+        );
+        assert_eq!(
+            str_set(search_field("category").enum_values),
+            clap_value_set::<SearchCategory>()
+        );
+    }
+
+    #[test]
+    fn search_num_results_registry_range_matches_bespoke_validator_bounds() {
+        assert_eq!(search_field("num-results").range, Some((1.0, 100.0)));
+    }
+
+    #[test]
+    fn validate_registry_input_consumes_generic_range_metadata() {
+        let bad = validate_registry_input(&GENERIC_RANGE_OP, &serde_json::json!({"limit": 9}));
+        let details = bad.details.as_ref().unwrap();
+        assert_eq!(bad.valid, false);
+        assert_eq!(details["issue"], "invalid_value");
+        assert_eq!(details["field"], "limit");
+        assert_eq!(details["flag"], "limit");
+        assert_eq!(details["min"], serde_json::json!(1.0));
+        assert_eq!(details["max"], serde_json::json!(5.0));
+        assert_eq!(details["received"], 9);
+
+        let ok = validate_registry_input(&GENERIC_RANGE_OP, &serde_json::json!({"limit": 3}));
+        assert_eq!(ok.valid, true);
+        assert!(ok.details.is_none());
+    }
+
+    #[test]
+    fn validate_registry_input_rejects_search_type_from_registry_enum_values() {
+        let op = registry::lookup_by_segments(&["search"]).unwrap();
+        let outcome =
+            validate_registry_input(op, &serde_json::json!({"query": "x", "type": "bogus"}));
+        let details = outcome.details.as_ref().unwrap();
+
+        assert_eq!(outcome.valid, false);
+        assert_eq!(details["issue"], "invalid_enum_value");
+        assert_eq!(details["field"], "type");
+        assert_eq!(details["flag"], "type");
+        assert_eq!(
+            details["allowed"],
+            serde_json::json!(search_field("type").enum_values)
         );
     }
 

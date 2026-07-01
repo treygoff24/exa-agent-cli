@@ -97,6 +97,10 @@ struct FieldMeta {
     co_fields: Vec<(String, ConstMeta)>,
     #[serde(default)]
     item_template: Option<String>,
+    #[serde(default)]
+    enum_values: Vec<String>,
+    #[serde(default)]
+    range: Option<[f64; 2]>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -292,10 +296,12 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
             Some(key) => format!("Some({key:?})"),
             None => "None".to_string(),
         };
+        let enum_values = enum_values_literal(&f.enum_values);
+        let range = range_literal(f.range)?;
         write!(
             fields,
             "FieldDef {{ flag: {:?}, body_path: {:?}, kind: {}, required: {}, \
-             co_fields: {co_fields}, item_template: {item_template}, enum_values: &[], range: None }}, ",
+             co_fields: {co_fields}, item_template: {item_template}, enum_values: {enum_values}, range: {range} }}, ",
             f.flag,
             f.body_path,
             field_kind_variant(&f.kind)?,
@@ -340,6 +346,41 @@ fn co_fields_literal(fields: &[(String, ConstMeta)]) -> String {
     }
     out.push(']');
     out
+}
+
+fn enum_values_literal(values: &[String]) -> String {
+    if values.is_empty() {
+        return "&[]".to_string();
+    }
+
+    let mut out = String::from("&[");
+    for value in values {
+        let _ = write!(out, "{value:?}, ");
+    }
+    out.push(']');
+    out
+}
+
+fn range_literal(range: Option<[f64; 2]>) -> Result<String> {
+    let Some([min, max]) = range else {
+        return Ok("None".to_string());
+    };
+    if !min.is_finite() || !max.is_finite() {
+        return Err(anyhow!("field range bounds must be finite"));
+    }
+    Ok(format!(
+        "Some(({}, {}))",
+        f64_literal(min),
+        f64_literal(max)
+    ))
+}
+
+fn f64_literal(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}f64")
+    } else {
+        format!("{value:?}f64")
+    }
 }
 
 fn const_value_literal(value: &ConstMeta) -> String {

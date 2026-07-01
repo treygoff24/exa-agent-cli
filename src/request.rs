@@ -1,5 +1,5 @@
 //! Request assembly: turn a parsed command + registry metadata into an upstream request
-//! body (arch §4). Precedence: registry defaults < named flags < --body < --set.
+//! body (arch §4). Precedence: fields/co_fields/item_template < body_builder < --body < --set.
 
 use std::io::{self, IsTerminal, Read};
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use crate::error::{CliError, Diag};
-use crate::registry::{FieldKind, OperationDef};
+use crate::registry::{BuilderId, ConstValue, FieldDef, FieldKind, OperationDef};
 
 const MAX_SET_ARRAY_INDEX: usize = 10_000;
 // `set_at_segments` recurses once per dotted segment; cap depth so a hostile
@@ -59,6 +59,10 @@ pub fn build_request(
 ) -> Result<RequestSpec, CliError> {
     let mut body = build_flag_body(op, flag_values)?;
 
+    if let Some(id) = op.body_builder {
+        deep_merge(&mut body, run_builder(id, flag_values));
+    }
+
     if let Some(source) = overrides.body {
         let overlay = read_body_source(source)?;
         if !overlay.is_object() {
@@ -96,6 +100,26 @@ pub fn encode_str_array(values: &[String]) -> String {
     serde_json::to_string(values).expect("Vec<String> always serializes")
 }
 
+/// Dispatch a pure body-builder by id.
+///
+/// Purity is a convention + review rule + this test hook, NOT statically enforced:
+/// a body_builder must be a pure fn of its flags — no I/O, auth, transport, or redaction.
+pub fn run_builder(id: BuilderId, flags: &[(&str, Option<String>)]) -> Value {
+    match id {
+        BuilderId::Sentinel => {
+            let mut fields = Map::new();
+            for (flag, value) in flags {
+                if let Some(value) = value {
+                    fields.insert((*flag).to_string(), Value::String(value.clone()));
+                }
+            }
+            let mut body = Map::new();
+            body.insert("sentinel".to_string(), Value::Object(fields));
+            Value::Object(body)
+        }
+    }
+}
+
 fn build_flag_body(
     op: &'static OperationDef,
     flag_values: &[(&str, Option<String>)],
@@ -109,7 +133,11 @@ fn build_flag_body(
 
         match raw {
             Some(s) => {
-                set_at_path(&mut body, field.body_path, coerce(field.kind, &s)?)?;
+                set_at_path(&mut body, field.body_path, coerce_field(field, &s)?)?;
+                // co_fields are written in field iteration order; later fields win on collisions.
+                for (path, value) in field.co_fields {
+                    set_at_path(&mut body, path, const_value_to_json(*value))?;
+                }
             }
             None if field.required => {
                 return Err(CliError::Usage(
@@ -124,6 +152,14 @@ fn build_flag_body(
         }
     }
     Ok(body)
+}
+
+fn const_value_to_json(value: ConstValue) -> Value {
+    match value {
+        ConstValue::Str(s) => Value::String(s.to_string()),
+        ConstValue::Bool(b) => Value::Bool(b),
+        ConstValue::Int(i) => Value::from(i),
+    }
 }
 
 /// Read and parse a `--body` source into JSON.
@@ -361,6 +397,13 @@ fn checked_array_len(idx: usize) -> Result<usize, CliError> {
         .ok_or_else(|| usage("invalid_value", format!("array index `{idx}` is too large")))
 }
 
+fn coerce_field(field: &FieldDef, s: &str) -> Result<Value, CliError> {
+    if field.kind == FieldKind::StrArray {
+        return coerce_str_array(s, field.item_template);
+    }
+    coerce(field.kind, s)
+}
+
 fn coerce(kind: FieldKind, s: &str) -> Result<Value, CliError> {
     let bad = |what: &str| {
         CliError::Usage(Diag::new(
@@ -376,29 +419,39 @@ fn coerce(kind: FieldKind, s: &str) -> Result<Value, CliError> {
             s.to_ascii_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
         )),
-        FieldKind::StrArray => coerce_str_array(s)?,
+        FieldKind::StrArray => coerce_str_array(s, None)?,
         FieldKind::Json => serde_json::from_str(s).map_err(|_| bad("JSON"))?,
     })
 }
 
-fn coerce_str_array(s: &str) -> Result<Value, CliError> {
+fn coerce_str_array(s: &str, item_template: Option<&str>) -> Result<Value, CliError> {
+    let values = parse_str_array(s)?;
+    Ok(Value::Array(match item_template {
+        Some(key) => values
+            .into_iter()
+            .map(|value| {
+                let mut item = Map::new();
+                item.insert(key.to_string(), Value::String(value));
+                Value::Object(item)
+            })
+            .collect(),
+        None => values.into_iter().map(Value::String).collect(),
+    }))
+}
+
+fn parse_str_array(s: &str) -> Result<Vec<String>, CliError> {
     if s.trim_start().starts_with('[') {
-        let parsed: Vec<String> = serde_json::from_str(s).map_err(|_| {
+        return serde_json::from_str(s).map_err(|_| {
             CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("`{s}` is not a valid string array"),
             ))
-        })?;
-        return Ok(Value::Array(
-            parsed.into_iter().map(Value::String).collect(),
-        ));
+        });
     }
 
-    Ok(Value::Array(
-        s.split(',')
-            .map(|x| Value::String(x.trim().to_string()))
-            .collect(),
-    ))
+    Ok(s.split(',')
+        .map(|x| x.trim().to_string())
+        .collect::<Vec<_>>())
 }
 
 fn usage(code: &str, message: impl Into<String>) -> CliError {
@@ -441,7 +494,7 @@ impl RequestSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{Method, Namespace, Pagination};
+    use crate::registry::{BuilderId, ConstValue, FieldDef, Method, Namespace, Pagination};
 
     static NESTED_FIELDS: &[crate::registry::FieldDef] = &[
         crate::registry::FieldDef {
@@ -496,5 +549,240 @@ mod tests {
         .unwrap();
         assert_eq!(spec.body["query"], "q");
         assert_eq!(spec.body["contents"]["text"], true);
+    }
+
+    static CO_FIELD_SIBLINGS: &[(&str, ConstValue)] = &[
+        ("trigger.type", ConstValue::Str("interval")),
+        ("trigger.active", ConstValue::Bool(true)),
+    ];
+
+    static CO_FIELDS: &[FieldDef] = &[FieldDef {
+        flag: "schedule",
+        body_path: "trigger.schedule",
+        kind: FieldKind::Str,
+        required: false,
+        co_fields: CO_FIELD_SIBLINGS,
+        item_template: None,
+        enum_values: &[],
+        range: None,
+    }];
+
+    static CO_OP: OperationDef = OperationDef {
+        cli_path: &["synthetic", "co-fields"],
+        operation_id: "synthetic-co-fields",
+        method: Method::Post,
+        api_path: "/synthetic/co-fields",
+        read_only: false,
+        streaming: false,
+        pagination: Pagination::None,
+        dangerous: false,
+        namespace: Namespace::Api,
+        idempotency_sensitive: false,
+        deprecated: false,
+        source: "test",
+        source_version: "0",
+        fields: CO_FIELDS,
+        capabilities: &[],
+        body_builder: None,
+        validators: &[],
+        mixed_status_exit: false,
+    };
+
+    #[test]
+    fn co_fields_apply_only_when_source_field_is_present() {
+        let flags = &[("schedule", Some("daily".into()))];
+        let first = build_body(&CO_OP, flags).unwrap().body;
+        let second = build_body(&CO_OP, flags).unwrap().body;
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            serde_json::json!({
+                "trigger": {
+                    "schedule": "daily",
+                    "type": "interval",
+                    "active": true
+                }
+            })
+        );
+        assert_eq!(build_body(&CO_OP, &[]).unwrap().body, serde_json::json!({}));
+    }
+
+    static ITEM_TEMPLATE_FIELDS: &[FieldDef] = &[FieldDef {
+        flag: "descriptions",
+        body_path: "items",
+        kind: FieldKind::StrArray,
+        required: false,
+        co_fields: &[],
+        item_template: Some("description"),
+        enum_values: &[],
+        range: None,
+    }];
+
+    static PLAIN_ARRAY_FIELDS: &[FieldDef] = &[FieldDef {
+        flag: "descriptions",
+        body_path: "items",
+        kind: FieldKind::StrArray,
+        required: false,
+        co_fields: &[],
+        item_template: None,
+        enum_values: &[],
+        range: None,
+    }];
+
+    static ITEM_TEMPLATE_OP: OperationDef = OperationDef {
+        cli_path: &["synthetic", "item-template"],
+        operation_id: "synthetic-item-template",
+        method: Method::Post,
+        api_path: "/synthetic/item-template",
+        read_only: false,
+        streaming: false,
+        pagination: Pagination::None,
+        dangerous: false,
+        namespace: Namespace::Api,
+        idempotency_sensitive: false,
+        deprecated: false,
+        source: "test",
+        source_version: "0",
+        fields: ITEM_TEMPLATE_FIELDS,
+        capabilities: &[],
+        body_builder: None,
+        validators: &[],
+        mixed_status_exit: false,
+    };
+
+    static PLAIN_ARRAY_OP: OperationDef = OperationDef {
+        fields: PLAIN_ARRAY_FIELDS,
+        operation_id: "synthetic-plain-array",
+        cli_path: &["synthetic", "plain-array"],
+        api_path: "/synthetic/plain-array",
+        ..ITEM_TEMPLATE_OP
+    };
+
+    #[test]
+    fn item_template_wraps_str_array_items_only_when_configured() {
+        let values = vec!["a".to_string(), "b".to_string()];
+        let body = build_body(
+            &ITEM_TEMPLATE_OP,
+            &[("descriptions", Some(encode_str_array(&values)))],
+        )
+        .unwrap()
+        .body;
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "items": [
+                    { "description": "a" },
+                    { "description": "b" }
+                ]
+            })
+        );
+
+        let empty = build_body(
+            &ITEM_TEMPLATE_OP,
+            &[("descriptions", Some(encode_str_array(&[])))],
+        )
+        .unwrap()
+        .body;
+        assert_eq!(empty, serde_json::json!({ "items": [] }));
+        assert_eq!(
+            build_body(&ITEM_TEMPLATE_OP, &[]).unwrap().body,
+            serde_json::json!({})
+        );
+
+        let plain = build_body(
+            &PLAIN_ARRAY_OP,
+            &[("descriptions", Some(encode_str_array(&values)))],
+        )
+        .unwrap()
+        .body;
+        assert_eq!(plain, serde_json::json!({ "items": ["a", "b"] }));
+    }
+
+    static BUILDER_FIELDS: &[FieldDef] = &[FieldDef {
+        flag: "modeled",
+        body_path: "layers.field",
+        kind: FieldKind::Str,
+        required: false,
+        co_fields: &[],
+        item_template: None,
+        enum_values: &[],
+        range: None,
+    }];
+
+    static BUILDER_OP: OperationDef = OperationDef {
+        cli_path: &["synthetic", "builder"],
+        operation_id: "synthetic-builder",
+        method: Method::Post,
+        api_path: "/synthetic/builder",
+        read_only: false,
+        streaming: false,
+        pagination: Pagination::None,
+        dangerous: false,
+        namespace: Namespace::Api,
+        idempotency_sensitive: false,
+        deprecated: false,
+        source: "test",
+        source_version: "0",
+        fields: BUILDER_FIELDS,
+        capabilities: &[],
+        body_builder: Some(BuilderId::Sentinel),
+        validators: &[],
+        mixed_status_exit: false,
+    };
+
+    #[test]
+    fn sentinel_builder_layers_between_fields_body_and_set() {
+        let flags = &[
+            ("modeled", Some("field-layer".into())),
+            ("builder-flag", Some("builder-layer".into())),
+            ("ignored", None),
+        ];
+        let sets = ["layers.set=set-layer".into()];
+        let first = build_request(
+            &BUILDER_OP,
+            flags,
+            RequestOverrides {
+                body: Some(BodySource::Inline(r#"{"layers":{"body":"body-layer"}}"#)),
+                sets: &sets,
+            },
+        )
+        .unwrap()
+        .body;
+        let second = build_request(
+            &BUILDER_OP,
+            flags,
+            RequestOverrides {
+                body: Some(BodySource::Inline(r#"{"layers":{"body":"body-layer"}}"#)),
+                sets: &sets,
+            },
+        )
+        .unwrap()
+        .body;
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            serde_json::json!({
+                "layers": {
+                    "field": "field-layer",
+                    "body": "body-layer",
+                    "set": "set-layer"
+                },
+                "sentinel": {
+                    "modeled": "field-layer",
+                    "builder-flag": "builder-layer"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn sentinel_builder_dispatch_is_total_for_canary_variant() {
+        // Budget canary: target <= ~16 real builders + Sentinel, hard max 20.
+        assert_eq!(
+            run_builder(BuilderId::Sentinel, &[]),
+            serde_json::json!({ "sentinel": {} })
+        );
     }
 }

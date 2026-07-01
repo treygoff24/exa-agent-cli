@@ -89,7 +89,11 @@ pub enum Capability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuilderId {}
+pub enum BuilderId {
+    /// Permanent self-test for body-builder merge dispatch. Intentionally never
+    /// assigned to production operations; future waves add real variants.
+    Sentinel,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidatorId {}

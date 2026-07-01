@@ -55,6 +55,8 @@ struct OpMeta {
     #[serde(default)]
     mixed_status_exit: Option<bool>,
     #[serde(default)]
+    body_builder: Option<String>,
+    #[serde(default)]
     fields: Vec<FieldMeta>,
 }
 
@@ -80,13 +82,29 @@ enum ConfirmKind {
     EchoId,
 }
 
-#[derive(Deserialize)]
+/// Overlay extension shapes:
+/// - field `co_fields = [["trigger.type", "interval"], ["trigger.active", true]]`
+/// - field `item_template = "description"`
+/// - op `body_builder = "Sentinel"` (unknown names fail the build)
+#[derive(Clone, Deserialize)]
 struct FieldMeta {
     flag: String,
     body_path: String,
     kind: String,
     #[serde(default)]
     required: bool,
+    #[serde(default)]
+    co_fields: Vec<(String, ConstMeta)>,
+    #[serde(default)]
+    item_template: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum ConstMeta {
+    Str(String),
+    Bool(bool),
+    Int(i64),
 }
 
 /// What a spec contributes for one operationId.
@@ -184,6 +202,7 @@ struct OpRow {
     source: String,
     source_version: String,
     fields: Vec<FieldMeta>,
+    body_builder: Option<String>,
 }
 
 fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result<OpRow> {
@@ -249,16 +268,8 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         deprecated,
         source,
         source_version,
-        fields: meta
-            .fields
-            .iter()
-            .map(|f| FieldMeta {
-                flag: f.flag.clone(),
-                body_path: f.body_path.clone(),
-                kind: f.kind.clone(),
-                required: f.required,
-            })
-            .collect(),
+        fields: meta.fields.to_vec(),
+        body_builder: meta.body_builder.clone(),
     })
 }
 
@@ -276,10 +287,15 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
     };
     let mut fields = String::new();
     for f in &r.fields {
+        let co_fields = co_fields_literal(&f.co_fields);
+        let item_template = match &f.item_template {
+            Some(key) => format!("Some({key:?})"),
+            None => "None".to_string(),
+        };
         write!(
             fields,
             "FieldDef {{ flag: {:?}, body_path: {:?}, kind: {}, required: {}, \
-             co_fields: &[], item_template: None, enum_values: &[], range: None }}, ",
+             co_fields: {co_fields}, item_template: {item_template}, enum_values: &[], range: None }}, ",
             f.flag,
             f.body_path,
             field_kind_variant(&f.kind)?,
@@ -287,13 +303,17 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         )?;
     }
     let capabilities = capabilities(r)?;
+    let body_builder = match &r.body_builder {
+        Some(name) => format!("Some({})", builder_variant(&r.operation_id, name)?),
+        None => "None".to_string(),
+    };
     writeln!(
         out,
         "    OperationDef {{ cli_path: &[{cli_path}], operation_id: {oid:?}, method: {method}, \
          api_path: {api_path:?}, read_only: {read_only}, streaming: {streaming}, pagination: {pagination}, \
          dangerous: {dangerous}, namespace: Namespace::{ns}, idempotency_sensitive: {idem}, \
          deprecated: {dep}, source: {source:?}, source_version: {sver:?}, fields: &[{fields}], \
-         capabilities: &[{capabilities}], body_builder: None, validators: &[], mixed_status_exit: {mixed} }},",
+         capabilities: &[{capabilities}], body_builder: {body_builder}, validators: &[], mixed_status_exit: {mixed} }},",
         oid = r.operation_id,
         api_path = r.api_path,
         read_only = r.read_only,
@@ -307,6 +327,27 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         sver = r.source_version,
     )?;
     Ok(())
+}
+
+fn co_fields_literal(fields: &[(String, ConstMeta)]) -> String {
+    if fields.is_empty() {
+        return "&[]".to_string();
+    }
+
+    let mut out = String::from("&[");
+    for (path, value) in fields {
+        let _ = write!(out, "({path:?}, {}), ", const_value_literal(value));
+    }
+    out.push(']');
+    out
+}
+
+fn const_value_literal(value: &ConstMeta) -> String {
+    match value {
+        ConstMeta::Str(s) => format!("ConstValue::Str({s:?})"),
+        ConstMeta::Bool(b) => format!("ConstValue::Bool({b})"),
+        ConstMeta::Int(i) => format!("ConstValue::Int({i})"),
+    }
 }
 
 fn capabilities(r: &OpRow) -> Result<String> {
@@ -363,6 +404,13 @@ fn field_kind_variant(k: &str) -> Result<&'static str> {
         "str_array" => "FieldKind::StrArray",
         "json" => "FieldKind::Json",
         other => return Err(anyhow!("unknown field kind {other:?}")),
+    })
+}
+
+fn builder_variant(oid: &str, name: &str) -> Result<&'static str> {
+    Ok(match name {
+        "Sentinel" => "BuilderId::Sentinel",
+        other => return Err(anyhow!("op {oid}: unknown body_builder {other:?}")),
     })
 }
 

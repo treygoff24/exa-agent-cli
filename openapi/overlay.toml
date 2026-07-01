@@ -48,6 +48,7 @@ streaming = true
 [operations."getContents"]
 cli_path = "contents"
 namespace = "api"
+mixed_status_exit = true
 
 [operations."batchMonitors"]
 cli_path = "monitor batch"

@@ -53,6 +53,8 @@ struct OpMeta {
     #[serde(default)]
     secret_capture: Option<SecretCaptureMeta>,
     #[serde(default)]
+    mixed_status_exit: Option<bool>,
+    #[serde(default)]
     fields: Vec<FieldMeta>,
 }
 
@@ -176,6 +178,7 @@ struct OpRow {
     namespace: &'static str,
     confirm: Option<ConfirmMeta>,
     secret_capture: Option<SecretCaptureMeta>,
+    mixed_status_exit: bool,
     idempotency_sensitive: bool,
     deprecated: bool,
     source: String,
@@ -241,6 +244,7 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         namespace,
         confirm: meta.confirm.clone(),
         secret_capture: meta.secret_capture.clone(),
+        mixed_status_exit: meta.mixed_status_exit.unwrap_or(false),
         idempotency_sensitive: meta.idempotency_sensitive,
         deprecated,
         source,
@@ -289,12 +293,13 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
          api_path: {api_path:?}, read_only: {read_only}, streaming: {streaming}, pagination: {pagination}, \
          dangerous: {dangerous}, namespace: Namespace::{ns}, idempotency_sensitive: {idem}, \
          deprecated: {dep}, source: {source:?}, source_version: {sver:?}, fields: &[{fields}], \
-         capabilities: &[{capabilities}], body_builder: None, validators: &[], mixed_status_exit: false }},",
+         capabilities: &[{capabilities}], body_builder: None, validators: &[], mixed_status_exit: {mixed} }},",
         oid = r.operation_id,
         api_path = r.api_path,
         read_only = r.read_only,
         streaming = r.streaming,
         dangerous = r.dangerous,
+        mixed = r.mixed_status_exit,
         ns = r.namespace,
         idem = r.idempotency_sensitive,
         dep = r.deprecated,

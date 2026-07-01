@@ -454,6 +454,26 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     };
+    if !raw.is_null() && raw.as_i64().is_none() && raw.as_u64().is_none() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_field_type",
+                "field `numResults` (flag `--num-results`) must be an integer",
+            )
+            .with_details(serde_json::json!({
+                "issue": "invalid_field_type",
+                "field": "numResults",
+                "flag": "num-results",
+                "expected": "integer",
+                "received": raw,
+            }))
+            .with_suggestion(format!(
+                "exa-agent search {} --num-results {}",
+                shell_quote(query),
+                replacement_positive_int(&received, Some(100))
+            )),
+        ));
+    }
     Err(CliError::Usage(
         Diag::new(
             "invalid_value",
@@ -4498,6 +4518,16 @@ fn ensure_registry_yes_confirmed(
     ))
 }
 
+/// Trust-boundary preflight shared by every live typed path: validate registry-modeled input,
+/// then enforce the destructive-op confirm gate. Runs before credential resolution or network I/O.
+fn live_typed_preflight(spec: &request::RequestSpec, globals: &GlobalArgs) -> Result<(), CliError> {
+    let validation = validate_registry_input(spec.op, &spec.body);
+    if validation.valid == serde_json::Value::Bool(false) {
+        return Err(registry_validation_error(validation));
+    }
+    ensure_registry_yes_confirmed(spec.op, globals)
+}
+
 fn dispatch_typed_inner(
     spec: &request::RequestSpec,
     globals: &GlobalArgs,
@@ -4528,7 +4558,7 @@ fn dispatch_typed_inner(
         );
         return Ok(0);
     }
-    ensure_registry_yes_confirmed(spec.op, globals)?;
+    live_typed_preflight(spec, globals)?;
 
     let effective_globals = options
         .extra_headers
@@ -4856,6 +4886,9 @@ fn dispatch_typed_chunks_inner(
         }
         return Ok(0);
     }
+    for spec in &specs {
+        live_typed_preflight(spec, globals)?;
+    }
 
     let op = specs
         .first()
@@ -5041,7 +5074,7 @@ fn execute_typed_live<T: Transport>(
     }
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let exit_code = if command == "contents" {
+    let exit_code = if spec.op.mixed_status_exit {
         transport::contents_mixed_status_exit_code(&data)
     } else {
         0
@@ -5912,13 +5945,25 @@ fn validate_registry_input(
             .unwrap_or("your query");
         if let Err(err) = validate_search_num_results_body(body, query) {
             let diag = err.diag();
+            let mut details = serde_json::json!({
+                "issue": "invalid_value",
+                "field": "numResults",
+                "flag": "num-results",
+                "message": diag.message.clone(),
+            });
+            if let (Some(details), Some(extra)) = (
+                details.as_object_mut(),
+                diag.details
+                    .as_deref()
+                    .and_then(serde_json::Value::as_object),
+            ) {
+                for (key, value) in extra {
+                    details.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
             return ValidateInputOutcome {
                 valid: serde_json::Value::Bool(false),
-                details: Some(serde_json::json!({
-                    "issue": "invalid_value",
-                    "field": "numResults",
-                    "message": diag.message,
-                })),
+                details: Some(details),
                 suggested_command: diag.suggested_command.clone(),
                 note: None,
             };
@@ -5931,6 +5976,74 @@ fn validate_registry_input(
         suggested_command: None,
         note: None,
     }
+}
+
+fn registry_validation_error(outcome: ValidateInputOutcome) -> CliError {
+    let details = outcome
+        .details
+        .unwrap_or_else(|| serde_json::json!({ "issue": "invalid_value" }));
+    let issue = details
+        .get("issue")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("invalid_value");
+    let field = details
+        .get("field")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("body");
+    let flag = details
+        .get("flag")
+        .and_then(serde_json::Value::as_str)
+        .map(|flag| format!("--{flag}"))
+        .unwrap_or_else(|| "--body/--set".to_string());
+    let message = match issue {
+        "missing_required_field" => format!("missing required field `{field}` (flag `{flag}`)"),
+        "invalid_field_type" => {
+            let expected = details
+                .get("expected")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("valid value");
+            format!(
+                "field `{field}` (flag `{flag}`) must be {}",
+                expected_with_article(expected)
+            )
+        }
+        "invalid_value" => details
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("request body failed registry validation")
+            .to_string(),
+        "invalid_enum_value" => {
+            let allowed = details
+                .get("allowed")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|values| !values.is_empty())
+                .unwrap_or_else(|| "one of the allowed values".to_string());
+            format!("field `{field}` (flag `{flag}`) must be one of: {allowed}")
+        }
+        _ => format!("field `{field}` (flag `{flag}`) is invalid"),
+    };
+
+    let mut diag = Diag::new(issue, message).with_details(details);
+    if let Some(suggestion) = outcome.suggested_command {
+        diag = diag.with_suggestion(suggestion);
+    }
+    CliError::Usage(diag)
+}
+
+fn expected_with_article(expected: &str) -> String {
+    let article = if expected.starts_with("array") || expected.starts_with("integer") {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} {expected}")
 }
 
 fn validate_field_kind(
@@ -6394,6 +6507,10 @@ fn data_with_expands_to(
     data
 }
 
+// Registry carve-out (by design): `raw` is the unmodeled escape hatch. It maps to no
+// `OperationDef` (all envelopes here use `operation: None`), so it is intentionally exempt
+// from the registry-driven stages — input validation, the confirm gate, secret capture, and
+// placeholder guards. Callers reaching for `raw` have opted out of that governance on purpose.
 fn dispatch_raw(args: &cli::RawArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     let method = args.method.to_uppercase();
     let request_id = if globals.print_request || globals.dry_run {
@@ -7187,6 +7304,42 @@ mod tests {
                 segments.join(" ")
             );
         }
+    }
+
+    #[test]
+    fn mixed_status_exit_is_registry_driven_for_contents_only() {
+        assert!(
+            registry::lookup_by_command("contents")
+                .unwrap()
+                .mixed_status_exit,
+            "contents must carry mixed_status_exit so the partial-failure exit code fires"
+        );
+        assert!(
+            !registry::lookup_by_command("search")
+                .unwrap()
+                .mixed_status_exit,
+            "search must not report partial-status exit codes"
+        );
+    }
+
+    #[test]
+    fn validate_registry_input_preserves_search_range_details() {
+        let op = registry::lookup_by_segments(&["search"]).unwrap();
+        let outcome =
+            validate_registry_input(op, &serde_json::json!({"query": "x", "numResults": 500}));
+        let details = outcome.details.as_ref().unwrap();
+
+        assert_eq!(outcome.valid, false);
+        assert_eq!(details["issue"], "invalid_value");
+        assert_eq!(details["field"], "numResults");
+        assert_eq!(details["flag"], "num-results");
+        assert_eq!(
+            details["message"],
+            "`search numResults` must be an integer between 1 and 100"
+        );
+        assert_eq!(details["min"], 1);
+        assert_eq!(details["max"], 100);
+        assert_eq!(details["received"], 500);
     }
 
     #[test]

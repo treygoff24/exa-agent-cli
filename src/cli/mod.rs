@@ -249,7 +249,14 @@ impl std::fmt::Debug for GlobalArgs {
                 &self
                     .headers
                     .iter()
-                    .map(|h| crate::redaction::redact_header(h))
+                    .map(|h| {
+                        let name = h.split_once(':').map(|(name, _)| name).unwrap_or(h);
+                        if crate::redaction::is_secret_name(name) {
+                            format!("{}: <redacted>", name.trim())
+                        } else {
+                            h.clone()
+                        }
+                    })
                     .collect::<Vec<_>>(),
             )
             .field("beta", &self.beta)
@@ -265,7 +272,14 @@ impl std::fmt::Debug for GlobalArgs {
                 &self
                     .set
                     .iter()
-                    .map(|v| crate::redaction::redact_set_value(v))
+                    .map(|v| {
+                        let key = v.split_once('=').map(|(key, _)| key).unwrap_or(v);
+                        if crate::redaction::is_secret_name(key) {
+                            format!("{key}=<redacted>")
+                        } else {
+                            v.clone()
+                        }
+                    })
                     .collect::<Vec<_>>(),
             )
             .field("body", &self.body.as_ref().map(|_| "<redacted>"))

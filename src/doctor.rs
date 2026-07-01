@@ -7,7 +7,6 @@ use serde::Serialize;
 use crate::auth::{self, CredentialNamespace};
 use crate::config::{self, Config};
 use crate::error::CliError;
-use crate::redaction;
 use crate::registry::{BUILD_DATE, EMBEDDED_SPEC_SHA256, GIT_SHA, SPEC_VERSION, TARGET};
 use crate::transport::AuthProbe;
 
@@ -122,9 +121,7 @@ pub struct DoctorReport {
 
 impl DoctorReport {
     pub fn to_json(&self) -> serde_json::Value {
-        let mut value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
-        redaction::scrub_json_value(&mut value);
-        value
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -146,7 +143,7 @@ pub fn run_doctor(options: &DoctorOptions, ctx: &DoctorCtx) -> DoctorReport {
             "connectivity" => detect_connectivity(options, ctx),
             _ => continue,
         };
-        findings.push(scrub_finding(finding));
+        findings.push(finding);
     }
 
     let status = summarize_status(&findings);
@@ -179,15 +176,6 @@ pub fn validate_check_ids(checks: &[String]) -> Result<(), CliError> {
         }))
         .with_suggestion("exa-agent doctor --check key.present"),
     ))
-}
-
-fn scrub_finding(mut finding: Finding) -> Finding {
-    finding.message = redaction::scrub_text(&finding.message);
-    finding.suggested_command = finding
-        .suggested_command
-        .as_deref()
-        .map(redaction::scrub_text);
-    finding
 }
 
 pub fn doctor_exit_code(report: &DoctorReport) -> i32 {

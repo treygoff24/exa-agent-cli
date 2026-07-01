@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::redaction;
 use crate::registry::OperationDef;
 
 pub const SCHEMA: &str = "exa.cli.pending_run.v1";
@@ -113,16 +112,15 @@ pub fn set_test_pending_runs_path(path: Option<PathBuf>) {
 }
 
 fn to_json_record(record: &PendingRunRecord<'_>) -> JsonRecord {
-    let recovery_command = redaction::scrub_text(record.recovery_command);
     JsonRecord {
         schema: SCHEMA,
         attempted_at: now_epoch_seconds(),
         command: record.command.to_string(),
-        operation_id: record.operation_id.map(redaction::scrub_text),
-        api_path: redaction::scrub_text(record.api_path),
-        request_id: redaction::scrub_text(record.request_id),
-        idempotency_key: record.idempotency_key.map(redaction::scrub_text),
-        recovery_command,
+        operation_id: record.operation_id.map(str::to_string),
+        api_path: record.api_path.to_string(),
+        request_id: record.request_id.to_string(),
+        idempotency_key: record.idempotency_key.map(str::to_string),
+        recovery_command: record.recovery_command.to_string(),
     }
 }
 

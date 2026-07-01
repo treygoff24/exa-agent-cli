@@ -4099,7 +4099,7 @@ fn query_preview(query: &[(String, String)]) -> Vec<serde_json::Value> {
             let value = if redaction::is_secret_name(name) {
                 redaction::REDACTED.to_string()
             } else {
-                redaction::scrub_text(value)
+                value.clone()
             };
             serde_json::json!({ "name": name, "value": value })
         })
@@ -4113,7 +4113,7 @@ fn header_preview(headers: &[(String, String)]) -> Vec<serde_json::Value> {
             let value = if redaction::is_secret_name(name) {
                 redaction::REDACTED.to_string()
             } else {
-                redaction::scrub_text(value)
+                value.clone()
             };
             serde_json::json!({ "name": name, "value": value })
         })
@@ -4956,11 +4956,8 @@ fn execute_typed_live<T: Transport>(
             })?;
         reservation.commit(secret)?;
     }
-    // Defense in depth: a create response may carry secret material. Secret-capturing
-    // creates commit it above; this scrubs secret-named/shaped fields on the generic
-    // typed create path so nothing sensitive is echoed to stdout.
-    if spec.op.idempotency_sensitive {
-        redaction::redact_json_value(&mut data);
+    if let Some((field, _, _)) = spec.op.secret_capture() {
+        redaction::redact_named_field(&mut data, field);
     }
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
@@ -5042,8 +5039,10 @@ fn execute_streaming_live<T: Transport>(
 
     if frames.is_empty() {
         let mut data = transport::parse_response_data(&result.response.body);
-        if operation.is_some_and(|op| op.idempotency_sensitive) {
-            redaction::redact_json_value(&mut data);
+        if let Some(op) = operation {
+            if let Some((field, _, _)) = op.secret_capture() {
+                redaction::redact_named_field(&mut data, field);
+            }
         }
         let envelope = response_envelope(ResponseEnvelopeArgs {
             command,
@@ -5233,7 +5232,7 @@ fn attach_pending_run_details(
             );
             obj.insert(
                 "pendingRunApiPath".to_string(),
-                serde_json::Value::String(redaction::scrub_text(route_path)),
+                serde_json::Value::String(route_path.to_string()),
             );
             match write_result {
                 Ok(()) => {
@@ -5249,7 +5248,7 @@ fn attach_pending_run_details(
                     );
                     obj.insert(
                         "pendingRunWriteError".to_string(),
-                        serde_json::Value::String(redaction::scrub_text(&err.to_string())),
+                        serde_json::Value::String(err.to_string()),
                     );
                 }
             }
@@ -6426,8 +6425,7 @@ fn redacted_preview_expanded(
     spec: &request::RequestSpec,
     preview: TypedPreviewOptions<'_>,
 ) -> serde_json::Value {
-    let mut body = typed_wire_body(spec);
-    redaction::redact_json_value(&mut body);
+    let body = typed_wire_body(spec);
     let command = preview
         .command_override
         .map(str::to_string)
@@ -6474,15 +6472,14 @@ fn data_with_expands_to(
     let Some(expands_to) = expands_to else {
         return data;
     };
-    let expands_to = redaction::scrub_text(expands_to);
     if let serde_json::Value::Object(obj) = &mut data {
         obj.insert(
             "expandsTo".to_string(),
-            serde_json::Value::String(expands_to.clone()),
+            serde_json::Value::String(expands_to.to_string()),
         );
         obj.insert(
             "expands_to".to_string(),
-            serde_json::Value::String(expands_to),
+            serde_json::Value::String(expands_to.to_string()),
         );
     }
     data
@@ -6528,9 +6525,8 @@ fn dispatch_raw_inner(
     reject_placeholder_value(&args.path, "path")?;
     parse_user_headers(&globals.headers)?;
     if globals.print_request || globals.dry_run {
-        let mut body = raw_body(globals)?;
+        let body = raw_body(globals)?;
         let query = raw_query_preview(&args.query)?;
-        redaction::redact_json_value(&mut body);
         let data = serde_json::json!({
             "request": {
                 "method": method,
@@ -6611,11 +6607,7 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
-    let mut data = transport::parse_response_data(&result.response.body);
-    // `raw` is the escape hatch; `--raw` above already emits exact upstream bytes for
-    // callers who want them. The enveloped form scrubs secret-named/shaped fields so an
-    // agent that hits a key/secret-minting endpoint via `raw` never prints credentials.
-    redaction::redact_json_value(&mut data);
+    let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
     let envelope = response_envelope(ResponseEnvelopeArgs {
@@ -6672,7 +6664,7 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
             let value = if redaction::is_secret_name(name) {
                 redaction::REDACTED.to_string()
             } else {
-                redaction::scrub_text(value)
+                value.to_string()
             };
             Ok(serde_json::json!({ "name": name, "value": value }))
         })
@@ -7329,16 +7321,9 @@ mod tests {
             assert_eq!(f, *field);
             assert_eq!(fl, *flag);
             assert_eq!(req, *required);
-            // stdout-safety: the captured field name is redaction-recognized, and the op is
-            // idempotency_sensitive, so redact_json_value scrubs it from the response envelope.
             assert!(
                 redaction::is_secret_name(field),
-                "{field} must be redaction-recognized so it never reaches stdout"
-            );
-            assert!(
-                op.idempotency_sensitive,
-                "{} must be idempotency_sensitive for redaction to fire",
-                segments.join(" ")
+                "{field} must be redaction-recognized for targeted stdout redaction"
             );
         }
     }
@@ -7485,6 +7470,40 @@ mod tests {
         assert_eq!(written, "SUPER_SECRET_XYZ");
         assert_ne!(written, redaction::REDACTED);
         let _ = std::fs::remove_file(&secret_path);
+    }
+
+    #[test]
+    fn secret_capture_redacts_only_response_field_in_envelope() {
+        let op = registry::lookup_by_segments(&["admin", "keys", "create"]).unwrap();
+        let (field, _, _) = op
+            .secret_capture()
+            .expect("admin keys create secret_capture");
+        let mut data = serde_json::json!({
+            "id": "key_1",
+            "apiKey": "SUPER_SECRET_XYZ",
+            "name": "ci-key"
+        });
+        redaction::redact_named_field(&mut data, field);
+        let envelope = response_envelope(ResponseEnvelopeArgs {
+            command: "admin keys create",
+            method: "POST",
+            path: op.api_path,
+            operation: Some(op),
+            request_id: "req_secret",
+            profile: "default",
+            correlation_id: None,
+            data,
+            count: Some(1),
+            data_hash: None,
+            retries: 0,
+            warnings: &[],
+        });
+        assert_eq!(envelope["data"]["id"], "key_1");
+        assert_eq!(envelope["data"]["name"], "ci-key");
+        assert_eq!(envelope["data"]["apiKey"], redaction::REDACTED);
+        assert!(!serde_json::to_string(&envelope)
+            .unwrap()
+            .contains("SUPER_SECRET_XYZ"));
     }
 
     #[test]

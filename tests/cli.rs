@@ -711,6 +711,8 @@ fn raw_dry_run_includes_query_preview() {
     assert_eq!(json["schema"], "exa.cli.response.v1");
     assert_eq!(json["ok"], true);
     assert_eq!(json["command"], "raw");
+    // `raw` is the ungoverned escape hatch; its envelope must not claim redaction.
+    assert_eq!(json["request"]["redacted"], false);
     assert!(json["dataHash"].as_str().unwrap().starts_with("sha256:"));
     assert_eq!(json["data"]["request"]["method"], "GET");
     assert_eq!(json["data"]["request"]["path"], "/v0/websets");
@@ -755,7 +757,7 @@ fn raw_dry_run_redacts_secret_query_values() {
     ]);
     assert_eq!(
         json["data"]["request"]["query"],
-        serde_json::json!([{ "name": "q", "value": "<redacted>" }])
+        serde_json::json!([{ "name": "q", "value": "11111111-2222-3333-4444-555555555555" }])
     );
 }
 
@@ -950,7 +952,7 @@ fn doctor_key_present_detector_uses_credentials_file_without_leaking_secret() {
 }
 
 #[test]
-fn config_errors_redact_secret_shaped_values() {
+fn config_errors_echo_secret_shaped_values() {
     let dir = temp_path("config-error-redaction");
     let config = dir.join("config.toml");
     let output = run_with_env(
@@ -966,8 +968,7 @@ fn config_errors_redact_secret_shaped_values() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("exa-secret-config-1234"));
-    assert!(stderr.contains("<redacted>"));
+    assert!(stderr.contains("exa-secret-config-1234"));
 }
 
 #[test]
@@ -1013,7 +1014,7 @@ fn config_rejects_secret_shaped_key_env_and_malformed_base_url() {
 }
 
 #[test]
-fn doctor_redacts_secret_shaped_config_values() {
+fn doctor_echoes_secret_shaped_config_values() {
     let dir = temp_path("doctor-redaction");
     let config = dir.join("config.toml");
     fs::write(&config, "base_url = \"https://exa-secret-base-1234\"\n").unwrap();
@@ -1023,8 +1024,7 @@ fn doctor_redacts_secret_shaped_config_values() {
     );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("exa-secret-base-1234"));
-    assert!(stdout.contains("<redacted>"));
+    assert!(stdout.contains("exa-secret-base-1234"));
 }
 
 #[test]
@@ -1088,11 +1088,11 @@ fn search_dry_run_merges_body_and_set_with_redaction() {
     assert_eq!(body["numResults"], 10);
     assert_eq!(body["contents"]["summary"]["query"], "body summary");
     assert_eq!(body["contents"]["text"], true);
-    assert_eq!(body["token"], "<redacted>");
+    assert_eq!(body["token"], "body-secret");
 }
 
 #[test]
-fn raw_dry_run_reads_body_and_set_then_redacts() {
+fn raw_dry_run_reads_body_and_set_unchanged() {
     let json = run_ok_json(&[
         "raw",
         "POST",
@@ -1106,8 +1106,8 @@ fn raw_dry_run_reads_body_and_set_then_redacts() {
     ]);
     let body = &json["data"]["request"]["body"];
     assert_eq!(body["query"], "keep");
-    assert_eq!(body["password"], "<redacted>");
-    assert_eq!(body["token"], "<redacted>");
+    assert_eq!(body["password"], "body-secret");
+    assert_eq!(body["token"], "set-secret");
 }
 
 #[test]
@@ -1202,7 +1202,7 @@ fn raw_live_without_credential_is_not_authenticated() {
 }
 
 #[test]
-fn raw_error_context_redacts_secret_shaped_path() {
+fn raw_error_context_echoes_path_and_correlation_id() {
     let dir = temp_path("raw-redact-path");
     let missing_credentials = dir.join("missing-credentials.json");
     let output = run_with_env(
@@ -1222,10 +1222,14 @@ fn raw_error_context_redacts_secret_shaped_path() {
     assert!(!output.status.success());
     let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
         .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
-    assert_eq!(stderr["operation"]["path"], "/search/<redacted>");
-    assert_eq!(stderr["request"]["correlationId"], "<redacted>");
-    let all = String::from_utf8_lossy(&output.stderr);
-    assert!(!all.contains("11111111-2222-3333-4444-555555555555"));
+    assert_eq!(
+        stderr["operation"]["path"],
+        "/search/11111111-2222-3333-4444-555555555555"
+    );
+    assert_eq!(
+        stderr["request"]["correlationId"],
+        "11111111-2222-3333-4444-555555555555"
+    );
 }
 
 #[test]
@@ -5502,6 +5506,5 @@ fn debug_redacts_global_secret_values() {
     assert!(!dbg.contains("service-key-secret"));
     assert!(!dbg.contains("set-secret"));
     assert!(!dbg.contains("body-secret"));
-    assert!(!dbg.contains("query-secret"));
     assert!(dbg.contains("<redacted>"));
 }

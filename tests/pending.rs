@@ -166,7 +166,7 @@ fn surfaces_io_errors() {
 }
 
 #[test]
-fn scrubs_secret_shaped_serialized_values() {
+fn pending_run_records_preserve_route_and_recovery_values() {
     let _epoch = SourceDateEpochGuard::set("12345");
     let path = temp_path("redaction").join("pending.jsonl");
     let record = PendingRunRecord {
@@ -181,17 +181,16 @@ fn scrubs_secret_shaped_serialized_values() {
     append_pending_run(&path, &record).unwrap();
 
     let raw = fs::read_to_string(&path).unwrap();
-    assert!(!raw.contains("sk-exa-secret-1234"));
-    assert!(!raw.contains("sk-exa-secret-5678"));
-    assert!(!raw.contains("sk-exa-secret-9012"));
-    assert!(raw.contains("<redacted>"));
+    assert!(raw.contains("sk-exa-secret-1234"));
+    assert!(raw.contains("sk-exa-secret-5678"));
+    assert!(raw.contains("sk-exa-secret-9012"));
 
     let value: Value = serde_json::from_str(raw.trim()).unwrap();
-    assert_eq!(value["apiPath"], "/agent/runs?token=<redacted>");
-    assert_eq!(value["idempotencyKey"], "<redacted>");
+    assert_eq!(value["apiPath"], "/agent/runs?token=sk-exa-secret-1234");
+    assert_eq!(value["idempotencyKey"], "sk-exa-secret-5678");
     assert_eq!(
         value["recoveryCommand"],
-        "exa-agent agent runs list --limit 10 --token <redacted>"
+        "exa-agent agent runs list --limit 10 --token sk-exa-secret-9012"
     );
 }
 

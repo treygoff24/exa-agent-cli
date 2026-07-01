@@ -3,7 +3,6 @@
 use serde::Serialize;
 
 use crate::error::{error_code_specs, CliError, EXIT_CODES};
-use crate::redaction;
 use crate::registry::{self, OperationDef, Pagination};
 
 /// `exa.cli.error.v1` (contracts §5). Rendered to stderr; stdout stays empty on error.
@@ -52,10 +51,7 @@ pub struct ErrorRequest {
 impl ErrorEnvelope {
     pub fn from_error(err: &CliError) -> Self {
         let d = err.diag();
-        let mut details = d.details.as_deref().cloned();
-        if let Some(value) = &mut details {
-            redaction::scrub_json_value(value);
-        }
+        let details = d.details.as_deref().cloned();
         ErrorEnvelope {
             schema: "exa.cli.error.v1",
             ok: false,
@@ -63,11 +59,11 @@ impl ErrorEnvelope {
                 code: d.code.clone(),
                 category: err.category_name(),
                 exit_code: err.category(),
-                message: redaction::scrub_text(&d.message),
+                message: d.message.clone(),
                 retryable: d.retryable,
                 details,
                 http_status: d.http_status,
-                suggested_command: d.suggested_command.as_deref().map(redaction::scrub_text),
+                suggested_command: d.suggested_command.clone(),
             },
             operation: ErrorOperation {
                 method: None,
@@ -93,10 +89,10 @@ impl ErrorEnvelope {
         request_id: impl Into<String>,
         correlation_id: Option<String>,
     ) -> Self {
-        self.operation.method = Some(redaction::scrub_text(&method.into()));
-        self.operation.path = Some(redaction::scrub_text(&path.into()));
+        self.operation.method = Some(method.into());
+        self.operation.path = Some(path.into());
         self.request.request_id = Some(request_id.into());
-        self.request.correlation_id = correlation_id.map(|value| redaction::scrub_text(&value));
+        self.request.correlation_id = correlation_id;
         self
     }
 }
@@ -218,7 +214,9 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
             "upstreamRequestId": null,
             "correlationId": args.correlation_id,
             "profile": args.profile,
-            "redacted": true,
+            // `raw` is the ungoverned escape hatch: it emits the upstream response as-is
+            // (no secret-field redaction), so its envelope must not claim otherwise.
+            "redacted": args.command != "raw",
         },
         "count": args.count,
         "data": args.data,

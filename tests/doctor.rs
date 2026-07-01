@@ -87,6 +87,45 @@ fn doctor_findings_when_config_malformed() {
 }
 
 #[test]
+fn doctor_config_parse_message_preserves_exa_agent_cli_path() {
+    let disk_path = temp_config_path("ok");
+    fs::write(&disk_path, "base_url = \"https://api.exa.ai\"\n").unwrap();
+    let load = Config::load_from_path(&disk_path);
+    let path = PathBuf::from("/tmp/.config/exa-agent-cli/config.toml");
+    let ctx = DoctorCtx {
+        config_path: path.clone(),
+        config_load: load,
+        api_key: None,
+        service_key: None,
+        stdout_is_tty: false,
+        expected_spec_sha256: None,
+        online_probes: None,
+    };
+    let report = run_doctor(
+        &DoctorOptions {
+            checks: vec!["config.parse".to_string()],
+            ..DoctorOptions::default()
+        },
+        &ctx,
+    );
+    let json = report.to_json();
+    let finding = json["findings"]
+        .as_array()
+        .and_then(|findings| {
+            findings
+                .iter()
+                .find(|finding| finding["id"] == "config.parse")
+        })
+        .expect("config.parse finding");
+    let message = finding["message"].as_str().expect("message");
+    assert!(
+        message.contains("exa-agent-cli"),
+        "expected full config path segment, got: {message}"
+    );
+    assert!(!message.contains("<redacted>"));
+}
+
+#[test]
 fn doctor_service_key_scope_finding() {
     let path = temp_config_path("scope");
     fs::write(&path, "base_url = \"https://api.exa.ai\"\n").unwrap();

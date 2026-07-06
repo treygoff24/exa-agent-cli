@@ -2,13 +2,15 @@
 
 An agent-first command-line interface over the full [Exa](https://exa.ai) API.
 
+Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
+
 `exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, research, monitors, the whole Websets tree, and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, prints one JSON envelope, has a stable exit code, and can describe itself offline. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
-The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.0.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
+The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.1.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
 ## Build and run
 
-There is no published package yet, so build from source:
+Build from source:
 
 ```sh
 cargo build --release
@@ -103,7 +105,7 @@ Alternatively, `exa-agent auth login` reads a key from stdin and writes it to a 
 
 ## Design docs
 
-The full design set for the Rust build lives under [`docs/v2/`](docs/v2/README.md): the locked decisions and their rationale ([`decisions.md`](docs/v2/decisions.md)), the agent-facing wire/output spec ([`contracts.md`](docs/v2/contracts.md)), the complete command tree ([`commands.md`](docs/v2/commands.md)), the crate architecture ([`architecture.md`](docs/v2/architecture.md)), and the phased implementation plan ([`implementation-plan.md`](docs/v2/implementation-plan.md)). The domain glossary is in [`CONTEXT.md`](CONTEXT.md). Earlier, language-agnostic v1 notes remain under [`docs/`](docs/) and [`work/research/`](work/research/) for traceability.
+The full design set for the Rust build lives under `docs/v2/`: the locked decisions and their rationale (`decisions.md`), the agent-facing wire/output spec (`contracts.md`), the complete command tree (`commands.md`), the crate architecture (`architecture.md`), and the phased implementation plan (`implementation-plan.md`). The domain glossary is in `CONTEXT.md`. Earlier, language-agnostic v1 notes remain under `docs/` and `work/research/` for traceability.
 
 ## License
 

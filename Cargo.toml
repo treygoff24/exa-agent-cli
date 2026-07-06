@@ -1,24 +1,24 @@
 [package]
 name = "exa-agent-cli"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Agent-first CLI over the full Exa API surface (single static binary)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/treygoff/exa-agent-cli"
+repository = "https://github.com/treygoff24/exa-agent-cli"
 readme = "README.md"
 keywords = ["exa", "cli", "agent", "search", "ai"]
 categories = ["command-line-utilities"]
 # build.rs regenerates the registry from these committed inputs, so they are real
 # package inputs — a missing overlay.toml makes a published build fail (plan → publish checklist).
 include = [
-    "src/**/*.rs",
-    "build.rs",
-    "openapi/exa-openapi.json",
-    "openapi/team-management.json",
-    "openapi/overlay.toml",
-    "README.md",
-    "LICENSE-*",
+    "/src/**/*.rs",
+    "/build.rs",
+    "/openapi/exa-openapi.json",
+    "/openapi/team-management.json",
+    "/openapi/overlay.toml",
+    "/README.md",
+    "/LICENSE-*",
 ]
 
 [[bin]]

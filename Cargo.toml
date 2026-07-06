@@ -62,3 +62,7 @@ members = ["xtask"]
 [profile.release]
 strip = true
 lto = "thin"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"

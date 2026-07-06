@@ -8,6 +8,23 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.1.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
+## Install
+
+Pick whichever fits your setup:
+
+```sh
+# Homebrew (macOS/Linux)
+brew install treygoff24/tap/exa-agent
+
+# cargo
+cargo install exa-agent-cli
+
+# shell installer (from the GitHub release)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/treygoff24/exa-agent-cli/releases/latest/download/exa-agent-cli-installer.sh | sh
+```
+
+All three install the `exa-agent` binary. Verify with `exa-agent --version`.
+
 ## Build and run
 
 Build from source:

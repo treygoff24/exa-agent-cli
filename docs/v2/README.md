@@ -1,7 +1,7 @@
 # exa-agent — v2 design set
 
-Date: 2026-06-29
-Status: design-complete. This is the canonical design for the Rust rebuild of the Exa agent CLI. It supersedes the v1 docs in `docs/` (kept for traceability). Ready to start [Phase 1](implementation-plan.md#phase-1--skeleton-contracts-raw-offline-self-description).
+Date: 2026-06-29 (design); shipped as 0.1.0 on 2026-07-06.
+Status: this is the canonical design record for the Rust rebuild of the Exa agent CLI, written before implementation and kept as-is for traceability. It supersedes the v1 docs in `docs/`. The implementation described here shipped in the [0.1.0 release](../../CHANGELOG.md); where this document and the shipped binary might drift, prefer `exa-agent capabilities --json`, which is generated from the code.
 
 ## What changed from v1
 

@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## 0.2.0 — 2026-07-06
+
+Token-safe retrieval defaults: search results are now sized for agent context windows out of the box.
+
+- Breaking-ish pre-1.0: `search` now requests query-aware highlights by default at Exa's server default length; use `--highlights N` to cap highlight characters or `--no-highlights` for metadata-only results. Bare `search --text` and `similar --text` now request `text.maxCharacters=1500`; use `--text full` or `--text 0` for uncapped text. Bare `contents --text` remains uncapped.
+- Breaking-ish pre-1.0: default `--max-output-bytes` drops from 1 MiB to 48 KiB for agent context safety. Spill files are now pretty-printed JSON.
+
 ## 0.1.0 — 2026-07-06
 
 Initial public release.

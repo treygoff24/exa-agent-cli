@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 `exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, research, monitors, the whole Websets tree, and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, prints one JSON envelope, has a stable exit code, and can describe itself offline. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
-The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.1.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
+The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.2.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
 ## Install
 
@@ -47,12 +47,15 @@ A few real commands (all verified to parse):
 ```sh
 # Search
 exa-agent search "rust async runtimes" --num-results 5
+# Search returns query-aware highlights at server default length; add --highlights 800 to cap,
+# --no-highlights for metadata only, or --text / --text 1500 / --text full for page text.
 
 # Cited answer
 exa-agent answer "what changed in the EU AI Act in 2025?"
 
 # Page contents
 exa-agent contents https://exa.ai --text
+# Bare contents --text is uncapped; use --text N to cap deep reads.
 
 # Code/docs context for a coding agent
 exa-agent context "how to stream SSE in Rust with ureq"

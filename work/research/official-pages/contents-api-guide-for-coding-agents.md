@@ -248,8 +248,8 @@ for status in result.statuses:
   | Wrong                     | Correct                                                                                                                                            |
   | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
   | `useAutoprompt: true`     | Remove it. `useAutoprompt` does **not exist** on the `/contents` endpoint.                                                                         |
-  | `numSentences`            | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                                            |
-  | `highlightsPerUrl`        | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                                            |
+  | legacy sentence-count sizing | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                                         |
+  | legacy per-URL count sizing  | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                                         |
   | `livecrawl: "always"`     | Use `maxAgeHours: 0` instead. The `livecrawl` parameter is **deprecated**.                                                                         |
   | `tokensNum`               | Remove it. This parameter does **not exist**. Use `text.maxCharacters` to limit text length.                                                       |
   | `stream: true`            | Remove it. The `/contents` endpoint does **not** support streaming.                                                                                |

@@ -395,8 +395,10 @@ fn capabilities_per_op_key_set_is_pinned() {
 
     let expected = BTreeSet::from([
         "apiPath",
+        "contentDefaults",
         "deprecated",
         "destructive",
+        "fields",
         "idempotencySensitive",
         "method",
         "namespace",

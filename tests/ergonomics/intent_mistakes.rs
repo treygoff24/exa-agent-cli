@@ -12,7 +12,7 @@ fn search_text_maps_to_nested_contents_text() {
     ]);
     let body = &json["data"]["request"]["body"];
     assert_eq!(body["query"], "rust async");
-    assert_eq!(body["contents"]["text"], true);
+    assert_eq!(body["contents"]["text"]["maxCharacters"], 1500);
 }
 
 #[test]

@@ -204,7 +204,7 @@ Work on every command unless explicitly irrelevant. Output flags follow D6 / con
 | `--raw` | Exact upstream bytes, **no** CLI envelope. `--raw --stream` = raw SSE. Single spelling. |
 | `--pretty` / `--compact` | Whitespace only. Default: pretty in TTY, compact when piped. |
 | `-o, --output FILE` | Write the envelope (or `--raw` bytes) to FILE; stdout carries a small confirmation envelope with `dataPath` (D10, contracts §9). Context-window protection. |
-| `--max-output-bytes N` | Default-on ceiling on inline stdout payload (default ~1 MiB); over-ceiling spills to a file + handle (contracts §9). `0` disables. |
+| `--max-output-bytes N` | Default-on ceiling on inline stdout payload (default 48 KiB); over-ceiling spills pretty-printed JSON to a file + handle (contracts §9). `0` disables. |
 | `--correlation-id ID` | Agent-supplied id echoed into `request.correlationId` across stdout/stderr/`--trace` (contracts §4). Env: `EXA_CORRELATION_ID`. |
 
 Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Precedence: explicit `--format`/`--json`/`--ndjson`/`--raw` > `EXA_OUTPUT` > auto. `EXA_OUTPUT=human|json|ndjson` sets the default.
@@ -273,7 +273,7 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest of the program sees only canonical values (design-principle "Input forgiveness"; architecture §6):
 
 - **Enums are case-insensitive.** Every `ValueEnum` flag (`--type`, `--format`, `--effort`, `--category`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) sets `ignore_case = true`, so `--type Fast`, `--format JSON`, `--effort Medium` all resolve; an invalid choice lists the valid values (clap's possible-value suggestion). `--category` is a `ValueEnum` with multi-word variants (`research paper`), not a free string, so typos get suggestions too. The canonical (lowercase/kebab) spelling is what reaches the body.
-- **Bools are forgiving.** Optional-value bools (`--text[=…]`, `--highlights[=…]`, `--moderation`, `--context[=…]`) accept `true/1/yes/on` and `false/0/no/off` via `BoolishValueParser`.
+- **Content flags are forgiving.** `--text[=N|full]` accepts a character cap, `full`, or `0`; `--highlights[=N]` accepts a positive character cap.
 - **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
 - **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
 
@@ -310,12 +310,13 @@ exa-agent search QUERY
   --similar-to URL               # future-safe replacement for `similar`
   --stream                       # SSE; valid only with --output-schema
   # ---- content extraction (nested under contents.*) ----
-  --text[=true|false]            --text-max-characters N        # max 10000
+  --text[=N|full]                # bare search/similar: maxCharacters=1500; full or 0 uncapped
   --text-verbosity compact|standard|full
   --include-section S            --exclude-section S            # repeatable
   --include-html-tags
-  --highlights[=true|false]      --highlight-query TEXT
-  --highlight-max-characters N   # max 10000
+  --highlights[=N]               # search default: query-aware, server length; N caps chars/result
+  --no-highlights                # metadata-only search results
+  --highlight-query TEXT         --highlight-max-characters N   # max 10000
   --summary[=QUERY]              --summary-query TEXT  --summary-schema JSON|@file
   --extras-links N               --extras-image-links N
   --extras-rich-links N          --extras-rich-image-links N    --extras-code-blocks N
@@ -350,7 +351,7 @@ exa-agent contents --input urls.txt
 exa-agent contents --ids ID...                 # alternative to URLs (mutually exclusive)
   --chunk-size N                                # split >100 inputs into N-sized batches → NDJSON per chunk
   # all content-extraction + freshness flags from `search` apply, e.g.:
-  --text  --text-max-characters N  --text-verbosity compact|standard|full
+  --text[=N|full]  --text-verbosity compact|standard|full  # bare contents --text is uncapped
   --include-section S  --exclude-section S  --include-html-tags
   --highlights  --highlight-query TEXT  --highlight-max-characters N
   --summary[=QUERY]  --summary-query TEXT  --summary-schema JSON|@file
@@ -601,7 +602,7 @@ Kept for breadth; each warns on stderr (`warnings[]`) with the recommended repla
 | `--context` / `--context-max-characters` | Deprecated | `--highlights` / `--text` |
 | `research` / `/research/v1` | Legacy | `agent run` |
 | `useAutoprompt` | Removed from schema | not exposed; not a flag |
-| highlights `numSentences` / `highlightsPerUrl` | Deprecated | `--highlights` / `--highlight-max-characters` |
+| legacy highlight count/sentence sizing | Deprecated | `--highlights N` / `--highlight-max-characters` |
 | `resolvedSearchType`, response `context` | Deprecated upstream fields | ignore; not surfaced as flags |
 | legacy `--neural` / `--keyword` types | Legacy | `--type auto\|fast\|...`; hidden aliases only if runtime confirms |
 

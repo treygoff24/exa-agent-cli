@@ -402,6 +402,44 @@ fn parse_capabilities_and_describe_alias() {
 }
 
 #[test]
+fn capabilities_describes_search_content_defaults() {
+    let json = run_ok_json(&["capabilities", "--compact"]);
+    let search = json["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["path"] == "search")
+        .expect("search command in capabilities");
+    assert_eq!(
+        search["contentDefaults"]["bareCommand"]["contents.highlights"],
+        serde_json::json!({"query": "<search query>", "length": "server default"})
+    );
+    assert_eq!(
+        search["contentDefaults"]["highlights"]["explicitCap"],
+        serde_json::json!({"query": "<search query>", "maxCharacters": "N"})
+    );
+    assert_eq!(
+        search["contentDefaults"]["text"]["bare"]["maxCharacters"],
+        1500
+    );
+    assert!(search["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["flag"] == "highlights" && field["bodyPath"] == "contents.highlights"));
+    assert_eq!(json["defaults"]["maxOutputBytes"], 49_152);
+
+    let schema = run_ok_json(&["schema", "list", "--compact"]);
+    let schema_search = schema["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["command"] == "search")
+        .expect("search operation in schema list");
+    assert_eq!(schema_search["contentDefaults"], search["contentDefaults"]);
+}
+
+#[test]
 fn parse_schema_commands() {
     assert_path(&["schema", "list"], "schema list");
     assert_path(&["schema", "show", "SearchRequest"], "schema show");
@@ -1097,6 +1135,182 @@ fn search_dry_run_merges_body_and_set_with_redaction() {
     assert_eq!(body["contents"]["summary"]["query"], "body summary");
     assert_eq!(body["contents"]["text"], true);
     assert_eq!(body["token"], "body-secret");
+}
+
+#[test]
+fn search_defaults_to_query_aware_highlights() {
+    let json = run_ok_json(&["search", "rust async", "--dry-run", "--compact"]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["query"], "rust async");
+    assert_eq!(body["contents"]["highlights"]["query"], "rust async");
+    assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 1);
+    assert!(body["contents"].get("text").is_none());
+}
+
+#[test]
+fn search_no_highlights_preserves_metadata_only_body() {
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--no-highlights",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["contents"]["highlights"], false);
+    assert!(body["contents"].get("text").is_none());
+}
+
+#[test]
+fn search_text_bare_caps_and_disables_default_highlights() {
+    let json = run_ok_json(&["search", "rust async", "--text", "--dry-run", "--compact"]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["contents"]["text"]["maxCharacters"], 1500);
+    assert!(body["contents"].get("highlights").is_none());
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "text_capped"));
+}
+
+#[test]
+fn search_text_full_uncaps_and_bare_explicit_highlights_are_allowed() {
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--text",
+        "full",
+        "--highlights",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["contents"]["text"], true);
+    assert_eq!(body["contents"]["highlights"]["query"], "rust async");
+    assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn search_explicit_highlights_cap_uses_max_characters() {
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--highlights",
+        "800",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["contents"]["highlights"]["query"], "rust async");
+    assert_eq!(body["contents"]["highlights"]["maxCharacters"], 800);
+}
+
+#[test]
+fn contents_bare_text_stays_uncapped() {
+    let json = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--text",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["text"], true);
+}
+
+#[test]
+fn similar_bare_text_uses_triage_cap() {
+    let json = run_ok_json(&[
+        "similar",
+        "https://exa.ai",
+        "--text",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &json["data"]["request"]["body"];
+    assert_eq!(body["contents"]["text"]["maxCharacters"], 1500);
+}
+
+#[test]
+fn oversized_search_response_warns_about_triage_text_defaults() {
+    let response = format!(
+        r#"{{"results":[{{"url":"https://example.com","text":"{}"}}]}}"#,
+        "x".repeat(11_000)
+    );
+    let response: &'static [u8] = Box::leak(response.into_bytes().into_boxed_slice());
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /search "));
+            assert!(request_text.contains(r#""query":"rust async""#));
+            assert!(request_text.contains(r#""contents":{"text":true}"#));
+        },
+        response,
+    );
+    let output = run(&[
+        "search",
+        "rust async",
+        "--text",
+        "full",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "oversized_search_response"
+            && warning["message"].as_str().unwrap().contains("--text 1500")));
+}
+
+#[test]
+fn oversized_default_highlights_response_does_not_warn() {
+    // The warning targets uncapped `--text full` requests; the tool's own default
+    // (highlights) must never trip it, no matter how large the response.
+    let response = format!(
+        r#"{{"results":[{{"url":"https://example.com","highlights":["{}"]}}]}}"#,
+        "x".repeat(11_000)
+    );
+    let response: &'static [u8] = Box::leak(response.into_bytes().into_boxed_slice());
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /search "));
+            assert!(request_text.contains(r#""highlights""#));
+        },
+        response,
+    );
+    let output = run(&[
+        "search",
+        "rust async",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let no_oversized_warning = json["warnings"]
+        .as_array()
+        .map(|warnings| {
+            warnings
+                .iter()
+                .all(|warning| warning["code"] != "oversized_search_response")
+        })
+        .unwrap_or(true);
+    assert!(no_oversized_warning, "warnings: {}", json["warnings"]);
 }
 
 #[test]
@@ -1927,7 +2141,7 @@ fn parse_contents_accepts_urls_only_and_ids_only() {
         ]
     );
     assert!(args.ids.is_empty());
-    assert!(args.text);
+    assert_eq!(args.text.as_deref(), Some(""));
     assert_eq!(args.summary_query.as_deref(), Some("Summarize the page"));
     assert_eq!(args.chunk_size, Some(100));
 
@@ -1937,7 +2151,7 @@ fn parse_contents_accepts_urls_only_and_ids_only() {
     };
     assert!(args.urls.is_empty());
     assert_eq!(args.ids, vec!["doc_1".to_string(), "doc_2".to_string()]);
-    assert!(!args.text);
+    assert_eq!(args.text, None);
     assert_eq!(args.summary_query, None);
     assert_eq!(args.chunk_size, None);
 }

@@ -318,8 +318,8 @@ Error response shape:
   | `text: true` (top-level)                                  | Nest under `contents`: `"contents": {"text": true}`. The `/search` endpoint requires content params inside `contents`.      |
   | `summary: true` (top-level)                               | Nest under `contents`: `"contents": {"summary": true}`. Same nesting rule as `text`.                                        |
   | `highlights: {...}` (top-level)                           | Nest under `contents`: `"contents": {"highlights": {...}}`.                                                                 |
-  | `numSentences`                                            | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                     |
-  | `highlightsPerUrl`                                        | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                     |
+  | legacy sentence-count sizing                              | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                     |
+  | legacy per-URL count sizing                               | Remove it. This highlights parameter is **deprecated**. Use `highlights: true` instead.                                     |
   | `tokensNum`                                               | Remove it. This parameter does **not exist**. Use `contents.text.maxCharacters` to limit text length.                       |
   | `livecrawl: "always"`                                     | Use `contents.maxAgeHours: 0` instead. The `livecrawl` parameter is **deprecated**.                                         |
   | `excludeDomains` with `category: "company"` or `"people"` | Remove `excludeDomains`. These categories do **not** support `excludeDomains`, `startPublishedDate`, or `endPublishedDate`. |

@@ -134,6 +134,9 @@ pub fn capabilities() -> serde_json::Value {
         },
         "supportsRawBody": true,
         "supportsPrintRequest": true,
+        "defaults": {
+            "maxOutputBytes": crate::DEFAULT_MAX_OUTPUT_BYTES,
+        },
         "commandCount": commands.len(),
         "commands": commands,
         "exitCodes": exit_codes,
@@ -320,7 +323,79 @@ fn command_entry(op: &OperationDef) -> serde_json::Value {
         "pagination": pagination,
         "source": op.source,
         "sourceVersion": op.source_version,
+        "fields": command_fields(op),
+        "contentDefaults": command_content_defaults(op),
     })
+}
+
+fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
+    op.fields
+        .iter()
+        .map(|field| {
+            serde_json::json!({
+                "flag": field.flag,
+                "bodyPath": field.body_path,
+                "kind": field_kind(field.kind),
+                "required": field.required,
+            })
+        })
+        .collect()
+}
+
+fn field_kind(kind: registry::FieldKind) -> &'static str {
+    match kind {
+        registry::FieldKind::Str => "string",
+        registry::FieldKind::Int => "integer",
+        registry::FieldKind::Bool => "boolean",
+        registry::FieldKind::Num => "number",
+        registry::FieldKind::StrArray => "string_array",
+        registry::FieldKind::Json => "json",
+    }
+}
+
+pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
+    match op.command().as_str() {
+        "search" => serde_json::json!({
+            "bareCommand": {
+                "contents.highlights": {
+                    "query": "<search query>",
+                    "length": "server default",
+                }
+            },
+            "highlights": {
+                "bare": {
+                    "query": "<search query>",
+                    "length": "server default",
+                },
+                "explicitCap": {
+                    "query": "<search query>",
+                    "maxCharacters": "N",
+                },
+            },
+            "text": {
+                "bare": { "maxCharacters": crate::DEFAULT_TEXT_MAX_CHARACTERS },
+                "full": true,
+                "zero": true,
+            },
+            "noHighlights": "metadata-only; suppresses the default highlights request",
+        }),
+        "similar" => serde_json::json!({
+            "text": {
+                "bare": { "maxCharacters": crate::DEFAULT_TEXT_MAX_CHARACTERS },
+                "full": true,
+                "zero": true,
+            }
+        }),
+        "contents" => serde_json::json!({
+            "text": {
+                "bare": true,
+                "explicitCap": { "maxCharacters": "N" },
+                "full": true,
+                "zero": true,
+            }
+        }),
+        _ => serde_json::Value::Null,
+    }
 }
 
 #[cfg(test)]

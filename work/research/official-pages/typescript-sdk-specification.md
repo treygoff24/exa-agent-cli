@@ -511,8 +511,8 @@ These options are supported for deep search types ("deep", "deep-reasoning") as 
 | ---------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | query            | `string` | -                                                                                                                                                                                                                                 |
 | maxCharacters    | `number` | -                                                                                                                                                                                                                                 |
-| numSentences     | `number` | Deprecated and will be removed in a future release. Currently mapped to a character budget (1 sentence ≈ 1333 characters). Pass `highlights: true` for default highlights, or `{ query }` to guide selection with your own query. |
-| highlightsPerUrl | `number` | Deprecated and will be removed in a future release. Currently ignored. Pass `highlights: true` for default highlights, or `{ query }` to guide selection with your own query.                                                     |
+| legacy sentence-count sizing | `number` | Deprecated and will be removed in a future release. Currently mapped to a character budget (1 sentence ≈ 1333 characters). Pass `highlights: true` for default highlights, or `{ query }` to guide selection with your own query. |
+| legacy per-URL count sizing  | `number` | Deprecated and will be removed in a future release. Currently ignored. Pass `highlights: true` for default highlights, or `{ query }` to guide selection with your own query.                                                     |
 
 #### `SummaryContentsOptions`
 

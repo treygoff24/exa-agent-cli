@@ -179,7 +179,7 @@ Avoid branching on `resolvedSearchType`; OpenAPI marks it deprecated and says cu
 
 On `/search`, request these under `contents`:
 
-- `contents.highlights`: boolean or object. Object supports `query` and `maxCharacters`; `numSentences` and `highlightsPerUrl` are deprecated. Sources: https://exa.ai/docs/reference/search, https://exa.ai/docs/reference/search-api-guide-for-coding-agents, https://exa.ai/docs/exa-spec.yaml
+- `contents.highlights`: boolean or object. Object supports `query` and `maxCharacters`; legacy sentence/count sizing fields are deprecated. Sources: https://exa.ai/docs/reference/search, https://exa.ai/docs/reference/search-api-guide-for-coding-agents, https://exa.ai/docs/exa-spec.yaml
 - `contents.text`: boolean or object. Object supports `maxCharacters`, `includeHtmlTags`, `verbosity` (`compact`, `standard`, `full`), `includeSections`, and `excludeSections`. Sources: https://exa.ai/docs/reference/search, https://exa.ai/docs/exa-spec.yaml
 - `contents.summary`: object with `query` and optional JSON `schema`. Source: https://exa.ai/docs/reference/search
 - `contents.context`: deprecated; use highlights or text instead. Sources: https://exa.ai/docs/reference/search-api-guide-for-coding-agents, https://exa.ai/docs/exa-spec.yaml
@@ -383,7 +383,7 @@ Use category `news` with date filters. Sources: https://exa.ai/docs/reference/se
 - Validate documented category names and reject invented ones with exact alternatives. Source: https://exa.ai/docs/reference/search-api-guide-for-coding-agents
 - Validate `includeText`/`excludeText` as single-item arrays. Source: https://exa.ai/docs/reference/search-api-guide-for-coding-agents
 - Validate no `--offset`/`--page` on Search. Source: https://exa.ai/docs/reference/migrating-from-bing
-- Warn on deprecated knobs: `useAutoprompt`, `context`, `livecrawl`, `numSentences`, `highlightsPerUrl`, `resolvedSearchType`. Sources: https://exa.ai/docs/reference/search-api-guide-for-coding-agents, https://exa.ai/docs/exa-spec.yaml
+- Warn on deprecated knobs: `useAutoprompt`, `context`, `livecrawl`, legacy highlight sizing fields, `resolvedSearchType`. Sources: https://exa.ai/docs/reference/search-api-guide-for-coding-agents, https://exa.ai/docs/exa-spec.yaml
 - Keep stdout parseable: JSON goes to stdout; warnings and deprecation hints go to stderr.
 
 ## Primary sources used

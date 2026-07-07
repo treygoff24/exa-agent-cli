@@ -158,7 +158,7 @@ fn modeled_live_invalid_inputs_fail_locally() {
             details: &[
                 ("field", Str("text")),
                 ("flag", Str("text")),
-                ("expected", Str("boolean")),
+                ("expected", Str("boolean or text options object")),
             ],
         },
         InvalidCase {
@@ -221,7 +221,7 @@ fn chunked_contents_invalid_input_fails_locally_before_network() {
         details: &[
             ("field", Str("text")),
             ("flag", Str("text")),
-            ("expected", Str("boolean")),
+            ("expected", Str("boolean or text options object")),
         ],
     };
     let stderr = assert_usage_code(case.args, case.code);

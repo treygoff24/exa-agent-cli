@@ -161,7 +161,7 @@ pub struct GlobalArgs {
     pub compact: bool,
     #[arg(short = 'o', long, global = true)]
     pub output: Option<String>,
-    #[arg(long, global = true, default_value_t = 1_048_576)]
+    #[arg(long, global = true, default_value_t = crate::DEFAULT_MAX_OUTPUT_BYTES)]
     pub max_output_bytes: u64,
     #[arg(long, global = true, env = "EXA_CORRELATION_ID")]
     pub correlation_id: Option<String>,
@@ -397,9 +397,27 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub num_results: Option<String>,
-    /// Return text snippets in each search result (`contents.text=true`).
-    #[arg(long)]
-    pub text: bool,
+    /// Return text in each result. Bare --text caps search text at 1500 chars/result; use --text full or --text 0 for uncapped.
+    #[arg(
+        long,
+        value_name = "N|full",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub text: Option<String>,
+    /// Return query-aware highlights. Bare/default uses server length; N caps chars/result.
+    #[arg(
+        long,
+        value_name = "N",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub highlights: Option<String>,
+    /// Return metadata-only search results; disables default highlights.
+    #[arg(long, conflicts_with = "highlights")]
+    pub no_highlights: bool,
     /// Search type.
     #[arg(long, value_enum, ignore_case = true)]
     pub r#type: Option<SearchType>,
@@ -457,7 +475,12 @@ impl SearchArgs {
         vec![
             ("query", Some(self.query.clone())),
             ("num-results", self.num_results.clone()),
-            ("text", bool_flag(self.text)),
+            ("text", self.text.clone()),
+            ("highlights", self.highlights.clone()),
+            (
+                "no-highlights",
+                self.no_highlights.then(|| "false".to_string()),
+            ),
             ("type", search_type_flag(&self.r#type)),
             ("category", self.category.clone()),
             ("include-domain", str_array_flag(&self.include_domain)),
@@ -475,8 +498,15 @@ pub struct ContentsArgs {
     pub urls: Vec<String>,
     #[arg(long, conflicts_with = "urls", num_args = 1..)]
     pub ids: Vec<String>,
-    #[arg(long)]
-    pub text: bool,
+    /// Return text. Bare --text is uncapped for contents; use --text N to cap, --text full/0 for uncapped.
+    #[arg(
+        long,
+        value_name = "N|full",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub text: Option<String>,
     #[arg(long)]
     pub summary_query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
@@ -488,7 +518,7 @@ impl ContentsArgs {
         vec![
             ("urls", str_array_flag(&self.urls)),
             ("ids", str_array_flag(&self.ids)),
-            ("text", bool_flag(self.text)),
+            ("text", self.text.clone()),
             ("summary-query", self.summary_query.clone()),
         ]
     }
@@ -503,6 +533,15 @@ pub struct SimilarArgs {
     pub exclude_source_domain: bool,
     #[arg(long, value_enum, ignore_case = true)]
     pub category: Option<SearchCategory>,
+    /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full or --text 0 for uncapped.
+    #[arg(
+        long,
+        value_name = "N|full",
+        num_args = 0..=1,
+        default_missing_value = "",
+        allow_negative_numbers = true
+    )]
+    pub text: Option<String>,
 }
 
 fn similar_num_results_flag(value: &Option<u32>) -> Option<String> {
@@ -523,6 +562,7 @@ impl SimilarArgs {
                 bool_flag(self.exclude_source_domain),
             ),
             ("category", similar_category_flag(&self.category)),
+            ("text", self.text.clone()),
         ]
     }
 }

@@ -498,6 +498,11 @@ flag = "category"
 body_path = "category"
 kind = "str"
 
+[[operations."findSimilar".fields]]
+flag = "text"
+body_path = "contents.text"
+kind = "json"
+
 [[operations."search".fields]]
 flag = "query"
 body_path = "query"
@@ -525,7 +530,17 @@ enum_values = ["company", "people", "research paper", "news", "personal site", "
 [[operations."search".fields]]
 flag = "text"
 body_path = "contents.text"
-kind = "bool"
+kind = "json"
+
+[[operations."search".fields]]
+flag = "highlights"
+body_path = "contents.highlights"
+kind = "json"
+
+[[operations."search".fields]]
+flag = "no-highlights"
+body_path = "contents.highlights"
+kind = "json"
 
 [[operations."search".fields]]
 flag = "include-domain"
@@ -625,7 +640,7 @@ kind = "str_array"
 [[operations."getContents".fields]]
 flag = "text"
 body_path = "text"
-kind = "bool"
+kind = "json"
 
 [[operations."getContents".fields]]
 flag = "summary-query"

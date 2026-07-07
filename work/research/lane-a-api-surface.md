@@ -472,7 +472,7 @@ Both SDKs expose helper methods such as `search_and_contents` / `searchAndConten
 - Webhooks/events/imports/Websets monitors list `limit` defaults to 25 with max 200 where specified. Source: https://exa.ai/docs/exa-spec.json.
 - `/findSimilar` is deprecated; prefer `/search` with a query describing the source. Source: https://exa.ai/docs/exa-spec.json.
 - `context` response is formatted code context, not a ranked search result list. Source: https://exa.ai/docs/llms-full.txt.
-- `useAutoprompt`, `highlightsPerUrl`, and `numSentences` are deprecated/legacy mistake surfaces; avoid exposing as primary flags. Source: https://exa.ai/docs/llms-full.txt.
+- `useAutoprompt` and legacy highlight sizing fields are deprecated/legacy mistake surfaces; avoid exposing them as primary flags. Source: https://exa.ai/docs/llms-full.txt.
 - `livecrawl: "true"` as a string is a documented mistake; prefer `maxAgeHours` for new examples. Source: https://exa.ai/docs/llms-full.txt.
 - `budget.maxCostDollars` on Agent is accepted for compatibility but currently ignored; do not present it as a hard cap. Source: https://exa.ai/docs/llms-full.txt.
 - Search object output schema currently enforces max depth 2 and max total properties 10 in SDK docs. Source: https://raw.githubusercontent.com/exa-labs/exa-py/master/README.md ; https://raw.githubusercontent.com/exa-labs/exa-js/master/README.md.

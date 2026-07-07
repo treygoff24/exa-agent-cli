@@ -346,7 +346,7 @@ Source basis: all relevant Exa endpoints return request/run IDs and cost/status/
 - Do not send `livecrawl` and `maxAgeHours` together. Source: https://exa.ai/docs/reference/get-contents
 - On `/contents`, `text`, `highlights`, and `summary` are top-level; do not wrap in `contents`. That nesting belongs to `/search`. Source: https://exa.ai/docs/reference/contents-api-guide-for-coding-agents
 - `/contents` does not support streaming. Source: https://exa.ai/docs/reference/contents-api-guide-for-coding-agents
-- Deprecated highlights parameters called out by docs: `numSentences` and `highlightsPerUrl`; use `highlights: true` or current object form. Source: https://exa.ai/docs/reference/contents-api-guide-for-coding-agents
+- Deprecated highlights parameters called out by docs: legacy sentence/count sizing fields; use `highlights: true` or current object form. Source: https://exa.ai/docs/reference/contents-api-guide-for-coding-agents
 - `tokensNum` is a Context API parameter, not a Contents text limiter; use `text.maxCharacters` for `/contents`. Source: https://exa.ai/docs/reference/context, https://exa.ai/docs/reference/contents-api-guide-for-coding-agents
 - Legacy `/research/v1` is deprecated per rate-limit page; new research/list-building work should target Agent API or `/responses` compatibility. Source: https://exa.ai/docs/reference/rate-limits, https://exa.ai/docs/reference/agent-api/overview
 

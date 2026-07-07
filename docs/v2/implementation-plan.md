@@ -250,7 +250,7 @@ Every load-bearing invariant maps to a **named** test (no invariant ships unpinn
 | registry codegen reproducible (D9) | `registry_codegen_reproducible` (xtask + `git diff`) | 1 / CI |
 
 ### 1. Unit tests (in-crate)
-Pure logic, no I/O: error→exit mapping (every §6 category), `error.code` membership in the §5.1 dictionary, redaction, format/TTY precedence, clap arg-conflict validation, ULID determinism under `SOURCE_DATE_EPOCH`, SSE frame parsing, pagination accumulation, the create-vs-idempotent classifier, `BoolishValueParser`/placeholder-guard coercion.
+Pure logic, no I/O: error→exit mapping (every §6 category), `error.code` membership in the §5.1 dictionary, redaction, format/TTY precedence, clap arg-conflict validation, ULID determinism under `SOURCE_DATE_EPOCH`, SSE frame parsing, pagination accumulation, the create-vs-idempotent classifier, content-flag normalization/placeholder-guard coercion.
 
 **Parser tier (`tests/parser.rs`, `Cli::try_parse_from`).** The cheapest, fastest contract pins — several load-bearing: `--num-results` range rejection (0 and 101), every `ValueEnum` *accepted* (incl. mixed case via `ignore_case`) **and rejected**, default-value assertions (`--retry 2`), `conflicts_with`/`ArgGroup` violations, global-flag positioning before and after the subcommand, `arg_required_else_help` on bare invocation, and `--help`/`--version` exit semantics. Named `parser_contract_matrix`.
 

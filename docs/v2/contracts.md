@@ -223,10 +223,10 @@ Interrupted stream → exit 12 + `exa.cli.error.v1` on stderr including the last
 ## 9. Output target & large payloads (D10)
 
 - `-o/--output FILE` writes the envelope (or `--raw` bytes) to `FILE` instead of stdout; stdout then carries a small confirmation envelope with `dataPath` set.
-- `--max-output-bytes N` is a **default-on** ceiling on the inline stdout payload (conservative default, e.g. 1 MiB) so one accidental `contents --text` over long pages can't blow the agent's context window even without `--output`. When the serialized `data` would exceed it, the CLI spills `data` to a temp file under the state dir and emits the envelope with `dataTruncated: true`, `dataPath`, `bytes` set and `data` elided — and a `warnings[]` note naming the ways forward (raise `--max-output-bytes`, pass `--output FILE`, or narrow fields). `--max-output-bytes 0` disables the ceiling.
+- `--max-output-bytes N` is a **default-on** ceiling on the inline stdout payload (48 KiB by default) so one accidental `contents --text` over long pages can't blow the agent's context window even without `--output`. When the serialized `data` would exceed it, the CLI spills `data` as pretty-printed JSON to a temp file under the state dir and emits the envelope with `dataTruncated: true`, `dataPath`, `bytes` set and `data` elided — and a `warnings[]` note naming the ways forward (raise `--max-output-bytes`, pass `--output FILE`, or narrow fields). `--max-output-bytes 0` disables the ceiling.
 - Auto-spill (threshold-gated): the same spill mechanism, also triggered by the `--max-output-bytes` ceiling above. The standalone *auto*-spill threshold (independent of `--output`) ships conservative; the manual `--max-output-bytes` ceiling is the v1 guarantee.
 - **`count` and `dataHash` survive a spill.** A spilled envelope still carries `count` (item count) and `bytes`, so an agent can size and verify the spilled file without reading it (F1.4).
-- Conservative content defaults reduce how often any of this fires: highlights over full text, `--text-max-characters` enforced.
+- Conservative content defaults reduce how often any of this fires: `search` defaults to query-aware highlights; bare `search --text` / `similar --text` cap text at 1500 characters per result; bare `contents --text` remains uncapped for deep reads.
 
 ## 10. Pagination contract
 
@@ -291,7 +291,7 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   "universalFlags": [
     { "flag": "--format", "values": ["human", "json", "ndjson"], "default": "auto" },
     { "flag": "--json" }, { "flag": "--ndjson" }, { "flag": "--raw" },
-    { "flag": "--max-output-bytes", "default": 1048576 },
+    { "flag": "--max-output-bytes", "default": 49152 },
     { "flag": "--correlation-id" }, { "flag": "--output" },
     { "flag": "--idempotency-key" }, { "flag": "--retry", "default": 2 },
     { "flag": "--timeout" }, { "flag": "--yes" }, { "flag": "--confirm" },

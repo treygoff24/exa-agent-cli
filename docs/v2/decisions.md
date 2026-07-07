@@ -85,7 +85,7 @@ This is the ADR-style record of the decisions that gate everything else. Each en
 
 ## D10 — Context-window-aware output: `--output FILE`
 
-**Call.** Universal `-o/--output FILE`. Default content controls stay conservative (highlights over full text; `--text-max-characters`). When a single response's `data` exceeds a threshold, the envelope may carry `{ "dataTruncated": true, "dataPath": "...", "bytes": N }` instead of inlining a huge payload (auto-spill is opt-in/threshold-gated — ship `--output` for v1, enable auto-spill only if agents hit the wall).
+**Call.** Universal `-o/--output FILE`. Default content controls stay conservative (`search` highlights over full text; bare `search --text` / `similar --text` cap text at 1500 chars/result; bare `contents --text` stays uncapped). When a single response's `data` exceeds a threshold, the envelope may carry `{ "dataTruncated": true, "dataPath": "...", "bytes": N }` instead of inlining a huge payload (auto-spill is opt-in/threshold-gated — ship `--output` for v1, enable auto-spill only if agents hit the wall).
 
 **Why.** `contents --text` over a few long pages is 100k+ tokens dumped to stdout — it blows the agent's context window. Writing the big payload to disk and returning a handle is the agent-ergonomic move.
 
@@ -151,11 +151,11 @@ These ratify the changes from the `rust-agent-cli` skill audit ([`reviews/rust-a
 
 **D28 — the success envelope gains `nextActions`, `count`, `dataHash`, `request.correlationId`.** `nextActions[]` = paste-ready follow-ups on async-create/paginated commands (the success-path analogue of `suggestedCommand`); `count` survives a spill; `dataHash` is a change-fingerprint; `pagination.total` is nullable. (contracts §4)
 
-**D29 — `--max-output-bytes` is a default-on output ceiling** (≈1 MiB) that spills over-ceiling payloads to a file + handle, so an unguarded `contents --text` can't blow the context window even without `--output`. Complements (does not replace) the deferred auto-spill of D10. (contracts §9)
+**D29 — `--max-output-bytes` is a default-on output ceiling** (48 KiB) that spills over-ceiling payloads to a pretty-printed JSON file + handle, so an unguarded `contents --text` can't blow the context window even without `--output`. Complements (does not replace) the deferred auto-spill of D10. (contracts §9)
 
 **D30 — `--correlation-id` / `EXA_CORRELATION_ID`** is echoed verbatim into `request.correlationId` across stdout/stderr/`--trace`, so an orchestrator can stamp its own key instead of scraping `requestId`. (contracts §4)
 
-**D31 — input forgiveness is specified at the parse boundary.** Every `ValueEnum` sets `ignore_case = true`; optional bools use `BoolishValueParser` (`true/1/yes/on`); placeholder literals (`<id>`, `$VAR`, `YOUR_*`) are rejected with a discovery hint (`placeholder_argument`). Opaque Exa ids get no prefix coercion (documented non-feature). (commands §3, arch §6)
+**D31 — input forgiveness is specified at the parse boundary.** Every `ValueEnum` sets `ignore_case = true`; optional content flags normalize predictable values (`--text[=N|full]`, `--highlights[=N]`); placeholder literals (`<id>`, `$VAR`, `YOUR_*`) are rejected with a discovery hint (`placeholder_argument`). Opaque Exa ids get no prefix coercion (documented non-feature). (commands §3, arch §6)
 
 **D32 — `doctor` uses a linter-style exit dictionary** — `0 = healthy / 1 = findings / 4 = refused-unsafe` — **not** the §6 categories, so a `doctor` exit can't be confused with a real `auth`/`config` failure. Output is `exa.cli.doctor.v1`, golden-pinned; detector ids + exit map published in `capabilities.doctor`. (contracts §15, arch §9)
 

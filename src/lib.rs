@@ -34,8 +34,8 @@ use cli::{
 };
 use error::{CliError, Diag};
 use output::envelope::{
-    capabilities, error_codes_json, event_envelope, response_envelope, ErrorEnvelope,
-    EventEnvelopeArgs, ResponseEnvelopeArgs,
+    capabilities, command_content_defaults, error_codes_json, event_envelope, response_envelope,
+    ErrorEnvelope, EventEnvelopeArgs, ResponseEnvelopeArgs,
 };
 use output::{
     emit_ndjson, emit_raw, emit_stdout, resolve_mode, stdout_is_tty, write_ndjson,
@@ -50,6 +50,10 @@ use transport::{
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
 const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
+const DEFAULT_MAX_OUTPUT_BYTES: u64 = 49_152;
+const DEFAULT_TEXT_MAX_CHARACTERS: u32 = 1_500;
+const MAX_TEXT_MAX_CHARACTERS: u32 = 10_000;
+const SEARCH_OVERSIZED_DATA_WARNING_BYTES: usize = 10 * 1024;
 
 #[derive(Clone, Copy)]
 struct TypedRoute<'a> {
@@ -269,9 +273,11 @@ fn build_search_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     validate_search_intent_args(args)?;
-    let flag_values = args.into_flag_values();
+    let flag_values =
+        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
+    validate_content_options(op, &spec.body)?;
     Ok(spec)
 }
 
@@ -423,7 +429,46 @@ fn normalize_and_validate_search_body(
         body["category"] = serde_json::Value::String(category.to_string());
     }
 
-    validate_search_category_filter_combinations(body, query)
+    validate_search_category_filter_combinations(body, query)?;
+    apply_default_search_highlights(body, query);
+    Ok(())
+}
+
+fn apply_default_search_highlights(body: &mut serde_json::Value, query: &str) {
+    let content_already_requested = body
+        .get("contents")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|contents| {
+            [
+                "text",
+                "highlights",
+                "summary",
+                "extras",
+                "subpages",
+                "context",
+            ]
+            .iter()
+            .any(|key| contents.contains_key(*key))
+        });
+    if content_already_requested {
+        return;
+    }
+    if !body.is_object() {
+        return;
+    }
+    let _ = request::set_at_path(
+        body,
+        "contents.highlights",
+        default_highlights_value(query, None),
+    );
+}
+
+fn default_highlights_value(query: &str, max_characters: Option<u32>) -> serde_json::Value {
+    let mut value = serde_json::json!({ "query": query });
+    if let Some(max_characters) = max_characters {
+        value["maxCharacters"] = serde_json::Value::from(max_characters);
+    }
+    value
 }
 
 fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Result<(), CliError> {
@@ -670,9 +715,11 @@ fn build_contents_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
-    let flag_values = args.into_flag_values();
+    let flag_values =
+        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), "")?;
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_contents_body_shape(&spec.body)?;
+    validate_content_options(op, &spec.body)?;
     Ok(spec)
 }
 
@@ -687,6 +734,21 @@ fn validate_contents_body_shape(body: &serde_json::Value) -> Result<(), CliError
         ));
     }
     Ok(())
+}
+
+fn validate_content_options(
+    op: &'static registry::OperationDef,
+    body: &serde_json::Value,
+) -> Result<(), CliError> {
+    let Some(details) = content_option_shape_issue(op.command().as_str(), body) else {
+        return Ok(());
+    };
+    Err(registry_validation_error(ValidateInputOutcome {
+        valid: serde_json::Value::Bool(false),
+        details: Some(details),
+        suggested_command: Some(content_option_suggestion(op.command().as_str())),
+        note: None,
+    }))
 }
 
 fn dispatch_similar(
@@ -706,8 +768,11 @@ fn build_similar_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
-    let flag_values = args.into_flag_values();
-    build_typed_spec(op, &flag_values, globals)
+    let flag_values =
+        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), "")?;
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_content_options(op, &spec.body)?;
+    Ok(spec)
 }
 
 fn dispatch_answer(args: &AnswerArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -756,7 +821,7 @@ fn dispatch_fetch(args: &FetchArgs, globals: &GlobalArgs, pretty: bool) -> Resul
         let contents_args = ContentsArgs {
             urls: args.urls.clone(),
             ids: Vec::new(),
-            text: true,
+            text: Some(String::new()),
             summary_query: Some("Summarize the page".to_string()),
             chunk_size: None,
         };
@@ -4152,6 +4217,90 @@ fn typed_preview_headers(
     headers
 }
 
+fn normalize_content_flag_values(
+    command: &str,
+    flag_values: Vec<(&'static str, Option<String>)>,
+    query: &str,
+) -> Result<Vec<(&'static str, Option<String>)>, CliError> {
+    flag_values
+        .into_iter()
+        .map(|(flag, value)| {
+            let value = match (command, flag, value) {
+                (_, "text", Some(raw)) => Some(normalize_text_flag(command, &raw)?),
+                ("search", "highlights", Some(raw)) => {
+                    Some(normalize_highlights_flag(&raw, query)?)
+                }
+                (_, _, value) => value,
+            };
+            Ok((flag, value))
+        })
+        .collect()
+}
+
+fn normalize_text_flag(command: &str, raw: &str) -> Result<String, CliError> {
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "" if command == "contents" => return Ok("true".to_string()),
+        "" => return Ok(text_cap_json(DEFAULT_TEXT_MAX_CHARACTERS)),
+        "full" | "0" | "true" => return Ok("true".to_string()),
+        "false" => return Ok("false".to_string()),
+        _ => {}
+    }
+
+    let cap = raw.parse::<u32>().map_err(|_| invalid_text_cap(raw))?;
+    if (1..=MAX_TEXT_MAX_CHARACTERS).contains(&cap) {
+        Ok(text_cap_json(cap))
+    } else {
+        Err(invalid_text_cap(raw))
+    }
+}
+
+fn invalid_text_cap(raw: &str) -> CliError {
+    CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            "`--text` must be a character cap from 1 to 10000, `full`, or `0`",
+        )
+        .with_details(serde_json::json!({
+            "received": raw,
+            "min": 1,
+            "max": MAX_TEXT_MAX_CHARACTERS,
+        }))
+        .with_suggestion("exa-agent search <query> --text 1500"),
+    )
+}
+
+fn text_cap_json(cap: u32) -> String {
+    serde_json::json!({ "maxCharacters": cap }).to_string()
+}
+
+fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError> {
+    let max_characters = if raw.is_empty() {
+        None
+    } else {
+        Some(
+            raw.parse::<u32>()
+                .ok()
+                .filter(|value| (1..=MAX_TEXT_MAX_CHARACTERS).contains(value))
+                .ok_or_else(|| {
+                    CliError::Usage(
+                        Diag::new(
+                            "invalid_value",
+                            "`--highlights` must be a character cap from 1 to 10000 when a value is supplied",
+                        )
+                        .with_details(serde_json::json!({
+                            "received": raw,
+                            "min": 1,
+                            "max": MAX_TEXT_MAX_CHARACTERS,
+                        }))
+                        .with_suggestion("exa-agent search <query> --highlights 800"),
+                    )
+                })?,
+        )
+    };
+    Ok(default_highlights_value(query, max_characters).to_string())
+}
+
 fn build_typed_spec(
     op: &'static registry::OperationDef,
     flag_values: &[(&str, Option<String>)],
@@ -4431,6 +4580,7 @@ fn dispatch_typed_inner(
     if globals.print_request || globals.dry_run {
         let mut warnings = typed_command_warnings(spec.op);
         warnings.extend_from_slice(extras.extra_warnings);
+        warnings.extend(request_body_warnings(spec.op, &typed_wire_body(spec)));
         emit_stdout(
             &redacted_preview_expanded(
                 spec,
@@ -4750,7 +4900,7 @@ fn set_pagination(envelope: &mut serde_json::Value, page: PageInfo<'_>) {
     });
 }
 
-/// `--max-output-bytes N` (contracts §9, default 1 MiB, `0` disables). When the serialized
+/// `--max-output-bytes N` (contracts §9, default 48 KiB, `0` disables). When the serialized
 /// `data` field exceeds the ceiling, spill it to a file under the CLI's state dir and elide it
 /// from the envelope so one accidental `contents --text` over long pages can't blow an agent's
 /// context window. `count` is left untouched by the caller (computed before this runs) so an
@@ -4776,7 +4926,8 @@ fn apply_output_ceiling(envelope: &mut serde_json::Value, max_output_bytes: u64)
         return;
     }
 
-    let warning = match spill_data_to_file(&serialized) {
+    let pretty = serde_json::to_vec_pretty(data).unwrap_or_else(|_| serialized.clone());
+    let warning = match spill_data_to_file(&pretty) {
         Ok(path) => {
             let path_str = path.display().to_string();
             let Some(obj) = envelope.as_object_mut() else {
@@ -4967,6 +5118,7 @@ fn execute_typed_live<T: Transport>(
         .unwrap_or_else(|| spec.op.command());
     let mut warnings = typed_command_warnings(spec.op);
     warnings.extend_from_slice(extras.extra_warnings);
+    warnings.extend(request_body_warnings(spec.op, &body));
     // A one-time secret must ride a plain JSON response so the capture hook below reads it
     // before redaction. Streaming/raw both early-return past that hook and would silently drop
     // the reserved secret (the reservation's Drop deletes the file), so reject the combination
@@ -5078,6 +5230,7 @@ fn execute_typed_live<T: Transport>(
     if let Some((field, _, _)) = spec.op.secret_capture() {
         redaction::redact_named_field(&mut data, field);
     }
+    append_response_warnings(spec.op, &body, &data, &mut warnings);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
     let exit_code = if spec.op.mixed_status_exit {
@@ -5516,6 +5669,71 @@ fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json
     vec![warning]
 }
 
+fn request_body_warnings(
+    op: &'static registry::OperationDef,
+    body: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    text_max_characters(op, body)
+        .map(|cap| {
+            vec![serde_json::json!({
+                "code": "text_capped",
+                "message": format!(
+                    "text capped at {cap} characters per result; use `exa-agent contents <url> --text full` for complete text."
+                ),
+                "suggestedCommand": "exa-agent contents <url> --text full"
+            })]
+        })
+        .unwrap_or_default()
+}
+
+fn text_max_characters(
+    op: &'static registry::OperationDef,
+    body: &serde_json::Value,
+) -> Option<u64> {
+    let path = match op.command().as_str() {
+        "search" | "similar" => "contents.text.maxCharacters",
+        "contents" => "text.maxCharacters",
+        _ => return None,
+    };
+    body_value_at_path(body, path).and_then(serde_json::Value::as_u64)
+}
+
+fn append_response_warnings(
+    op: &'static registry::OperationDef,
+    request_body: &serde_json::Value,
+    data: &serde_json::Value,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    if op.command() != "search" {
+        return;
+    }
+    // Only warn when the caller asked for uncapped full text; default highlights and
+    // capped text are already the triage-safe shapes this warning would suggest.
+    let uncapped_text = body_value_at_path(request_body, "contents.text")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !uncapped_text {
+        return;
+    }
+    let size = serde_json::to_vec(data)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if size <= SEARCH_OVERSIZED_DATA_WARNING_BYTES {
+        return;
+    }
+    let query = request_body
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<query>");
+    warnings.push(serde_json::json!({
+        "code": "oversized_search_response",
+        "message": format!(
+            "search response data is {size} bytes; search defaults to highlights, and capped text (`--text 1500`) is safer than `--text full` for triage."
+        ),
+        "suggestedCommand": format!("exa-agent search {} --text 1500", shell_quote(query)),
+    }));
+}
+
 fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         AuthCmd::Status => {
@@ -5805,6 +6023,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Use capabilities first to discover command metadata.",
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
+                    "Search returns query-aware highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
@@ -5886,6 +6105,7 @@ fn operation_schema(op: &registry::OperationDef) -> serde_json::Value {
             "bodyPath": field.body_path,
             "required": field.required,
         })).collect::<Vec<_>>(),
+        "contentDefaults": command_content_defaults(op),
     })
 }
 
@@ -5984,6 +6204,15 @@ fn validate_registry_input(
         }
     }
 
+    if let Some(issue) = content_option_shape_issue(op.command().as_str(), body) {
+        return ValidateInputOutcome {
+            valid: serde_json::Value::Bool(false),
+            details: Some(issue),
+            suggested_command: Some(content_option_suggestion(op.command().as_str())),
+            note: None,
+        };
+    }
+
     // Reuse the live command's own value-range validator so validate-input never
     // reports `valid:true` for a body the command would reject (e.g. numResults:500).
     // This must stay before the generic registry range check below: search owns
@@ -6038,6 +6267,154 @@ fn validate_registry_input(
         details: None,
         suggested_command: None,
         note: None,
+    }
+}
+
+fn content_option_shape_issue(
+    command: &str,
+    body: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    match command {
+        "search" | "similar" => validate_text_option_shape(
+            body_value_at_path(body, "contents.text"),
+            "contents.text",
+            "text",
+        )
+        .or_else(|| {
+            validate_highlights_option_shape(
+                body_value_at_path(body, "contents.highlights"),
+                "contents.highlights",
+                "highlights",
+            )
+        }),
+        "contents" => validate_text_option_shape(body_value_at_path(body, "text"), "text", "text"),
+        _ => None,
+    }
+}
+
+fn validate_text_option_shape(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    flag: &str,
+) -> Option<serde_json::Value> {
+    let value = value?;
+    if value.is_null() || value.is_boolean() {
+        return None;
+    }
+    let Some(object) = value.as_object() else {
+        return Some(content_option_type_issue(
+            field,
+            flag,
+            "boolean or text options object",
+            value,
+        ));
+    };
+    validate_positive_integer_field(
+        object.get("maxCharacters"),
+        field,
+        "maxCharacters",
+        flag,
+        1,
+        Some(10_000),
+    )
+}
+
+fn validate_highlights_option_shape(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    flag: &str,
+) -> Option<serde_json::Value> {
+    let value = value?;
+    if value.is_null() || value.is_boolean() {
+        return None;
+    }
+    let Some(object) = value.as_object() else {
+        return Some(content_option_type_issue(
+            field,
+            flag,
+            "boolean or highlights options object",
+            value,
+        ));
+    };
+
+    if let Some(query) = object.get("query") {
+        if !(query.is_null() || query.is_string()) {
+            return Some(content_option_type_issue(
+                &format!("{field}.query"),
+                flag,
+                "string or null",
+                query,
+            ));
+        }
+    }
+
+    validate_positive_integer_field(
+        object.get("maxCharacters"),
+        field,
+        "maxCharacters",
+        flag,
+        1,
+        Some(10_000),
+    )
+}
+
+fn validate_positive_integer_field(
+    value: Option<&serde_json::Value>,
+    parent_field: &str,
+    child_field: &str,
+    flag: &str,
+    min: u64,
+    max: Option<u64>,
+) -> Option<serde_json::Value> {
+    let value = value?;
+    if value.is_null() {
+        return None;
+    }
+    let ok = value
+        .as_u64()
+        .is_some_and(|number| number >= min && max.is_none_or(|max| number <= max));
+    if ok {
+        return None;
+    }
+    let field = format!("{parent_field}.{child_field}");
+    let mut issue = serde_json::json!({
+        "issue": "invalid_value",
+        "field": field,
+        "flag": flag,
+        "message": match max {
+            Some(max) => format!("{parent_field}.{child_field} must be an integer from {min} to {max} or null"),
+            None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
+        },
+        "min": min,
+        "received": value,
+    });
+    if let Some(max) = max {
+        issue["max"] = serde_json::Value::from(max);
+    }
+    Some(issue)
+}
+
+fn content_option_type_issue(
+    field: &str,
+    flag: &str,
+    expected: &str,
+    received: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "issue": "invalid_field_type",
+        "field": field,
+        "flag": flag,
+        "expected": expected,
+        "received": received,
+    })
+}
+
+fn content_option_suggestion(command: &str) -> String {
+    match command {
+        "search" => "exa-agent search <query> --text 1500".to_string(),
+        "similar" => "exa-agent similar <url> --text 1500".to_string(),
+        "contents" => "exa-agent contents <url-or-id> --text full".to_string(),
+        _ => "exa-agent schema show <command> --compact".to_string(),
     }
 }
 
@@ -6532,7 +6909,8 @@ fn parse_checks(raw: &[String]) -> Vec<String> {
 }
 
 fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
-    let warnings = typed_command_warnings(spec.op);
+    let mut warnings = typed_command_warnings(spec.op);
+    warnings.extend(request_body_warnings(spec.op, &typed_wire_body(spec)));
     redacted_preview_expanded(
         spec,
         TypedPreviewOptions {
@@ -7755,7 +8133,9 @@ mod tests {
             SearchArgs {
                 query: "rust cli".into(),
                 num_results: Some("7".into()),
-                text: true,
+                text: Some(String::new()),
+                highlights: Some("2".into()),
+                no_highlights: false,
                 r#type: Some(SearchType::DeepLite),
                 category: Some("research-paper".into()),
                 include_domain: vec!["exa.ai".into(), "example.com".into()],
@@ -7771,7 +8151,9 @@ mod tests {
             vec![
                 ("query", Some("rust cli".to_string())),
                 ("num-results", Some("7".to_string())),
-                ("text", Some("true".to_string())),
+                ("text", Some(String::new())),
+                ("highlights", Some("2".to_string())),
+                ("no-highlights", None),
                 ("type", Some("deep-lite".to_string())),
                 ("category", Some("research-paper".to_string())),
                 (
@@ -7788,7 +8170,7 @@ mod tests {
             ContentsArgs {
                 urls: vec!["https://example.com".into()],
                 ids: Vec::new(),
-                text: true,
+                text: Some(String::new()),
                 summary_query: Some("summarize".into()),
                 chunk_size: Some(10),
             }
@@ -7796,7 +8178,7 @@ mod tests {
             vec![
                 ("urls", Some(r#"["https://example.com"]"#.to_string())),
                 ("ids", None),
-                ("text", Some("true".to_string())),
+                ("text", Some(String::new())),
                 ("summary-query", Some("summarize".to_string())),
             ]
         );
@@ -7827,6 +8209,7 @@ mod tests {
                 num_results: Some(7),
                 exclude_source_domain: true,
                 category: Some(SearchCategory::ResearchPaper),
+                text: Some("1500".into()),
             }
             .into_flag_values(),
             vec![
@@ -7834,6 +8217,7 @@ mod tests {
                 ("num-results", Some("7".to_string())),
                 ("exclude-source-domain", Some("true".to_string())),
                 ("category", Some("research paper".to_string())),
+                ("text", Some("1500".to_string())),
             ]
         );
         assert_eq!(
@@ -7842,6 +8226,7 @@ mod tests {
                 num_results: None,
                 exclude_source_domain: false,
                 category: None,
+                text: None,
             }
             .into_flag_values(),
             vec![
@@ -7849,6 +8234,7 @@ mod tests {
                 ("num-results", None),
                 ("exclude-source-domain", None),
                 ("category", None),
+                ("text", None),
             ]
         );
 
@@ -7888,7 +8274,9 @@ mod tests {
                 &SearchArgs {
                     query: "q".into(),
                     num_results: None,
-                    text: false,
+                    text: None,
+                    highlights: None,
+                    no_highlights: false,
                     r#type: None,
                     category: None,
                     include_domain: Vec::new(),
@@ -7909,7 +8297,7 @@ mod tests {
                 &ContentsArgs {
                     urls: vec!["https://example.com".into()],
                     ids: Vec::new(),
-                    text: false,
+                    text: None,
                     summary_query: None,
                     chunk_size: None,
                 }
@@ -7934,6 +8322,7 @@ mod tests {
                     num_results: None,
                     exclude_source_domain: false,
                     category: None,
+                    text: None,
                 }
                 .into_flag_values()
             ),
@@ -8075,6 +8464,10 @@ mod tests {
             .as_str()
             .expect("dataPath must be set when truncated");
         let spilled = std::fs::read_to_string(data_path).expect("spill file must exist");
+        assert!(
+            spilled.contains("\n  "),
+            "spill file should be pretty-printed for line-oriented tools"
+        );
         let spilled_value: serde_json::Value = serde_json::from_str(&spilled).unwrap();
         assert_eq!(
             spilled_value, big,

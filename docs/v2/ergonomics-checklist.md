@@ -18,7 +18,7 @@ The local `agent-ergonomics-and-intuitiveness-maximization-for-cli-tools` skill 
 
 The release gate pins the predictable mistakes most likely to waste agent loops:
 
-- `search --text` succeeds and maps to `contents.text=true`.
+- bare `search` requests query-aware `contents.highlights`; `search --text` maps to `contents.text.maxCharacters=1500`; `search --no-highlights` is metadata-only.
 - `search --limit N`, `search --count N`, and `search --all` fail with `invalid_flag_combination` and a paste-ready `--num-results` suggestion.
 - `search --filter category=news` fails with a typed `--category news` suggestion.
 - Category near-misses such as `companys` fail with `details.didYouMean`.

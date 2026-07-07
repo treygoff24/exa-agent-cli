@@ -2,6 +2,66 @@
 
 All notable changes to this project are documented here.
 
+## 0.3.0 — 2026-07-07
+
+Fix pass driven by a cold-start dogfood audit (`audit.md`): a fresh agent using only `--help`
+and error messages hit a first-call failure on `context`, two entirely dead command trees
+(`websets`, `team`), and error messages that destroyed the one piece of information an agent
+needed to recover. All four are fixed.
+
+### Fixed
+
+- `context "query"` now works on the first call: `--tokens` defaults to `dynamic` instead of
+  sending no token budget and failing upstream with a 400. `--tokens dynamic` and `--tokens N`
+  both reach the request body correctly; `--help` now documents the range and the default.
+- `websets` and `team` were calling the wrong URL prefix (`/v0/...`) and 404ing on every
+  invocation with an HTML body. The runtime path is now `/websets/v0/...`, matching Exa's
+  deployed Websets base. `team` (bare, no subcommand) now runs `team info` directly instead of
+  requiring the one child command by name.
+- Upstream error bodies are parsed instead of dumped raw. A JSON error body yields a clean
+  `message` plus `details.upstream` (capped at 4096 bytes, with `details.upstreamPreview` and
+  `upstreamTruncated` when it's cut); an HTML error page yields
+  `"upstream returned non-JSON error page (HTTP N)"` plus `bodyPreview` instead of the literal
+  `<!DOCTYPE html>` as the error message.
+- The `ask` macro no longer expands to `answer QUESTION --text`. `/answer`'s `text` field is
+  boolean-only (no character cap), so that flag pulled in full uncapped citation text — a
+  44.8 KB response for a question `answer` alone answers in 5 KB. `ask` now expands to plain
+  `answer QUESTION`.
+
+### Changed
+
+- `contents`/`fetch` no longer report total failure as success. When every requested URL
+  fails, the command now emits an `all_urls_failed` warning and exits `10` instead of `ok: true`
+  with an empty result set; partial failures emit a per-URL `url_failed` warning and still exit
+  `0`.
+- Search's default highlights are now capped at 800 characters per result (previously
+  uncapped server-default length); `--highlights N` still overrides the cap and
+  `--no-highlights` still turns highlights off entirely.
+- `--highlights` and `--no-highlights` are no longer hidden from `search --help` — they were
+  functional but undocumented.
+- The envelope now omits always-null optional fields (`pagination`, `bytes`, `dataPath`,
+  `upstreamRequestId`, `correlationId`) instead of emitting them as literal `null`; an empty
+  `resolvedSearchType` is omitted rather than serialized as `""`. `warnings`/`nextActions`
+  still serialize as `[]` when empty.
+- `--ndjson` on list-shaped data now emits one line per result plus a final summary envelope,
+  instead of a single envelope line indistinguishable from `--compact`.
+- `--format human` now renders a real terse text format for `search`, `contents`, and `answer`
+  (title/url/citation lines instead of indented JSON); other commands still fall back to
+  pretty-printed JSON, with a one-time note on stderr when stdout is a TTY.
+- Global flags now all carry help text and are grouped under a "Global options" heading in
+  `--help`, separate from each subcommand's own flags.
+
+### Added
+
+- `capabilities <command-path>` filters the inventory to a single command's entry, instead of
+  requiring the full ~9k-token dump to find one command.
+- `buildDate` (in `capabilities` and `doctor`) is now a real date: `SOURCE_DATE_EPOCH` if set,
+  else the git HEAD commit date, else `"unknown"` — previously always `"unknown"` on
+  cargo-install builds.
+- `missing_subcommand` and `unknown_subcommand` errors now carry `details.subcommands` (the
+  valid children) and a `suggestedCommand`, instead of surfacing the parent command's own
+  `about` string as the error message.
+
 ## 0.2.0 — 2026-07-06
 
 Token-safe retrieval defaults: search results are now sized for agent context windows out of the box.

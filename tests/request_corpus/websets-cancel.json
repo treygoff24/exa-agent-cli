@@ -4,15 +4,13 @@
   "command": "websets cancel",
   "operation": {
     "method": "POST",
-    "path": "/v0/websets/webset_abc123/cancel",
+    "path": "/websets/v0/websets/webset_abc123/cancel",
     "operationId": "websets-cancel",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "POST",
-      "path": "/v0/websets/webset_abc123/cancel",
+      "path": "/websets/v0/websets/webset_abc123/cancel",
       "query": [],
       "body": {}
     },
     "dryRun": true
   },
-  "dataHash": "sha256:175b809af3122ea3ecf5b5579d60c094750558b84b0852f65c949afdedee32fa",
-  "pagination": null,
+  "dataHash": "sha256:a1712518a56e08e79914a904fdc91e6b067558f2f4e7d5cb1dbea44c9e3883f7",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

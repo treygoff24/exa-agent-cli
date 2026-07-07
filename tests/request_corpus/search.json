@@ -11,8 +11,6 @@
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -27,15 +25,15 @@
         "numResults": 5,
         "contents": {
           "highlights": {
-            "query": "hello world"
+            "query": "hello world",
+            "maxCharacters": 800
           }
         }
       }
     },
     "dryRun": true
   },
-  "dataHash": "sha256:b60787d44d2d7f455b6cfa5e66555edcdc6417b05a5f3c0191ae83f7b706a9cb",
-  "pagination": null,
+  "dataHash": "sha256:40a8a136c4d4a40b54577ef6b845b10b141f6c23e631a897c306538560863a6d",
   "costDollars": {
     "total": 0.0
   },
@@ -45,7 +43,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

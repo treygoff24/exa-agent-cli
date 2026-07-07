@@ -4,15 +4,13 @@
   "command": "websets items list",
   "operation": {
     "method": "GET",
-    "path": "/v0/websets/webset_abc123/items",
+    "path": "/websets/v0/websets/webset_abc123/items",
     "operationId": "websets-items-list",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/websets/webset_abc123/items",
+      "path": "/websets/v0/websets/webset_abc123/items",
       "query": [
         {
           "name": "sourceId",
@@ -35,8 +33,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:756cf9ee7bc192d87303ebddf3a93f9298e028333e004ea7f275fec1422c133f",
-  "pagination": null,
+  "dataHash": "sha256:224963a4860808c483e22c2df9d05ac5fe1cb7785e3e89aed04dfa998b9c3327",
   "costDollars": {
     "total": 0.0
   },
@@ -46,7 +43,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

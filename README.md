@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 `exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, research, monitors, the whole Websets tree, and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, prints one JSON envelope, has a stable exit code, and can describe itself offline. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
-The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.2.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
+The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.3.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
 ## Install
 
@@ -47,8 +47,9 @@ A few real commands (all verified to parse):
 ```sh
 # Search
 exa-agent search "rust async runtimes" --num-results 5
-# Search returns query-aware highlights at server default length; add --highlights 800 to cap,
-# --no-highlights for metadata only, or --text / --text 1500 / --text full for page text.
+# Search returns query-aware highlights capped at 800 chars/result by default; --highlights N
+# for a different cap, --no-highlights for metadata only, or --text / --text 1500 / --text full
+# for page text.
 
 # Cited answer
 exa-agent answer "what changed in the EU AI Act in 2025?"
@@ -87,7 +88,7 @@ exa-agent schema --help         # embedded API/CLI schema
 exa-agent doctor                # read-only health checks (add --online for a live probe)
 ```
 
-`capabilities` lists all 68 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries.
+`capabilities` lists all 68 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
 
 ### Command surface
 
@@ -96,7 +97,7 @@ exa-agent doctor                # read-only health checks (add --online for a li
 - **Research** — `research create|get|list` (the `/research/v1` API).
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
 - **Websets** — the full tree: websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events.
-- **Team and admin** — `team info` models Exa's documented `/v0/teams/me` endpoint, which upstream does not yet serve (it returns `not_found` until Exa ships it); `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. To confirm a credential works, use `auth test`.
+- **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, plus `auth` and `config`, and the `ask`/`fetch` convenience macros.
 

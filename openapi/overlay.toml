@@ -453,7 +453,7 @@ required = true
 [[operations."context".fields]]
 flag = "tokens"
 body_path = "tokensNum"
-kind = "int"
+kind = "json"
 
 # --- Request-field maps for spec-derived ops (Phase 1 seeds `search`; rest land per-phase) ---
 [[operations."answer".fields]]
@@ -465,7 +465,7 @@ required = true
 [[operations."answer".fields]]
 flag = "text"
 body_path = "text"
-kind = "bool"
+kind = "json"
 
 [[operations."answer".fields]]
 flag = "stream"

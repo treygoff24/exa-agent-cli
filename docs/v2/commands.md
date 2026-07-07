@@ -40,55 +40,55 @@ exa-agent
 │   ├── create                     # POST   /research/v1                    [create-POST]
 │   ├── list                       # GET    /research/v1
 │   └── get                        # GET    /research/v1/{researchId}
-├── websets                        # Websets API: /v0/websets
-│   ├── create                     # POST   /v0/websets                     [create-POST]
-│   ├── list                       # GET    /v0/websets
-│   ├── get                        # GET    /v0/websets/{id}
-│   ├── update                     # POST   /v0/websets/{id}   (POST, not PATCH)
-│   ├── delete                     # DELETE /v0/websets/{id}                [--yes]
-│   ├── cancel                     # POST   /v0/websets/{id}/cancel         [--yes]
-│   ├── preview                    # POST   /v0/websets/preview
+├── websets                        # Websets API: /websets/v0/websets
+│   ├── create                     # POST   /websets/v0/websets                     [create-POST]
+│   ├── list                       # GET    /websets/v0/websets
+│   ├── get                        # GET    /websets/v0/websets/{id}
+│   ├── update                     # POST   /websets/v0/websets/{id}   (POST, not PATCH)
+│   ├── delete                     # DELETE /websets/v0/websets/{id}                [--yes]
+│   ├── cancel                     # POST   /websets/v0/websets/{id}/cancel         [--yes]
+│   ├── preview                    # POST   /websets/v0/websets/preview
 │   ├── items
-│   │   ├── list                   # GET    /v0/websets/{webset}/items
-│   │   ├── get                    # GET    /v0/websets/{webset}/items/{id}
-│   │   └── delete                 # DELETE /v0/websets/{webset}/items/{id} [--yes]
+│   │   ├── list                   # GET    /websets/v0/websets/{webset}/items
+│   │   ├── get                    # GET    /websets/v0/websets/{webset}/items/{id}
+│   │   └── delete                 # DELETE /websets/v0/websets/{webset}/items/{id} [--yes]
 │   ├── searches
-│   │   ├── create                 # POST   /v0/websets/{webset}/searches            [create-POST]
-│   │   ├── get                    # GET    /v0/websets/{webset}/searches/{id}
-│   │   └── cancel                 # POST   /v0/websets/{webset}/searches/{id}/cancel
+│   │   ├── create                 # POST   /websets/v0/websets/{webset}/searches            [create-POST]
+│   │   ├── get                    # GET    /websets/v0/websets/{webset}/searches/{id}
+│   │   └── cancel                 # POST   /websets/v0/websets/{webset}/searches/{id}/cancel
 │   ├── enrichments
-│   │   ├── create                 # POST   /v0/websets/{webset}/enrichments         [create-POST]
-│   │   ├── get                    # GET    /v0/websets/{webset}/enrichments/{id}
-│   │   ├── update                 # PATCH  /v0/websets/{webset}/enrichments/{id}
-│   │   ├── delete                 # DELETE /v0/websets/{webset}/enrichments/{id}    [--yes]
-│   │   └── cancel                 # POST   /v0/websets/{webset}/enrichments/{id}/cancel [--yes]
+│   │   ├── create                 # POST   /websets/v0/websets/{webset}/enrichments         [create-POST]
+│   │   ├── get                    # GET    /websets/v0/websets/{webset}/enrichments/{id}
+│   │   ├── update                 # PATCH  /websets/v0/websets/{webset}/enrichments/{id}
+│   │   ├── delete                 # DELETE /websets/v0/websets/{webset}/enrichments/{id}    [--yes]
+│   │   └── cancel                 # POST   /websets/v0/websets/{webset}/enrichments/{id}/cancel [--yes]
 │   ├── imports
-│   │   ├── create                 # POST   /v0/imports   (returns uploadUrl)        [create-POST]
-│   │   ├── list                   # GET    /v0/imports
-│   │   ├── get                    # GET    /v0/imports/{id}
-│   │   ├── update                 # PATCH  /v0/imports/{id}
-│   │   └── delete                 # DELETE /v0/imports/{id}                         [--yes]
+│   │   ├── create                 # POST   /websets/v0/imports   (returns uploadUrl)        [create-POST]
+│   │   ├── list                   # GET    /websets/v0/imports
+│   │   ├── get                    # GET    /websets/v0/imports/{id}
+│   │   ├── update                 # PATCH  /websets/v0/imports/{id}
+│   │   └── delete                 # DELETE /websets/v0/imports/{id}                         [--yes]
 │   ├── monitors                   # Websets monitors (distinct from top-level `monitor`)
-│   │   ├── create                 # POST   /v0/monitors                             [create-POST]
-│   │   ├── list                   # GET    /v0/monitors
-│   │   ├── get                    # GET    /v0/monitors/{id}
-│   │   ├── update                 # PATCH  /v0/monitors/{id}
-│   │   ├── delete                 # DELETE /v0/monitors/{id}                        [--yes]
+│   │   ├── create                 # POST   /websets/v0/monitors                             [create-POST]
+│   │   ├── list                   # GET    /websets/v0/monitors
+│   │   ├── get                    # GET    /websets/v0/monitors/{id}
+│   │   ├── update                 # PATCH  /websets/v0/monitors/{id}
+│   │   ├── delete                 # DELETE /websets/v0/monitors/{id}                        [--yes]
 │   │   └── runs
-│   │       ├── list               # GET    /v0/monitors/{monitor}/runs
-│   │       └── get                # GET    /v0/monitors/{monitor}/runs/{id}
+│   │       ├── list               # GET    /websets/v0/monitors/{monitor}/runs
+│   │       └── get                # GET    /websets/v0/monitors/{monitor}/runs/{id}
 │   ├── events
-│   │   ├── list                   # GET    /v0/events
-│   │   └── get                    # GET    /v0/events/{id}
+│   │   ├── list                   # GET    /websets/v0/events
+│   │   └── get                    # GET    /websets/v0/events/{id}
 │   └── webhooks
-│       ├── create                 # POST   /v0/webhooks                     [create-POST]
-│       ├── list                   # GET    /v0/webhooks
-│       ├── get                    # GET    /v0/webhooks/{id}
-│       ├── update                 # PATCH  /v0/webhooks/{id}
-│       ├── delete                 # DELETE /v0/webhooks/{id}                        [--yes]
-│       └── attempts list          # GET    /v0/webhooks/{id}/attempts
-├── team
-│   └── info                       # GET    /v0/teams/me   (quota/concurrency)
+│       ├── create                 # POST   /websets/v0/webhooks                     [create-POST]
+│       ├── list                   # GET    /websets/v0/webhooks
+│       ├── get                    # GET    /websets/v0/webhooks/{id}
+│       ├── update                 # PATCH  /websets/v0/webhooks/{id}
+│       ├── delete                 # DELETE /websets/v0/webhooks/{id}                        [--yes]
+│       └── attempts list          # GET    /websets/v0/webhooks/{id}/attempts
+├── team                            # bare `team` runs `team info` directly (only child command)
+│   └── info                       # GET    /websets/v0/teams/me   (quota/concurrency)
 ├── admin                          # GATED: EXA_SERVICE_KEY + admin host (D4)
 │   └── keys
 │       ├── create                 # POST   /api-keys                 [create-POST; metadata only]
@@ -120,7 +120,7 @@ exa-agent
 │   ├── list | get | set | unset
 │   ├── path
 │   └── profiles list | show | use | create | delete
-├── ask                            # macro → `answer QUESTION --text` (§6)
+├── ask                            # macro → `answer QUESTION` (§6)
 ├── fetch                          # macro → `contents URL... --text --summary-query ...` (§6)
 └── raw                            # escape hatch: METHOD PATH [--body ...]
 ```
@@ -133,7 +133,7 @@ Approximate size: ~20 top-level namespaces, ~100 leaf commands.
 
 - `search` / `contents` / `similar` / `answer` / `context` are top-level — Exa's core synchronous primitives.
 - `agent` is top-level because `/agent/runs` is an async workflow API (runs, events, cancel/delete, SSE, structured output).
-- `monitor` (top-level `/monitors`) and `websets monitors` (`/v0/monitors`) are kept **separate** — same noun, different API families. Do not collapse. Because they differ only by singular/plural+nesting (a predictable agent mistype), the CLI ships a **custom did-you-mean**: a bare `exa-agent monitors …` (plural, nonexistent) and `monitor` invoked with webset-shaped args both emit `did you mean 'exa-agent monitor' (Search Monitors, /monitors) or 'exa-agent websets monitors' (Websets monitors, /v0/monitors)?`, and each group's `--help`/`about` names the sibling + its API path.
+- `monitor` (top-level `/monitors`) and `websets monitors` (`/websets/v0/monitors`) are kept **separate** — same noun, different API families. Do not collapse. Because they differ only by singular/plural+nesting (a predictable agent mistype), the CLI ships a **custom did-you-mean**: a bare `exa-agent monitors …` (plural, nonexistent) and `monitor` invoked with webset-shaped args both emit `did you mean 'exa-agent monitor' (Search Monitors, /monitors) or 'exa-agent websets monitors' (Websets monitors, /websets/v0/monitors)?`, and each group's `--help`/`about` names the sibling + its API path.
 - `admin` is walled off (D4): separate credential, separate host, confirm-by-id deletes.
 - `raw` is mandatory to avoid false completeness — any endpoint Exa ships before the registry catches up is still callable with the same auth/output/error contracts.
 
@@ -166,20 +166,20 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `DELETE /agent/runs/{id}` | `exa-agent agent runs delete ID --yes` | Destructive. |
 | `GET/POST /research/v1` | `exa-agent research list/create` | `create` is `[create-POST]`. **Legacy**; warns and points to `agent`. |
 | `GET /research/v1/{id}` | `exa-agent research get ID` | Status read. |
-| `GET/POST /v0/websets` | `exa-agent websets list/create` | `create` is `[create-POST]`. Body-first; `--body @file` + `--set`. |
-| `GET/POST/DELETE /v0/websets/{id}` | `exa-agent websets get/update/delete` | `update` is **POST**, not PATCH. `delete` requires `--yes`. |
-| `POST /v0/websets/{id}/cancel` | `exa-agent websets cancel ID --yes` | Discards running work. |
-| `POST /v0/websets/preview` | `exa-agent websets preview` | Plan before create; promoted in help. |
-| `GET/DELETE /v0/websets/{w}/items` | `exa-agent websets items list/get/delete` | List: `--limit/--cursor/--all`, `--source-id`. `delete` `--yes`. |
+| `GET/POST /websets/v0/websets` | `exa-agent websets list/create` | `create` is `[create-POST]`. Body-first; `--body @file` + `--set`. |
+| `GET/POST/DELETE /websets/v0/websets/{id}` | `exa-agent websets get/update/delete` | `update` is **POST**, not PATCH. `delete` requires `--yes`. |
+| `POST /websets/v0/websets/{id}/cancel` | `exa-agent websets cancel ID --yes` | Discards running work. |
+| `POST /websets/v0/websets/preview` | `exa-agent websets preview` | Plan before create; promoted in help. |
+| `GET/DELETE /websets/v0/websets/{w}/items` | `exa-agent websets items list/get/delete` | List: `--limit/--cursor/--all`, `--source-id`. `delete` `--yes`. |
 | `POST/GET/cancel searches` | `exa-agent websets searches create/get/cancel` | `create` is `[create-POST]`. |
 | `POST/GET/PATCH/DELETE/cancel enrichments` | `exa-agent websets enrichments create/get/update/delete/cancel` | `create` is `[create-POST]`. `delete`/`cancel` require `--yes`. |
 | `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl`; `--csv FILE` uploads only when explicit. `delete` `--yes`. |
-| `POST/GET/PATCH/DELETE /v0/monitors` | `exa-agent websets monitors create/list/get/update/delete` | `create` is `[create-POST]`. Distinct from top-level `monitor`. |
-| `GET /v0/monitors/{m}/runs[/id]` | `exa-agent websets monitors runs list/get` | Cursor on list. |
-| `GET /v0/events[/id]` | `exa-agent websets events list/get` | List: cursor, `--type`, `--created-before/after`. |
+| `POST/GET/PATCH/DELETE /websets/v0/monitors` | `exa-agent websets monitors create/list/get/update/delete` | `create` is `[create-POST]`. Distinct from top-level `monitor`. |
+| `GET /websets/v0/monitors/{m}/runs[/id]` | `exa-agent websets monitors runs list/get` | Cursor on list. |
+| `GET /websets/v0/events[/id]` | `exa-agent websets events list/get` | List: cursor, `--type`, `--created-before/after`. |
 | `POST/GET/PATCH/DELETE webhooks` | `exa-agent websets webhooks create/list/get/update/delete` | `create` is `[create-POST]` (mints a webhook + signing secret). `delete` `--yes`. `--secret-output FILE` captures signing secret. |
-| `GET /v0/webhooks/{id}/attempts` | `exa-agent websets webhooks attempts list` | Cursor. |
-| `GET /v0/teams/me` | `exa-agent team info` | Read-only account/limits. |
+| `GET /websets/v0/webhooks/{id}/attempts` | `exa-agent websets webhooks attempts list` | Cursor. |
+| `GET /websets/v0/teams/me` | `exa-agent team info` | Read-only account/limits. |
 | `POST /api-keys` | `exa-agent admin keys create` | `[create-POST]`. Admin host. Body: `--name`, `--rate-limit`, `--budget-cents`. Response is **metadata only** (no raw secret). |
 | `GET /api-keys` | `exa-agent admin keys list` | Admin host. |
 | `GET /api-keys/{id}` | `exa-agent admin keys get ID` | Admin host. |
@@ -314,7 +314,7 @@ exa-agent search QUERY
   --text-verbosity compact|standard|full
   --include-section S            --exclude-section S            # repeatable
   --include-html-tags
-  --highlights[=N]               # search default: query-aware, server length; N caps chars/result
+  --highlights[=N]               # search default: query-aware, capped at 800 chars/result; N overrides the cap
   --no-highlights                # metadata-only search results
   --highlight-query TEXT         --highlight-max-characters N   # max 10000
   --summary[=QUERY]              --summary-query TEXT  --summary-schema JSON|@file
@@ -462,7 +462,7 @@ exa-agent monitor runs get  ID RUN_ID
 
 Guard: `monitor create` with `--webhook-url` but no `--secret-output` and a non-TTY → `warnings[]`: the `webhookSecret` is returned once and will be lost unless captured.
 
-### `websets` — `/v0/websets`
+### `websets` — `/websets/v0/websets`
 
 ```text
 exa-agent websets create   --query TEXT --count N
@@ -532,7 +532,8 @@ exa-agent websets webhooks attempts list WEBHOOK_ID --limit N --cursor TOKEN --a
 ### `team`
 
 ```text
-exa-agent team info        # GET /v0/teams/me; concurrency/quota; read-only
+exa-agent team             # bare invocation runs `info` directly (the only child command)
+exa-agent team info        # GET /websets/v0/teams/me; concurrency/quota; read-only
 ```
 
 ### `admin keys` — GATED (D4)
@@ -614,7 +615,7 @@ Thin, transparent expansions (D12). Inspect with `--dry-run --print-request`. No
 
 | Macro | `expands_to` | Use |
 |---|---|---|
-| `ask QUESTION` | `answer QUESTION --text` | One-shot cited Q&A. |
+| `ask QUESTION` | `answer QUESTION` | One-shot cited Q&A. `/answer`'s `text` field is boolean-only (no character cap), so the macro leaves it unset; plain answer output is already small. |
 | `fetch URL...` | `contents URL... --text --summary-query "Summarize the page"` | Pull + summarize known pages. |
 
 **Deferred post-v1 (D12):** the configurable preset/macro registry — `preset show`, presets-in-TOML (`[presets.X]`), `macro show`, and the additional macros lane-e sketched (`cite`, `investigate`, `watch`). v1 ships only `ask` and `fetch` plus `--profile` and a minimal config (base-url, default format, timeout, retry). The OpenAI-compat surfaces (`chat-completions`, `responses`) are also deferred (D16); v1 covers them via `raw` (e.g. `exa-agent raw POST /chat/completions --body @req.json`).

@@ -4,15 +4,13 @@
   "command": "websets delete",
   "operation": {
     "method": "DELETE",
-    "path": "/v0/websets/webset_abc123",
+    "path": "/websets/v0/websets/webset_abc123",
     "operationId": "websets-delete",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "DELETE",
-      "path": "/v0/websets/webset_abc123",
+      "path": "/websets/v0/websets/webset_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:70206043ab043d7a6378fe28c3469d74eedfc6e469d0b5aeea31ccc8fc87bd22",
-  "pagination": null,
+  "dataHash": "sha256:63a6b097cc8ea43847c91fd7905c52cc6fd91e9e948b8c4162d23ccf99e60813",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -23,9 +23,9 @@ use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
 
 use cli::{
     AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentRunArgs, AgentRunsCmd,
-    AgentRunsEventsArgs, AnswerArgs, AuthCmd, Cli, Command, ConfigCmd, ConfigProfilesCmd,
-    ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MonitorBatchArgs, MonitorCmd,
-    MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd, PaginationArgs, ResearchCmd,
+    AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
+    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MonitorBatchArgs,
+    MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd, PaginationArgs, ResearchCmd,
     ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs, TeamCmd,
     WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
     WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
@@ -52,6 +52,7 @@ const MAX_CONTENTS_BATCH_SIZE: usize = 100;
 const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 49_152;
 const DEFAULT_TEXT_MAX_CHARACTERS: u32 = 1_500;
+const DEFAULT_HIGHLIGHTS_MAX_CHARACTERS: u32 = 800;
 const MAX_TEXT_MAX_CHARACTERS: u32 = 10_000;
 const SEARCH_OVERSIZED_DATA_WARNING_BYTES: usize = 10 * 1024;
 
@@ -132,9 +133,26 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             0
         }
         kind => {
+            if matches!(
+                kind,
+                ErrorKind::InvalidSubcommand
+                    | ErrorKind::MissingSubcommand
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) {
+                if let Some(err) = subcommand_usage_error(&e, kind) {
+                    let env = ErrorEnvelope::from_error(&err);
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+                    );
+                    return err.category() as i32;
+                }
+            }
+
             let code = match kind {
                 ErrorKind::UnknownArgument => "unknown_flag",
-                ErrorKind::InvalidSubcommand | ErrorKind::MissingSubcommand => "unknown_subcommand",
+                ErrorKind::InvalidSubcommand => "unknown_subcommand",
+                ErrorKind::MissingSubcommand => "missing_subcommand",
                 ErrorKind::InvalidValue | ErrorKind::ValueValidation => "invalid_value",
                 ErrorKind::MissingRequiredArgument => "missing_required_argument",
                 _ => "invalid_value",
@@ -196,6 +214,137 @@ fn handle_clap_error(e: clap::Error) -> i32 {
     }
 }
 
+fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Option<CliError> {
+    use clap::error::{ContextKind, ErrorKind};
+
+    let parent = parent_command_from_error(e)?;
+    let subcommands = immediate_subcommands(&parent);
+    if subcommands.is_empty() {
+        return None;
+    }
+    let received = clap_ctx_strings(e, ContextKind::InvalidSubcommand)
+        .into_iter()
+        .next();
+    let suggested = clap_ctx_strings(e, ContextKind::SuggestedSubcommand)
+        .into_iter()
+        .last();
+    let mut details = serde_json::json!({ "subcommands": subcommands });
+    if kind == ErrorKind::InvalidSubcommand {
+        if let Some(received) = &received {
+            details["received"] = serde_json::Value::String(received.clone());
+        }
+    }
+    if let Some(suggested) = &suggested {
+        details["didYouMean"] = serde_json::Value::String(suggested.clone());
+    }
+    let suggestion = suggested
+        .as_deref()
+        .map(|sub| format!("exa-agent {parent} {sub}"))
+        .or_else(|| {
+            received
+                .as_deref()
+                .and_then(|sub| nested_subcommand_suggestion(&parent, sub))
+        })
+        .unwrap_or_else(|| format!("exa-agent {parent} --help"));
+    let (code, message) = match kind {
+        ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            ("missing_subcommand", "missing subcommand")
+        }
+        _ => ("unknown_subcommand", "unknown subcommand"),
+    };
+    Some(CliError::Usage(
+        Diag::new(code, message)
+            .with_details(details)
+            .with_suggestion(suggestion),
+    ))
+}
+
+fn parent_command_from_error(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+    let usage = clap_ctx_strings(e, ContextKind::Usage)
+        .into_iter()
+        .next()
+        .or_else(|| {
+            e.to_string()
+                .lines()
+                .find(|line| line.contains("Usage:"))
+                .map(ToOwned::to_owned)
+        })?;
+    parent_command_from_usage(&usage)
+}
+
+fn parent_command_from_usage(usage: &str) -> Option<String> {
+    let usage = strip_ansi(usage);
+    let usage = usage.trim();
+    let usage = usage.strip_prefix("Usage: ")?;
+    let usage = usage.strip_prefix("exa-agent ")?;
+    let before_marker = usage.split_once(" <COMMAND>").map(|(head, _)| head)?;
+    let parent = before_marker
+        .trim()
+        .strip_suffix(" [OPTIONS]")
+        .unwrap_or(before_marker.trim())
+        .trim();
+    (!parent.is_empty()).then(|| parent.to_string())
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn immediate_subcommands(parent: &str) -> Vec<String> {
+    let parent_segments: Vec<&str> = parent.split_whitespace().collect();
+    let mut subcommands = registry::REGISTRY
+        .iter()
+        .filter(|op| op.cli_path.starts_with(&parent_segments))
+        .filter_map(|op| op.cli_path.get(parent_segments.len()).copied())
+        .map(ToOwned::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    for fallback in static_subcommands(parent) {
+        subcommands.insert(fallback.to_string());
+    }
+    subcommands.into_iter().collect()
+}
+
+fn static_subcommands(parent: &str) -> &'static [&'static str] {
+    match parent {
+        "schema" => &["list", "show", "export", "validate-input", "refresh"],
+        "robot-docs" => &["guide", "commands", "errors", "examples", "prompts"],
+        "auth" => &["status", "test", "login", "logout"],
+        "config" => &["list", "get", "set", "unset", "path", "profiles"],
+        "config profiles" => &["list", "show", "use", "create", "delete"],
+        "agent" => &["run", "runs"],
+        "agent runs" => &["create", "list", "get", "events", "cancel", "delete"],
+        _ => &[],
+    }
+}
+
+fn nested_subcommand_suggestion(parent: &str, received: &str) -> Option<String> {
+    let parent_segments: Vec<&str> = parent.split_whitespace().collect();
+    registry::REGISTRY
+        .iter()
+        .filter(|op| op.cli_path.starts_with(&parent_segments))
+        .find(|op| {
+            op.cli_path
+                .iter()
+                .skip(parent_segments.len())
+                .any(|part| *part == received)
+        })
+        .map(|op| format!("exa-agent {}", op.command()))
+}
+
 fn clap_ctx_strings(e: &clap::Error, kind: clap::error::ContextKind) -> Vec<String> {
     use clap::error::ContextValue;
 
@@ -219,8 +368,8 @@ fn first_line(s: &str) -> String {
 fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
     match &cli.command {
-        Command::Capabilities => {
-            emit_stdout(&capabilities(), pretty);
+        Command::Capabilities(args) => {
+            emit_stdout(&capabilities_for(args)?, pretty);
             Ok(0)
         }
         Command::Schema { sub } => dispatch_schema(sub, &cli.globals, pretty),
@@ -249,7 +398,7 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Context(args) => dispatch_context(args, &cli.globals, pretty),
         Command::Monitor { sub } => dispatch_monitor(sub, &cli.globals, pretty),
         Command::Websets { sub } => dispatch_websets(sub, &cli.globals, pretty),
-        Command::Team { sub } => dispatch_team(sub, &cli.globals, pretty),
+        Command::Team { sub } => dispatch_team(sub.as_ref(), &cli.globals, pretty),
         Command::Admin { sub } => dispatch_admin(sub, &cli.globals, pretty),
         Command::Agent { sub } => dispatch_agent(sub, &cli.globals, pretty),
         Command::Research { sub } => dispatch_research(sub, &cli.globals, pretty),
@@ -257,6 +406,55 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Fetch(args) => dispatch_fetch(args, &cli.globals, pretty),
         Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
     }
+}
+
+fn capabilities_for(args: &CapabilitiesArgs) -> Result<serde_json::Value, CliError> {
+    if args.command_path.is_empty() {
+        return Ok(capabilities());
+    }
+    let command = args.command_path.join(" ");
+    let op = registry::lookup_by_command(&command).ok_or_else(|| {
+        CliError::Usage(
+            Diag::new(
+                "unknown_subcommand",
+                format!("unknown command path `{command}`"),
+            )
+            .with_details(serde_json::json!({
+                "commandPath": command,
+                "commands": registry::REGISTRY.iter().map(|op| op.command()).collect::<Vec<_>>(),
+            }))
+            .with_suggestion("exa-agent capabilities --compact"),
+        )
+    })?;
+    let all = capabilities();
+    let entry = all
+        .get("commands")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|commands| {
+            commands.iter().find(|entry| {
+                entry.get("path").and_then(serde_json::Value::as_str) == Some(op.command().as_str())
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            CliError::Usage(
+                Diag::new(
+                    "internal_error",
+                    format!("registry op `{command}` is missing from capabilities output"),
+                )
+                .with_details(serde_json::json!({ "commandPath": command })),
+            )
+        })?;
+    Ok(serde_json::json!({
+        "schema": "exa.cli.capabilities.v1",
+        "ok": true,
+        "binary": all["binary"].clone(),
+        "build": all["build"].clone(),
+        "spec": all["spec"].clone(),
+        "command": entry,
+        "exitCodes": all["exitCodes"].clone(),
+        "errorCodes": all["errorCodes"].clone(),
+    }))
 }
 
 fn dispatch_search(args: &SearchArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -459,7 +657,7 @@ fn apply_default_search_highlights(body: &mut serde_json::Value, query: &str) {
     let _ = request::set_at_path(
         body,
         "contents.highlights",
-        default_highlights_value(query, None),
+        default_highlights_value(query, Some(DEFAULT_HIGHLIGHTS_MAX_CHARACTERS)),
     );
 }
 
@@ -803,14 +1001,17 @@ fn build_answer_spec(
 fn dispatch_ask(args: &cli::AskArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["answer"]).expect("answer is in the registry");
     with_typed_error_context(op, globals, || {
-        let answer_args = AnswerArgs {
-            question: args.question.clone(),
-            text: true,
-            stream: false,
-            output_schema: None,
-        };
-        let spec = build_answer_spec(&answer_args, globals)?;
-        let expands_to = format!("answer {} --text", shell_quote(&args.question));
+        // /answer's `text` field is boolean-only (no `{maxCharacters}` cap shape, unlike
+        // search/contents/similar), so the macro omits it rather than sending an invalid body.
+        // Plain answer output (citations + short synthesis) is already ~5KB, well within budget.
+        let flag_values = [
+            ("question", Some(args.question.clone())),
+            ("text", None),
+            ("stream", None),
+            ("output-schema", None),
+        ];
+        let spec = build_typed_spec(op, &flag_values, globals)?;
+        let expands_to = format!("answer {}", shell_quote(&args.question));
         dispatch_typed_command_expanded(spec, globals, pretty, Some(expands_to.as_str()), None)
     })
 }
@@ -855,15 +1056,14 @@ fn build_context_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["context"]).expect("context is in the registry");
     let mut flag_values = args.into_flag_values();
-    if let Some(raw) = args.tokens.as_deref() {
-        let tokens = context_tokens_value(raw)?.map(|n| n.to_string());
-        // Override contract: skip the source field and push once, or mutate the existing entry; never push a duplicate flag.
-        if let Some((_, value)) = flag_values.iter_mut().find(|(flag, _)| *flag == "tokens") {
-            *value = tokens;
-        }
+    let tokens = context_tokens_value(args.tokens.as_deref().unwrap_or("dynamic"))?;
+    // Override contract: skip the source field and push once, or mutate the existing entry; never push a duplicate flag.
+    if let Some((_, value)) = flag_values.iter_mut().find(|(flag, _)| *flag == "tokens") {
+        *value = Some(tokens);
     }
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_context_query_length(&spec.body)?;
+    validate_context_tokens_num(&spec.body)?;
     Ok(spec)
 }
 
@@ -883,9 +1083,9 @@ fn validate_context_query_length(body: &serde_json::Value) -> Result<(), CliErro
     ))
 }
 
-fn context_tokens_value(raw: &str) -> Result<Option<u32>, CliError> {
+fn context_tokens_value(raw: &str) -> Result<String, CliError> {
     if raw.eq_ignore_ascii_case("dynamic") {
-        return Ok(None);
+        return Ok(serde_json::Value::String("dynamic".to_string()).to_string());
     }
     let tokens = raw.parse::<u32>().map_err(|_| {
         CliError::Usage(
@@ -893,21 +1093,98 @@ fn context_tokens_value(raw: &str) -> Result<Option<u32>, CliError> {
                 "invalid_value",
                 "`--tokens` must be `dynamic` or an integer between 50 and 100000",
             )
+            .with_details(serde_json::json!({
+                "received": raw,
+                "acceptedForms": ["dynamic", "50..100000"],
+            }))
             .with_suggestion("exa-agent context QUERY --tokens dynamic"),
         )
     })?;
     if !(50..=100_000).contains(&tokens) {
         return Err(CliError::Usage(
             Diag::new("invalid_value", "`--tokens` must be between 50 and 100000")
+                .with_details(serde_json::json!({
+                    "received": raw,
+                    "acceptedForms": ["dynamic", "50..100000"],
+                    "min": 50,
+                    "max": 100000,
+                }))
                 .with_suggestion("exa-agent context QUERY --tokens dynamic"),
         ));
     }
-    Ok(Some(tokens))
+    Ok(tokens.to_string())
 }
 
-fn dispatch_team(sub: &TeamCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+fn validate_context_tokens_num(body: &serde_json::Value) -> Result<(), CliError> {
+    let Some(value) = body.get("tokensNum") else {
+        return Ok(());
+    };
+    if value
+        .as_str()
+        .is_some_and(|raw| raw.eq_ignore_ascii_case("dynamic"))
+    {
+        return Ok(());
+    }
+    if let Some(n) = value.as_i64() {
+        if (50..=100_000).contains(&n) {
+            return Ok(());
+        }
+        return Err(context_tokens_invalid_value(value.clone(), true));
+    }
+    if let Some(n) = value.as_u64() {
+        if (50..=100_000).contains(&n) {
+            return Ok(());
+        }
+        return Err(context_tokens_invalid_value(value.clone(), true));
+    }
+    if value.is_string() {
+        return Err(context_tokens_invalid_value(value.clone(), false));
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_field_type",
+            "field `tokensNum` (flag `--tokens`) must be `dynamic` or an integer",
+        )
+        .with_details(serde_json::json!({
+            "issue": "invalid_field_type",
+            "field": "tokensNum",
+            "flag": "tokens",
+            "expected": "`dynamic` or integer",
+            "received": value,
+        }))
+        .with_suggestion("exa-agent context QUERY --tokens dynamic"),
+    ))
+}
+
+fn context_tokens_invalid_value(received: serde_json::Value, include_bounds: bool) -> CliError {
+    let mut details = serde_json::json!({
+        "issue": "invalid_value",
+        "field": "tokensNum",
+        "flag": "tokens",
+        "received": received,
+        "acceptedForms": ["dynamic", "50..100000"],
+    });
+    if include_bounds {
+        details["min"] = serde_json::Value::from(50);
+        details["max"] = serde_json::Value::from(100_000);
+    }
+    CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            "`tokensNum` must be `dynamic` or an integer between 50 and 100000",
+        )
+        .with_details(details)
+        .with_suggestion("exa-agent context QUERY --tokens dynamic"),
+    )
+}
+
+fn dispatch_team(
+    sub: Option<&TeamCmd>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     match sub {
-        TeamCmd::Info => dispatch_team_info(globals, pretty),
+        Some(TeamCmd::Info) | None => dispatch_team_info(globals, pretty),
     }
 }
 
@@ -4276,7 +4553,7 @@ fn text_cap_json(cap: u32) -> String {
 
 fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError> {
     let max_characters = if raw.is_empty() {
-        None
+        Some(DEFAULT_HIGHLIGHTS_MAX_CHARACTERS)
     } else {
         Some(
             raw.parse::<u32>()
@@ -4841,7 +5118,7 @@ fn execute_paginated_live<T: Transport>(
         // would be more misleading than showing only the total.
         envelope["costDollars"] = serde_json::json!({ "total": total_cost_dollars });
         apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-        emit_stdout(&envelope, pretty);
+        emit_response_value(&envelope, globals, pretty);
     }
     Ok(0)
 }
@@ -5197,6 +5474,7 @@ fn execute_typed_live<T: Transport>(
     }
 
     let mut data = transport::parse_response_data(&result.response.body);
+    omit_empty_resolved_search_type(spec.op, &mut data);
     // A one-time secret (e.g. a freshly minted key) is captured to the reserved
     // --secret-output file from the raw response, *before* redaction scrubs it below.
     if let Some(reservation) = extras.secret_output {
@@ -5254,11 +5532,7 @@ fn execute_typed_live<T: Transport>(
         warnings: &warnings,
     });
     apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-    if globals.ndjson {
-        emit_ndjson(&envelope);
-    } else {
-        emit_stdout(&envelope, execution.pretty);
-    }
+    emit_response_value(&envelope, globals, execution.pretty);
     Ok(exit_code)
 }
 
@@ -5579,6 +5853,21 @@ fn typed_wire_body(spec: &request::RequestSpec) -> serde_json::Value {
     }
 }
 
+fn omit_empty_resolved_search_type(op: &registry::OperationDef, data: &mut serde_json::Value) {
+    if op.command() != "search" {
+        return;
+    }
+    if data
+        .get("resolvedSearchType")
+        .and_then(serde_json::Value::as_str)
+        == Some("")
+    {
+        if let Some(object) = data.as_object_mut() {
+            object.remove("resolvedSearchType");
+        }
+    }
+}
+
 #[cfg(test)]
 fn stream_ndjson_values(
     result: &transport::RawExecuteResult,
@@ -5704,6 +5993,10 @@ fn append_response_warnings(
     data: &serde_json::Value,
     warnings: &mut Vec<serde_json::Value>,
 ) {
+    if op.command() == "contents" {
+        append_contents_status_warnings(data, warnings);
+        return;
+    }
     if op.command() != "search" {
         return;
     }
@@ -5732,6 +6025,67 @@ fn append_response_warnings(
         ),
         "suggestedCommand": format!("exa-agent search {} --text 1500", shell_quote(query)),
     }));
+}
+
+fn append_contents_status_warnings(
+    data: &serde_json::Value,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    let Some(statuses) = data.get("statuses").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    let failed: Vec<&serde_json::Value> = statuses
+        .iter()
+        .filter(|entry| entry.get("status").and_then(serde_json::Value::as_str) == Some("error"))
+        .collect();
+    if failed.is_empty() {
+        return;
+    }
+    let tags: Vec<String> = failed
+        .iter()
+        .map(|entry| contents_status_tag(entry))
+        .collect();
+    let results_count = data
+        .get("results")
+        .or_else(|| data.get("data"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    if failed.len() == statuses.len() && results_count == 0 {
+        warnings.push(serde_json::json!({
+            "code": "all_urls_failed",
+            "message": format!("all requested URLs failed: {}", tags.join(", ")),
+            "statuses": tags,
+        }));
+        return;
+    }
+    for (entry, tag) in failed.into_iter().zip(tags) {
+        warnings.push(serde_json::json!({
+            "code": "url_failed",
+            "message": format!("requested URL failed: {tag}"),
+            "url": entry.get("id").or_else(|| entry.get("url")).cloned().unwrap_or(serde_json::Value::Null),
+            "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
+            "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+    }
+}
+
+fn contents_status_tag(entry: &serde_json::Value) -> String {
+    let id = entry
+        .get("id")
+        .or_else(|| entry.get("url"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown>");
+    let error = entry
+        .get("error")
+        .and_then(|error| {
+            error
+                .as_str()
+                .or_else(|| error.get("tag").and_then(serde_json::Value::as_str))
+                .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
+        })
+        .or_else(|| entry.get("tag").and_then(serde_json::Value::as_str))
+        .unwrap_or("error");
+    format!("{id}={error}")
 }
 
 fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -6021,9 +6375,12 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "section": "guide",
                 "guidance": [
                     "Use capabilities first to discover command metadata.",
+                    "Use capabilities <command-path> (for example capabilities search) for a small command slice.",
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
-                    "Search returns query-aware highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
+                    "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
+                    "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
+                    "Contents/fetch all-URL failures return exit 10 with warning code all_urls_failed; partial URL failures warn and exit 0.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
@@ -6048,6 +6405,18 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     serde_json::json!({ "exit": code, "category": name, "description": description })
                 }).collect::<Vec<_>>(),
                 "errorCodes": error_codes_json(),
+                "warningCodes": [
+                    {
+                        "code": "url_failed",
+                        "exit": 0,
+                        "description": "contents/fetch returned at least one successful URL and one failed URL; inspect warnings for per-URL status tags"
+                    },
+                    {
+                        "code": "all_urls_failed",
+                        "exit": 10,
+                        "description": "contents/fetch returned zero results and every requested URL failed; inspect warnings.statuses for per-URL status tags"
+                    }
+                ],
             }),
             pretty,
         ),
@@ -6059,6 +6428,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "task": args.task,
                 "examples": [
                     "exa-agent capabilities --compact",
+                    "exa-agent capabilities search --compact",
                     "exa-agent search \"AI infrastructure news\" --dry-run --print-request --compact",
                     "exa-agent team info --dry-run --print-request --compact"
                 ],
@@ -7132,7 +7502,7 @@ fn dispatch_raw_inner(
         warnings: &[],
     });
     apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-    emit_stdout(&envelope, pretty);
+    emit_response_value(&envelope, globals, pretty);
     Ok(0)
 }
 
@@ -7177,6 +7547,170 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
             Ok(serde_json::json!({ "name": name, "value": value }))
         })
         .collect()
+}
+
+fn emit_response_value(envelope: &serde_json::Value, globals: &GlobalArgs, pretty: bool) {
+    match response_output_mode(globals) {
+        OutputMode::Ndjson => emit_response_ndjson(envelope),
+        OutputMode::Human => {
+            if let Some(text) = render_human_response(envelope) {
+                println!("{}", text.trim_end());
+            } else {
+                if stdout_is_tty() {
+                    eprintln!("note: no bespoke human renderer for this command; falling back to pretty JSON");
+                }
+                emit_stdout(envelope, true);
+            }
+        }
+        OutputMode::Json | OutputMode::Raw => emit_stdout(envelope, pretty),
+    }
+}
+
+fn response_output_mode(globals: &GlobalArgs) -> OutputMode {
+    if let Some(mode) = explicit_mode(globals) {
+        return mode;
+    }
+    match std::env::var("EXA_OUTPUT").ok().as_deref() {
+        Some("human") => OutputMode::Human,
+        Some("ndjson") => OutputMode::Ndjson,
+        _ => OutputMode::Json,
+    }
+}
+
+fn emit_response_ndjson(envelope: &serde_json::Value) {
+    let items = primary_items(envelope.get("data").unwrap_or(&serde_json::Value::Null));
+    if items.is_empty() {
+        emit_ndjson(envelope);
+        return;
+    }
+    for item in items {
+        emit_ndjson(&item);
+    }
+    let mut summary = envelope.clone();
+    summary["summary"] = serde_json::Value::Bool(true);
+    summary["data"] = serde_json::Value::Null;
+    emit_ndjson(&summary);
+}
+
+fn render_human_response(envelope: &serde_json::Value) -> Option<String> {
+    let command = envelope
+        .get("command")
+        .and_then(serde_json::Value::as_str)?;
+    let data = envelope.get("data")?;
+    let body = match command {
+        "search" => render_search_human(data),
+        "contents" => render_contents_human(data),
+        "answer" => render_answer_human(data),
+        _ => return None,
+    };
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
+fn render_search_human(data: &serde_json::Value) -> String {
+    primary_items(data)
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let title = item
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(untitled)");
+            let url = item
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let date = item
+                .get("publishedDate")
+                .or_else(|| item.get("published_date"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let mut line = format!("{}. {title} — {url}", idx + 1);
+            if !date.is_empty() {
+                line.push_str(&format!(" — {date}"));
+            }
+            if let Some(snippet) = result_snippet(item, 500) {
+                line.push('\n');
+                line.push_str(&snippet);
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_contents_human(data: &serde_json::Value) -> String {
+    primary_items(data)
+        .iter()
+        .map(|item| {
+            let title = item
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(untitled)");
+            let url = item
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let text = result_snippet(item, 1_500).unwrap_or_default();
+            format!("{title}\n{url}\n\n{text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn render_answer_human(data: &serde_json::Value) -> String {
+    let mut out = data
+        .get("answer")
+        .map(|answer| {
+            answer
+                .as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| serde_json::to_string_pretty(answer).unwrap_or_default())
+        })
+        .unwrap_or_default();
+    let citations = data
+        .get("citations")
+        .or_else(|| data.get("results"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !citations.is_empty() {
+        out.push_str("\n\nCitations:\n");
+        for citation in citations {
+            let title = citation
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(untitled)");
+            let url = citation
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            out.push_str(&format!("- {title} — {url}\n"));
+        }
+    }
+    out
+}
+
+fn result_snippet(item: &serde_json::Value, max_chars: usize) -> Option<String> {
+    let raw = item
+        .get("highlights")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.iter().find_map(serde_json::Value::as_str))
+        .or_else(|| item.get("text").and_then(serde_json::Value::as_str))
+        .or_else(|| item.get("summary").and_then(serde_json::Value::as_str))?;
+    Some(compact_snippet(raw, max_chars))
+}
+
+fn compact_snippet(raw: &str, max_chars: usize) -> String {
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = compact.chars().take(max_chars).collect::<String>();
+    if compact.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 /// Pretty when `--pretty`, or in a TTY without `--compact`. JSON envelope is the default in a pipe.
@@ -8351,7 +8885,7 @@ mod tests {
             &globals,
         )
         .unwrap();
-        assert!(dynamic.body.get("tokensNum").is_none());
+        assert_eq!(dynamic.body["tokensNum"], "dynamic");
 
         let err = build_context_spec(
             &ContextArgs {
@@ -8428,7 +8962,7 @@ mod tests {
         let mut envelope = envelope_with_data(serde_json::json!({"results": [1, 2, 3]}));
         apply_output_ceiling(&mut envelope, 1_048_576);
         assert_eq!(envelope["dataTruncated"], false);
-        assert_eq!(envelope["dataPath"], serde_json::Value::Null);
+        assert!(envelope.get("dataPath").is_none());
         assert_eq!(envelope["data"]["results"], serde_json::json!([1, 2, 3]));
     }
 

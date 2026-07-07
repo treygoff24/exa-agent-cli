@@ -146,79 +146,113 @@ pub enum GroupBy {
 
 /// Universal flags, inherited by every subcommand (`global = true`).
 #[derive(Args, Clone)]
+#[command(next_help_heading = "Global options")]
 pub struct GlobalArgs {
+    /// Output format. `ndjson` emits one result per line for list-shaped data, else compact JSON.
     #[arg(long, global = true, value_enum, ignore_case = true)]
     pub format: Option<Format>,
+    /// Force JSON output.
     #[arg(long, global = true)]
     pub json: bool,
+    /// Force NDJSON output; list-shaped data emits item lines plus a final summary line.
     #[arg(long, global = true)]
     pub ndjson: bool,
+    /// Emit exact upstream bytes without the CLI envelope.
     #[arg(long, global = true)]
     pub raw: bool,
+    /// Pretty-print JSON envelopes.
     #[arg(long, global = true, conflicts_with = "compact")]
     pub pretty: bool,
+    /// Emit compact single-line JSON envelopes.
     #[arg(long, global = true)]
     pub compact: bool,
+    /// Write output to a file when supported.
     #[arg(short = 'o', long, global = true)]
     pub output: Option<String>,
+    /// Spill oversized `data` payloads above this byte limit; 0 disables.
     #[arg(long, global = true, default_value_t = crate::DEFAULT_MAX_OUTPUT_BYTES)]
     pub max_output_bytes: u64,
+    /// Correlation id echoed into request metadata.
     #[arg(long, global = true, env = "EXA_CORRELATION_ID")]
     pub correlation_id: Option<String>,
+    /// API key for normal Exa API calls.
     #[arg(long, global = true, conflicts_with = "api_key_stdin")]
     pub api_key: Option<String>,
+    /// Read the API key from stdin.
     #[arg(
         long,
         global = true,
         conflicts_with_all = ["api_key", "service_key_stdin"]
     )]
     pub api_key_stdin: bool,
+    /// Service key for admin/team-management calls.
     #[arg(long, global = true, conflicts_with = "service_key_stdin")]
     pub service_key: Option<String>,
+    /// Read the service key from stdin.
     #[arg(
         long,
         global = true,
         conflicts_with_all = ["service_key", "api_key_stdin"]
     )]
     pub service_key_stdin: bool,
+    /// Named config/auth profile.
     #[arg(long, global = true, env = "EXA_PROFILE")]
     pub profile: Option<String>,
+    /// Override the Exa API base URL.
     #[arg(long, global = true)]
     pub base_url: Option<String>,
+    /// Add a non-secret HTTP header as `Name: value`.
     #[arg(long = "header", global = true)]
     pub headers: Vec<String>,
+    /// Opt into an upstream beta header value.
     #[arg(long, global = true)]
     pub beta: Option<String>,
+    /// Total request timeout, e.g. `30s` or `250ms`.
     #[arg(long, global = true)]
     pub timeout: Option<String>,
+    /// Connect timeout, e.g. `10s`.
     #[arg(long, global = true)]
     pub connect_timeout: Option<String>,
+    /// Max retry count for retry-safe failures.
     #[arg(long, global = true, default_value_t = 2)]
     pub retry: u32,
+    /// Honor upstream Retry-After delays when retrying.
     #[arg(long, global = true, default_value_t = true)]
     pub retry_after: bool,
+    /// Idempotency key for safe create retries.
     #[arg(long, global = true)]
     pub idempotency_key: Option<String>,
+    /// Read command input from a file or `-` for stdin where supported.
     #[arg(long, global = true)]
     pub input: Option<String>,
+    /// Format of `--input`.
     #[arg(long, global = true, value_enum, ignore_case = true)]
     pub input_format: Option<InputFormat>,
+    /// Set a JSON body field as `path=value`; repeatable and applied last.
     #[arg(long = "set", global = true)]
     pub set: Vec<String>,
+    /// Merge a JSON object body from inline JSON, `@file`, or `-`.
     #[arg(long, global = true)]
     pub body: Option<String>,
+    /// Reduce diagnostics.
     #[arg(long, global = true)]
     pub quiet: bool,
+    /// Increase diagnostics.
     #[arg(long, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
+    /// Append redacted request/response trace JSONL to FILE.
     #[arg(long, global = true)]
     pub trace: Option<String>,
+    /// Disable ANSI color.
     #[arg(long, global = true)]
     pub no_color: bool,
+    /// Confirm destructive operations that require yes.
     #[arg(long, global = true)]
     pub yes: bool,
+    /// Build the request but do not send it.
     #[arg(long, global = true)]
     pub dry_run: bool,
+    /// Include the exact upstream request preview in dry-run output.
     #[arg(long, global = true)]
     pub print_request: bool,
 }
@@ -335,15 +369,15 @@ pub enum Command {
         #[command(subcommand)]
         sub: ResearchCmd,
     },
-    /// Websets API (/v0/websets).
+    /// Websets API (/websets/v0/websets).
     Websets {
         #[command(subcommand)]
         sub: WebsetsCmd,
     },
-    /// Team quota and concurrency (GET /v0/teams/me).
+    /// Team quota and concurrency (GET /websets/v0/teams/me).
     Team {
         #[command(subcommand)]
-        sub: TeamCmd,
+        sub: Option<TeamCmd>,
     },
     /// Gated admin surface (EXA_SERVICE_KEY + admin host).
     Admin {
@@ -352,7 +386,7 @@ pub enum Command {
     },
     /// CLI self-description (offline). Alias: describe.
     #[command(visible_alias = "describe")]
-    Capabilities,
+    Capabilities(CapabilitiesArgs),
     /// Embedded API/CLI schema (offline).
     Schema {
         #[command(subcommand)]
@@ -375,7 +409,7 @@ pub enum Command {
         #[command(subcommand)]
         sub: ConfigCmd,
     },
-    /// Macro → `answer QUESTION --text`.
+    /// Macro → `answer QUESTION`.
     Ask(AskArgs),
     /// Macro → `contents URL... --text --summary-query ...`.
     Fetch(FetchArgs),
@@ -397,7 +431,7 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub num_results: Option<String>,
-    /// Return text in each result. Bare --text caps search text at 1500 chars/result; use --text full or --text 0 for uncapped.
+    /// Return text in each result. Bare --text caps search text at 1500 chars/result; default highlights are usually smaller. Use --text full or --text 0 for uncapped.
     #[arg(
         long,
         value_name = "N|full",
@@ -406,7 +440,7 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub text: Option<String>,
-    /// Return query-aware highlights. Bare/default uses server length; N caps chars/result.
+    /// Return query-aware highlights. Bare/default caps at 800 chars/result; N overrides the cap.
     #[arg(
         long,
         value_name = "N",
@@ -415,7 +449,7 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub highlights: Option<String>,
-    /// Return metadata-only search results; disables default highlights.
+    /// Return metadata-only search results; disables default 800-char highlights.
     #[arg(long, conflicts_with = "highlights")]
     pub no_highlights: bool,
     /// Search type.
@@ -591,6 +625,7 @@ impl AnswerArgs {
 #[derive(Args, Debug)]
 pub struct ContextArgs {
     pub query: String,
+    /// Token budget: `dynamic` (default) or an integer from 50 to 100000.
     #[arg(long)]
     pub tokens: Option<String>,
 }
@@ -773,19 +808,19 @@ pub struct ResearchCreateArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsCmd {
-    /// POST /v0/websets [create-POST].
+    /// POST /websets/v0/websets [create-POST].
     Create(WebsetsCreateArgs),
-    /// GET /v0/websets.
+    /// GET /websets/v0/websets.
     List(WebsetsListArgs),
-    /// GET /v0/websets/{id}.
+    /// GET /websets/v0/websets/{id}.
     Get { id: String },
-    /// POST /v0/websets/{id}.
+    /// POST /websets/v0/websets/{id}.
     Update { id: String },
-    /// DELETE /v0/websets/{id}.
+    /// DELETE /websets/v0/websets/{id}.
     Delete { id: String },
-    /// POST /v0/websets/{id}/cancel.
+    /// POST /websets/v0/websets/{id}/cancel.
     Cancel { id: String },
-    /// POST /v0/websets/preview.
+    /// POST /websets/v0/websets/preview.
     Preview(WebsetsPreviewArgs),
     /// Webset items.
     Items {
@@ -807,7 +842,7 @@ pub enum WebsetsCmd {
         #[command(subcommand)]
         sub: WebsetsImportsCmd,
     },
-    /// Websets monitors (/v0/monitors) — distinct from top-level `monitor`.
+    /// Websets monitors (/websets/v0/monitors) — distinct from top-level `monitor`.
     Monitors {
         #[command(subcommand)]
         sub: WebsetsMonitorsCmd,
@@ -888,7 +923,7 @@ impl WebsetEnrichmentFormat {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsItemsCmd {
-    /// GET /v0/websets/{webset}/items.
+    /// GET /websets/v0/websets/{webset}/items.
     List {
         webset_id: String,
         #[command(flatten)]
@@ -896,15 +931,15 @@ pub enum WebsetsItemsCmd {
         #[arg(long = "source-id")]
         source_id: Option<String>,
     },
-    /// GET /v0/websets/{webset}/items/{id}.
+    /// GET /websets/v0/websets/{webset}/items/{id}.
     Get { webset_id: String, item_id: String },
-    /// DELETE /v0/websets/{webset}/items/{id}.
+    /// DELETE /websets/v0/websets/{webset}/items/{id}.
     Delete { webset_id: String, item_id: String },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsSearchesCmd {
-    /// POST /v0/websets/{webset}/searches [create-POST].
+    /// POST /websets/v0/websets/{webset}/searches [create-POST].
     Create {
         webset_id: String,
         #[arg(long)]
@@ -914,12 +949,12 @@ pub enum WebsetsSearchesCmd {
         #[arg(long)]
         criteria: Vec<String>,
     },
-    /// GET /v0/websets/{webset}/searches/{id}.
+    /// GET /websets/v0/websets/{webset}/searches/{id}.
     Get {
         webset_id: String,
         search_id: String,
     },
-    /// POST /v0/websets/{webset}/searches/{id}/cancel.
+    /// POST /websets/v0/websets/{webset}/searches/{id}/cancel.
     Cancel {
         webset_id: String,
         search_id: String,
@@ -928,7 +963,7 @@ pub enum WebsetsSearchesCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsEnrichmentsCmd {
-    /// POST /v0/websets/{webset}/enrichments [create-POST].
+    /// POST /websets/v0/websets/{webset}/enrichments [create-POST].
     Create {
         webset_id: String,
         #[arg(long)]
@@ -936,12 +971,12 @@ pub enum WebsetsEnrichmentsCmd {
         #[arg(long, value_enum, ignore_case = true)]
         enrichment_format: Option<WebsetEnrichmentFormat>,
     },
-    /// GET /v0/websets/{webset}/enrichments/{id}.
+    /// GET /websets/v0/websets/{webset}/enrichments/{id}.
     Get {
         webset_id: String,
         enrichment_id: String,
     },
-    /// PATCH /v0/websets/{webset}/enrichments/{id}.
+    /// PATCH /websets/v0/websets/{webset}/enrichments/{id}.
     Update {
         webset_id: String,
         enrichment_id: String,
@@ -950,12 +985,12 @@ pub enum WebsetsEnrichmentsCmd {
         #[arg(long, value_enum, ignore_case = true)]
         enrichment_format: Option<WebsetEnrichmentFormat>,
     },
-    /// DELETE /v0/websets/{webset}/enrichments/{id}.
+    /// DELETE /websets/v0/websets/{webset}/enrichments/{id}.
     Delete {
         webset_id: String,
         enrichment_id: String,
     },
-    /// POST /v0/websets/{webset}/enrichments/{id}/cancel.
+    /// POST /websets/v0/websets/{webset}/enrichments/{id}/cancel.
     Cancel {
         webset_id: String,
         enrichment_id: String,
@@ -964,7 +999,7 @@ pub enum WebsetsEnrichmentsCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsImportsCmd {
-    /// POST /v0/imports [create-POST].
+    /// POST /websets/v0/imports [create-POST].
     Create {
         #[arg(long)]
         source: Option<String>,
@@ -973,13 +1008,13 @@ pub enum WebsetsImportsCmd {
         #[arg(long)]
         csv: Option<String>,
     },
-    /// GET /v0/imports.
+    /// GET /websets/v0/imports.
     List(PaginationArgs),
-    /// GET /v0/imports/{id}.
+    /// GET /websets/v0/imports/{id}.
     Get { import_id: String },
-    /// PATCH /v0/imports/{id}.
+    /// PATCH /websets/v0/imports/{id}.
     Update { import_id: String },
-    /// DELETE /v0/imports/{id}.
+    /// DELETE /websets/v0/imports/{id}.
     Delete { import_id: String },
 }
 
@@ -1059,19 +1094,19 @@ pub struct WebsetsMonitorsUpdateArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsMonitorsCmd {
-    /// POST /v0/monitors [create-POST].
+    /// POST /websets/v0/monitors [create-POST].
     Create(WebsetsMonitorsCreateArgs),
-    /// GET /v0/monitors.
+    /// GET /websets/v0/monitors.
     List(WebsetsMonitorsListArgs),
-    /// GET /v0/monitors/{id}.
+    /// GET /websets/v0/monitors/{id}.
     Get { monitor_id: String },
-    /// PATCH /v0/monitors/{id}.
+    /// PATCH /websets/v0/monitors/{id}.
     Update {
         monitor_id: String,
         #[command(flatten)]
         args: WebsetsMonitorsUpdateArgs,
     },
-    /// DELETE /v0/monitors/{id}.
+    /// DELETE /websets/v0/monitors/{id}.
     Delete { monitor_id: String },
     /// Monitor runs under Websets monitors.
     Runs {
@@ -1082,13 +1117,13 @@ pub enum WebsetsMonitorsCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsMonitorRunsCmd {
-    /// GET /v0/monitors/{monitor}/runs.
+    /// GET /websets/v0/monitors/{monitor}/runs.
     List {
         monitor_id: String,
         #[command(flatten)]
         pagination: PaginationArgs,
     },
-    /// GET /v0/monitors/{monitor}/runs/{id}.
+    /// GET /websets/v0/monitors/{monitor}/runs/{id}.
     Get { monitor_id: String, run_id: String },
 }
 
@@ -1106,9 +1141,9 @@ pub struct WebsetsEventsListArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsEventsCmd {
-    /// GET /v0/events.
+    /// GET /websets/v0/events.
     List(WebsetsEventsListArgs),
-    /// GET /v0/events/{id}.
+    /// GET /websets/v0/events/{id}.
     Get { event_id: String },
 }
 
@@ -1142,19 +1177,19 @@ pub struct WebsetsWebhookAttemptsListArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsWebhooksCmd {
-    /// POST /v0/webhooks [create-POST].
+    /// POST /websets/v0/webhooks [create-POST].
     Create(WebsetsWebhooksCreateArgs),
-    /// GET /v0/webhooks.
+    /// GET /websets/v0/webhooks.
     List(PaginationArgs),
-    /// GET /v0/webhooks/{id}.
+    /// GET /websets/v0/webhooks/{id}.
     Get { webhook_id: String },
-    /// PATCH /v0/webhooks/{id}.
+    /// PATCH /websets/v0/webhooks/{id}.
     Update {
         webhook_id: String,
         #[command(flatten)]
         args: WebsetsWebhooksUpdateArgs,
     },
-    /// DELETE /v0/webhooks/{id}.
+    /// DELETE /websets/v0/webhooks/{id}.
     Delete { webhook_id: String },
     /// Webhook delivery attempts.
     Attempts {
@@ -1165,7 +1200,7 @@ pub enum WebsetsWebhooksCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum WebsetsWebhookAttemptsCmd {
-    /// GET /v0/webhooks/{id}/attempts.
+    /// GET /websets/v0/webhooks/{id}/attempts.
     List {
         webhook_id: String,
         #[command(flatten)]
@@ -1175,7 +1210,7 @@ pub enum WebsetsWebhookAttemptsCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum TeamCmd {
-    /// GET /v0/teams/me.
+    /// GET /websets/v0/teams/me.
     Info,
 }
 
@@ -1355,6 +1390,13 @@ pub struct AskArgs {
     pub question: String,
 }
 
+#[derive(Args, Debug, Default)]
+pub struct CapabilitiesArgs {
+    /// Optional command path to show, e.g. `search` or `websets items list`.
+    #[arg(value_name = "COMMAND", num_args = 0..)]
+    pub command_path: Vec<String>,
+}
+
 #[derive(Args, Debug)]
 pub struct FetchArgs {
     #[arg(required = true, num_args = 1..)]
@@ -1411,7 +1453,7 @@ pub fn command_path(command: &Command) -> String {
         },
         Command::Websets { sub } => websets_command_path(sub),
         Command::Team { sub } => match sub {
-            TeamCmd::Info => "team info".to_string(),
+            Some(TeamCmd::Info) | None => "team info".to_string(),
         },
         Command::Admin { sub } => match sub {
             AdminCmd::Keys { sub } => match sub {
@@ -1423,7 +1465,7 @@ pub fn command_path(command: &Command) -> String {
                 AdminKeysCmd::Usage { .. } => "admin keys usage".to_string(),
             },
         },
-        Command::Capabilities => "capabilities".to_string(),
+        Command::Capabilities(_) => "capabilities".to_string(),
         Command::Schema { sub } => match sub {
             SchemaCmd::List => "schema list".to_string(),
             SchemaCmd::Show { .. } => "schema show".to_string(),

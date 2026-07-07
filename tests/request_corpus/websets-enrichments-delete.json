@@ -4,15 +4,13 @@
   "command": "websets enrichments delete",
   "operation": {
     "method": "DELETE",
-    "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123",
+    "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123",
     "operationId": "websets-enrichments-delete",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "DELETE",
-      "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123",
+      "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:6e8b048d23de6a3e32145dd799b80c730499a439e82b8504544edf0361586c6a",
-  "pagination": null,
+  "dataHash": "sha256:081ae512933d257d3e1ae921c2911b6dc76ccbfd17e5a3060245a82ab3d87cba",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

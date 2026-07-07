@@ -4,15 +4,13 @@
   "command": "websets enrichments get",
   "operation": {
     "method": "GET",
-    "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123",
+    "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123",
     "operationId": "websets-enrichments-get",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123",
+      "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:b38c6328d7816ad42ef7bbc0da7c0192076fbef1d7c528681010534cf2e19169",
-  "pagination": null,
+  "dataHash": "sha256:7cfd0ccffd90d632d56fafd44bdca154c7ffb0bac6dbc936ff4776e156edcda1",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

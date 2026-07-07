@@ -4,15 +4,13 @@
   "command": "websets create",
   "operation": {
     "method": "POST",
-    "path": "/v0/websets",
+    "path": "/websets/v0/websets",
     "operationId": "websets-create",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "POST",
-      "path": "/v0/websets",
+      "path": "/websets/v0/websets",
       "query": [],
       "body": {
         "search": {
@@ -31,8 +29,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:57dd9a1f61e93a3aac0365828c420ddfa3cac7972fd8b9d1bce38e9d8982d458",
-  "pagination": null,
+  "dataHash": "sha256:5de66ad9a8fee031d7411ea9ef989124b212b8694d5045deb31bff016e9e119d",
   "costDollars": {
     "total": 0.0
   },
@@ -42,7 +39,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -4,15 +4,13 @@
   "command": "websets searches create",
   "operation": {
     "method": "POST",
-    "path": "/v0/websets/webset_abc123/searches",
+    "path": "/websets/v0/websets/webset_abc123/searches",
     "operationId": "websets-searches-create",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "POST",
-      "path": "/v0/websets/webset_abc123/searches",
+      "path": "/websets/v0/websets/webset_abc123/searches",
       "query": [],
       "body": {
         "query": "founders",
@@ -34,8 +32,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:7d5b74ea1ddd62620070cece0467cfebd214a03579336545695e70fafadcba6c",
-  "pagination": null,
+  "dataHash": "sha256:924599584c3e0eff1f26b51f9f92fbe8f1770f273fd47762a3fd63bc0eaf633f",
   "costDollars": {
     "total": 0.0
   },
@@ -45,7 +42,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

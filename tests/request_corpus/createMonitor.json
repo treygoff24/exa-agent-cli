@@ -11,8 +11,6 @@
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -39,7 +37,6 @@
     "dryRun": true
   },
   "dataHash": "sha256:53fad6bdcfbafa8def8c16cad4ea825a3c82dc4009fafd0e629718adf1d33356",
-  "pagination": null,
   "costDollars": {
     "total": 0.0
   },
@@ -55,7 +52,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

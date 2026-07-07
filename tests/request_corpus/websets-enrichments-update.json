@@ -4,15 +4,13 @@
   "command": "websets enrichments update",
   "operation": {
     "method": "PATCH",
-    "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123",
+    "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123",
     "operationId": "websets-enrichments-update",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "PATCH",
-      "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123",
+      "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123",
       "query": [],
       "body": {
         "description": "Updated company size"
@@ -28,8 +26,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:c3a346f372ca6e8f135f3b93552cb34de35ae0c25e4187dd4890a857e9d73397",
-  "pagination": null,
+  "dataHash": "sha256:2f28bf30c5e5c8d8a8990ece32aaa088a2c1e7350ca859a3ac2d46f4eb73961a",
   "costDollars": {
     "total": 0.0
   },
@@ -39,7 +36,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

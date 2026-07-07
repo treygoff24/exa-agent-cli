@@ -4,15 +4,13 @@
   "command": "websets webhooks get",
   "operation": {
     "method": "GET",
-    "path": "/v0/webhooks/webhook_abc123",
+    "path": "/websets/v0/webhooks/webhook_abc123",
     "operationId": "webhooks-get",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/webhooks/webhook_abc123",
+      "path": "/websets/v0/webhooks/webhook_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:4d4443d22f0335e76a3319b5452a408ffa7dfc7743dcd8c867fdee4172572f6f",
-  "pagination": null,
+  "dataHash": "sha256:9080e22580bcfcbe2f490b4e580b607f549c056b73f022d452991a54baad2e35",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

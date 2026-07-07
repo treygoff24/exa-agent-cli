@@ -39,11 +39,11 @@ pub struct ErrorOperation {
 
 #[derive(Serialize)]
 pub struct ErrorRequest {
-    #[serde(rename = "requestId")]
+    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    #[serde(rename = "upstreamRequestId")]
+    #[serde(rename = "upstreamRequestId", skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
-    #[serde(rename = "correlationId")]
+    #[serde(rename = "correlationId", skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
     pub redacted: bool,
 }
@@ -210,7 +210,7 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         .get("costDollars")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({ "total": 0.0 }));
-    serde_json::json!({
+    let mut envelope = serde_json::json!({
         "schema": "exa.cli.response.v1",
         "ok": true,
         "command": args.command,
@@ -223,8 +223,6 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         },
         "request": {
             "requestId": args.request_id,
-            "upstreamRequestId": null,
-            "correlationId": args.correlation_id,
             "profile": args.profile,
             // `raw` is the ungoverned escape hatch: it emits the upstream response as-is
             // (no secret-field redaction), so its envelope must not claim otherwise.
@@ -233,15 +231,17 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         "count": args.count,
         "data": args.data,
         "dataHash": args.data_hash,
-        "pagination": null,
         "costDollars": cost_dollars,
         "nextActions": [],
         "warnings": args.warnings,
         "diagnostics": { "durationMs": args.duration_ms, "retries": args.retries },
         "dataTruncated": false,
-        "dataPath": null,
-        "bytes": null,
-    })
+    });
+    if let Some(correlation_id) = args.correlation_id {
+        envelope["request"]["correlationId"] =
+            serde_json::Value::String(correlation_id.to_string());
+    }
+    envelope
 }
 
 pub struct EventEnvelopeArgs<'a> {
@@ -359,13 +359,13 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
             "bareCommand": {
                 "contents.highlights": {
                     "query": "<search query>",
-                    "length": "server default",
+                    "maxCharacters": crate::DEFAULT_HIGHLIGHTS_MAX_CHARACTERS,
                 }
             },
             "highlights": {
                 "bare": {
                     "query": "<search query>",
-                    "length": "server default",
+                    "maxCharacters": crate::DEFAULT_HIGHLIGHTS_MAX_CHARACTERS,
                 },
                 "explicitCap": {
                     "query": "<search query>",

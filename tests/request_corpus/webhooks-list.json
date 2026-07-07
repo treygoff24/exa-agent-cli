@@ -4,15 +4,13 @@
   "command": "websets webhooks list",
   "operation": {
     "method": "GET",
-    "path": "/v0/webhooks",
+    "path": "/websets/v0/webhooks",
     "operationId": "webhooks-list",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/webhooks",
+      "path": "/websets/v0/webhooks",
       "query": [
         {
           "name": "limit",
@@ -31,8 +29,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:f4366cbdd1ba29b0d3720c518408cf1b16be8db2a3a05eed55dd9cc259f88a40",
-  "pagination": null,
+  "dataHash": "sha256:44259401c9e45ada3ea5e80c040f34a4ba314eb1537ee663d38b04c03137c66f",
   "costDollars": {
     "total": 0.0
   },
@@ -42,7 +39,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

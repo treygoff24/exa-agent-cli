@@ -4,15 +4,13 @@
   "command": "websets events get",
   "operation": {
     "method": "GET",
-    "path": "/v0/events/event_abc123",
+    "path": "/websets/v0/events/event_abc123",
     "operationId": "events-get",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/events/event_abc123",
+      "path": "/websets/v0/events/event_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:81fe6b4c7bde15a048d819078b7883a9ce02ae1f3da3c86740114d13e536b671",
-  "pagination": null,
+  "dataHash": "sha256:04b22ef63b53ae761317356dbe41ead6d3f9655f14dbe713a35b0452a04b6959",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -4,15 +4,13 @@
   "command": "websets monitors runs get",
   "operation": {
     "method": "GET",
-    "path": "/v0/monitors/monitor_abc123/runs/run_abc123",
+    "path": "/websets/v0/monitors/monitor_abc123/runs/run_abc123",
     "operationId": "monitors-runs-get",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/monitors/monitor_abc123/runs/run_abc123",
+      "path": "/websets/v0/monitors/monitor_abc123/runs/run_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:7b86c50a769b197dd89074066c24e54b4c202445c630896d2de7f1edbad7e185",
-  "pagination": null,
+  "dataHash": "sha256:f635c499c1aa5ea769f86fc92a2d58bb20e0c4177bbbc12f6fa6683532f9cffa",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

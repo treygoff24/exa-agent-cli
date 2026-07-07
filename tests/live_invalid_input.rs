@@ -122,11 +122,11 @@ fn modeled_live_invalid_inputs_fail_locally() {
                 "tokensNum=nope",
                 "--compact",
             ],
-            code: "invalid_field_type",
+            code: "invalid_value",
             details: &[
                 ("field", Str("tokensNum")),
                 ("flag", Str("tokens")),
-                ("expected", Str("integer")),
+                ("received", Str("nope")),
             ],
         },
         InvalidCase {

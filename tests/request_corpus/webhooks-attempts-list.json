@@ -4,15 +4,13 @@
   "command": "websets webhooks attempts list",
   "operation": {
     "method": "GET",
-    "path": "/v0/webhooks/webhook_abc123/attempts",
+    "path": "/websets/v0/webhooks/webhook_abc123/attempts",
     "operationId": "webhooks-attempts-list",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/webhooks/webhook_abc123/attempts",
+      "path": "/websets/v0/webhooks/webhook_abc123/attempts",
       "query": [
         {
           "name": "eventType",
@@ -39,8 +37,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:5b2ee5f13b61d35d4bbd3daf6667296ac490edeb0f51caa17faafee2793fdf5c",
-  "pagination": null,
+  "dataHash": "sha256:af38ddc1502558f84e9dd88eae96de3b5732583f41f62335b447075de124b9d8",
   "costDollars": {
     "total": 0.0
   },
@@ -50,7 +47,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -164,7 +164,7 @@ fn research_create_maps_query_to_instructions() {
 fn team_info_builds_empty_get_body() {
     let spec = request::build_body(team_info_op(), &[]).unwrap();
     assert_eq!(spec.body, json!({}));
-    assert_eq!(spec.op.api_path, "/v0/teams/me");
+    assert_eq!(spec.op.api_path, "/websets/v0/teams/me");
 }
 
 #[test]

@@ -579,7 +579,7 @@ fn websets_create_rejects_num_results_with_count_suggestion() {
         "--compact",
     ]);
     assert_eq!(json["error"]["code"], "invalid_flag_combination");
-    assert_eq!(json["operation"]["path"], "/v0/websets");
+    assert_eq!(json["operation"]["path"], "/websets/v0/websets");
     assert!(json["error"]["suggestedCommand"]
         .as_str()
         .unwrap()
@@ -599,7 +599,7 @@ fn websets_create_rejects_zero_num_results_with_count_suggestion() {
         "--compact",
     ]);
     assert_eq!(json["error"]["code"], "invalid_flag_combination");
-    assert_eq!(json["operation"]["path"], "/v0/websets");
+    assert_eq!(json["operation"]["path"], "/websets/v0/websets");
     assert!(json["error"]["suggestedCommand"]
         .as_str()
         .unwrap()
@@ -619,7 +619,7 @@ fn websets_create_rejects_negative_num_results_with_operation_context() {
         "--compact",
     ]);
     assert_eq!(json["error"]["code"], "invalid_flag_combination");
-    assert_eq!(json["operation"]["path"], "/v0/websets");
+    assert_eq!(json["operation"]["path"], "/websets/v0/websets");
     assert!(json["error"]["suggestedCommand"]
         .as_str()
         .unwrap()
@@ -638,7 +638,7 @@ fn websets_create_rejects_bare_num_results_with_operation_context() {
         "--compact",
     ]);
     assert_eq!(json["error"]["code"], "invalid_flag_combination");
-    assert_eq!(json["operation"]["path"], "/v0/websets");
+    assert_eq!(json["operation"]["path"], "/websets/v0/websets");
     assert!(json["error"]["suggestedCommand"]
         .as_str()
         .unwrap()

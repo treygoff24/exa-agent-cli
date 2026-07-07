@@ -4,15 +4,13 @@
   "command": "websets monitors delete",
   "operation": {
     "method": "DELETE",
-    "path": "/v0/monitors/monitor_abc123",
+    "path": "/websets/v0/monitors/monitor_abc123",
     "operationId": "monitors-delete",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "DELETE",
-      "path": "/v0/monitors/monitor_abc123",
+      "path": "/websets/v0/monitors/monitor_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:f7205b7779eced25988a5855992eb1caa3505c3ae95462f3e524611e127da53f",
-  "pagination": null,
+  "dataHash": "sha256:ebebd06aec122c17b0259e5199cb13bad4996104818460b46c170d0f35d92d9b",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

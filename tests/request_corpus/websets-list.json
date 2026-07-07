@@ -4,15 +4,13 @@
   "command": "websets list",
   "operation": {
     "method": "GET",
-    "path": "/v0/websets",
+    "path": "/websets/v0/websets",
     "operationId": "websets-list",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/websets",
+      "path": "/websets/v0/websets",
       "query": [
         {
           "name": "search",
@@ -35,8 +33,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:4621243c7de50e41a8778ca5e3b3a96c500ff9d36465823a321747d18e32ffbc",
-  "pagination": null,
+  "dataHash": "sha256:359f4512d81dfdab3fcdef7261107633e7b954fa5a75c95cd9b487dbd121a7cc",
   "costDollars": {
     "total": 0.0
   },
@@ -46,7 +43,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

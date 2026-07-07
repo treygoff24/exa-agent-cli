@@ -804,28 +804,29 @@ pub struct SendOptions {
 }
 
 pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String)]) -> CliError {
-    let snippet = String::from_utf8_lossy(body);
-    let message = first_line(&snippet);
     match status {
         401 | 403 => {
-            let mut diag = Diag::new("reauth_required", message);
+            let mut diag = upstream_error_diag("reauth_required", status, body);
             diag.http_status = Some(status);
             diag.retryable = false;
             CliError::Auth(diag)
         }
         404 => {
-            let mut diag = Diag::new("not_found", message);
+            let mut diag = upstream_error_diag("not_found", status, body);
             diag.http_status = Some(status);
             diag.retryable = false;
             CliError::NotFound(diag)
         }
         409 => {
-            let code = if snippet.to_ascii_lowercase().contains("idempotenc") {
+            let code = if String::from_utf8_lossy(body)
+                .to_ascii_lowercase()
+                .contains("idempotenc")
+            {
                 "idempotency_conflict"
             } else {
                 "conflict"
             };
-            let mut diag = Diag::new(code, message);
+            let mut diag = upstream_error_diag(code, status, body);
             diag.http_status = Some(status);
             diag.retryable = false;
             CliError::Conflict(diag)
@@ -836,28 +837,28 @@ pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String
                 .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
                 .and_then(|(_, v)| v.parse::<u64>().ok())
                 .map(|secs| secs.saturating_mul(1000));
-            let mut diag = Diag::new("rate_limited", message);
+            let mut diag = upstream_error_diag("rate_limited", status, body);
             diag.http_status = Some(status);
             diag.retryable = true;
             if let Some(ms) = retry_after_ms {
-                diag = diag.with_details(serde_json::json!({ "retryAfterMs": ms }));
+                diag = diag_with_detail(diag, "retryAfterMs", serde_json::Value::from(ms));
             }
             CliError::RateLimit(diag)
         }
         500..=599 => {
-            let mut diag = Diag::new("upstream_error", message);
+            let mut diag = upstream_error_diag("upstream_error", status, body);
             diag.http_status = Some(status);
             diag.retryable = true;
             CliError::Upstream(diag)
         }
         400..=499 => {
-            let mut diag = Diag::new("invalid_value", message);
+            let mut diag = upstream_error_diag("invalid_value", status, body);
             diag.http_status = Some(status);
             diag.retryable = false;
             CliError::Usage(diag)
         }
         _ => {
-            let mut diag = Diag::new("upstream_malformed", message);
+            let mut diag = upstream_error_diag("upstream_malformed", status, body);
             diag.http_status = Some(status);
             diag.retryable = false;
             CliError::Upstream(diag)
@@ -865,8 +866,86 @@ pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String
     }
 }
 
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or(s).chars().take(240).collect()
+/// Cap on the serialized upstream JSON body kept in error details; larger bodies are
+/// truncated to a preview so a chatty upstream error can't blow up the CLI's own output.
+const UPSTREAM_BODY_CAP_BYTES: usize = 4096;
+
+fn upstream_error_diag(code: &str, status: u16, body: &[u8]) -> Diag {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(upstream) => {
+            let message = upstream_json_message(&upstream)
+                .unwrap_or_else(|| format!("upstream returned JSON error (HTTP {status})"));
+            let serialized = serde_json::to_string(&upstream).unwrap_or_default();
+            let details = if serialized.len() > UPSTREAM_BODY_CAP_BYTES {
+                serde_json::json!({
+                    "upstreamPreview": truncate_at_char_boundary(&serialized, UPSTREAM_BODY_CAP_BYTES),
+                    "upstreamTruncated": true,
+                })
+            } else {
+                serde_json::json!({ "upstream": upstream })
+            };
+            Diag::new(code, message).with_details(details)
+        }
+        Err(_) => Diag::new(
+            code,
+            format!("upstream returned non-JSON error page (HTTP {status})"),
+        )
+        .with_details(serde_json::json!({ "bodyPreview": body_preview(body) })),
+    }
+}
+
+/// Truncate `s` to at most `max_bytes` bytes, backing off to the nearest char boundary.
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn upstream_json_message(value: &Value) -> Option<String> {
+    if let Some(message) = value.get("message").and_then(Value::as_str) {
+        return Some(message.to_string());
+    }
+    if let Some(error) = value.get("error") {
+        if let Some(message) = error.as_str() {
+            return Some(message.to_string());
+        }
+        if let Some(message) = error.get("message").and_then(Value::as_str) {
+            return Some(message.to_string());
+        }
+    }
+    if let Some(detail) = value.get("detail").and_then(Value::as_str) {
+        return Some(detail.to_string());
+    }
+    value
+        .get("errors")
+        .and_then(Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|first| first.get("message"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn body_preview(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).chars().take(200).collect()
+}
+
+fn diag_with_detail(mut diag: Diag, key: &str, value: Value) -> Diag {
+    let mut details = diag
+        .details
+        .take()
+        .map(|value| *value)
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = details.as_object_mut() {
+        object.insert(key.to_string(), value);
+    }
+    diag.details = Some(Box::new(details));
+    diag
 }
 
 fn map_ureq_error(err: ureq::Error) -> CliError {
@@ -902,21 +981,22 @@ pub fn primary_count(data: &Value) -> Option<u64> {
 }
 
 /// `/contents` may return HTTP 200 with per-item failures in `statuses[]` (contracts §11).
-/// Mixed success/error batches exit 10 after the success envelope is emitted.
+/// A total per-URL failure exits 10 after the success envelope is emitted; mixed success/error
+/// stays exit 0 and is represented by warnings.
 pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
     let Some(statuses) = data.get("statuses").and_then(Value::as_array) else {
         return 0;
     };
-    let mut saw_success = false;
-    let mut saw_error = false;
-    for entry in statuses {
-        match entry.get("status").and_then(Value::as_str) {
-            Some("success") => saw_success = true,
-            Some("error") => saw_error = true,
-            _ => {}
-        }
-    }
-    if saw_success && saw_error {
+    let failed = statuses
+        .iter()
+        .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
+        .count();
+    let results_count = data
+        .get("results")
+        .or_else(|| data.get("data"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if !statuses.is_empty() && failed == statuses.len() && results_count == 0 {
         10
     } else {
         0
@@ -1419,6 +1499,54 @@ mod tests {
     }
 
     #[test]
+    fn classify_status_preserves_json_upstream_error_body() {
+        let err = classify_http_status(
+            400,
+            br#"{"message":"Bad request","tag":"INVALID_REQUEST","nested":{"ok":false}}"#,
+            &[],
+        );
+        assert!(matches!(err, CliError::Usage(_)));
+        assert_eq!(err.diag().message, "Bad request");
+        let details = err.diag().details.as_ref().unwrap();
+        assert_eq!(details["upstream"]["tag"], "INVALID_REQUEST");
+        assert_eq!(details["upstream"]["nested"]["ok"], false);
+    }
+
+    #[test]
+    fn classify_status_truncates_oversized_json_upstream_error_body() {
+        let big_value = "x".repeat(5000);
+        let body = format!(r#"{{"message":"Bad request","blob":"{big_value}"}}"#);
+        let err = classify_http_status(400, body.as_bytes(), &[]);
+        assert!(matches!(err, CliError::Usage(_)));
+        assert_eq!(err.diag().message, "Bad request");
+        let details = err.diag().details.as_ref().unwrap();
+        assert!(details.get("upstream").is_none());
+        assert_eq!(details["upstreamTruncated"], true);
+        let preview = details["upstreamPreview"].as_str().unwrap();
+        assert!(preview.len() <= UPSTREAM_BODY_CAP_BYTES);
+        assert!(preview.starts_with("{\"message\""));
+    }
+
+    #[test]
+    fn classify_status_summarizes_non_json_upstream_error_body() {
+        let html = format!(
+            "<!DOCTYPE html><html><body>{}</body></html>",
+            "x".repeat(300)
+        );
+        let err = classify_http_status(404, html.as_bytes(), &[]);
+        assert!(matches!(err, CliError::NotFound(_)));
+        assert_eq!(
+            err.diag().message,
+            "upstream returned non-JSON error page (HTTP 404)"
+        );
+        let preview = err.diag().details.as_ref().unwrap()["bodyPreview"]
+            .as_str()
+            .unwrap();
+        assert!(preview.starts_with("<!DOCTYPE html>"));
+        assert_eq!(preview.chars().count(), 200);
+    }
+
+    #[test]
     fn fake_transport_records_request_and_returns_canned_body() {
         let fake = FakeTransport::default();
         fake.push_ok_json(200, r#"{"ok":true}"#);
@@ -1565,22 +1693,25 @@ mod tests {
     #[test]
     fn contents_mixed_statuses_exit_partial() {
         let mixed = serde_json::json!({
+            "results": [{ "url": "https://a.test" }],
             "statuses": [
                 { "id": "https://a.test", "status": "success" },
                 { "id": "https://b.test", "status": "error" }
             ]
         });
-        assert_eq!(contents_mixed_status_exit_code(&mixed), 10);
+        assert_eq!(contents_mixed_status_exit_code(&mixed), 0);
 
         let all_ok = serde_json::json!({
+            "results": [{ "url": "https://a.test" }],
             "statuses": [{ "id": "https://a.test", "status": "success" }]
         });
         assert_eq!(contents_mixed_status_exit_code(&all_ok), 0);
 
         let all_err = serde_json::json!({
+            "results": [],
             "statuses": [{ "id": "https://a.test", "status": "error" }]
         });
-        assert_eq!(contents_mixed_status_exit_code(&all_err), 0);
+        assert_eq!(contents_mixed_status_exit_code(&all_err), 10);
     }
 
     #[test]

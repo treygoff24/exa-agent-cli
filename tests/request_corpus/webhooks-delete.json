@@ -4,15 +4,13 @@
   "command": "websets webhooks delete",
   "operation": {
     "method": "DELETE",
-    "path": "/v0/webhooks/webhook_abc123",
+    "path": "/websets/v0/webhooks/webhook_abc123",
     "operationId": "webhooks-delete",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "DELETE",
-      "path": "/v0/webhooks/webhook_abc123",
+      "path": "/websets/v0/webhooks/webhook_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:4bc36729b656a6ac821056900dc7ec1700f5047e197dc0fbccd8f37aa8b90dfa",
-  "pagination": null,
+  "dataHash": "sha256:50ea2e3ec3eb38e4c8937953433a3909a7af88cbb77bb6ad8513605ec6a785bd",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

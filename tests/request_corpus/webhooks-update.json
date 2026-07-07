@@ -4,15 +4,13 @@
   "command": "websets webhooks update",
   "operation": {
     "method": "PATCH",
-    "path": "/v0/webhooks/webhook_abc123",
+    "path": "/websets/v0/webhooks/webhook_abc123",
     "operationId": "webhooks-update",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "PATCH",
-      "path": "/v0/webhooks/webhook_abc123",
+      "path": "/websets/v0/webhooks/webhook_abc123",
       "query": [],
       "body": {
         "url": "https://example.com/new-hook"
@@ -28,8 +26,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:886c632dc293866aac3811ac860681a386c03a2c04bedfce0fa60b6984a7b7a1",
-  "pagination": null,
+  "dataHash": "sha256:85d3fd6a60fb76188c784f80ce2b4f014567f99c2c5b415443ff32077c380849",
   "costDollars": {
     "total": 0.0
   },
@@ -39,7 +36,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

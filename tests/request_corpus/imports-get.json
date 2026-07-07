@@ -4,15 +4,13 @@
   "command": "websets imports get",
   "operation": {
     "method": "GET",
-    "path": "/v0/imports/import_abc123",
+    "path": "/websets/v0/imports/import_abc123",
     "operationId": "imports-get",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/imports/import_abc123",
+      "path": "/websets/v0/imports/import_abc123",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:c25cc23a03e2a230371ac3ccf5a1b98ec0fc97a2b0dd20bbba0f7cfec2030543",
-  "pagination": null,
+  "dataHash": "sha256:b58579f21fbde9234bb2ee9b3f1f47085acfae61b8fa4f9f5ecb77d1c7796ad4",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -412,7 +412,7 @@ fn capabilities_describes_search_content_defaults() {
         .expect("search command in capabilities");
     assert_eq!(
         search["contentDefaults"]["bareCommand"]["contents.highlights"],
-        serde_json::json!({"query": "<search query>", "length": "server default"})
+        serde_json::json!({"query": "<search query>", "maxCharacters": 800})
     );
     assert_eq!(
         search["contentDefaults"]["highlights"]["explicitCap"],
@@ -437,6 +437,18 @@ fn capabilities_describes_search_content_defaults() {
         .find(|operation| operation["command"] == "search")
         .expect("search operation in schema list");
     assert_eq!(schema_search["contentDefaults"], search["contentDefaults"]);
+}
+
+#[test]
+fn capabilities_filters_to_command_path() {
+    let json = run_ok_json(&["capabilities", "websets", "items", "list", "--compact"]);
+    assert_eq!(json["schema"], "exa.cli.capabilities.v1");
+    assert!(json.get("commands").is_none());
+    assert_eq!(json["command"]["path"], "websets items list");
+    assert_eq!(
+        json["command"]["apiPath"],
+        "/websets/v0/websets/{webset}/items"
+    );
 }
 
 #[test]
@@ -633,6 +645,16 @@ fn parse_auth_commands() {
 }
 
 #[test]
+fn search_help_shows_highlight_flags_and_global_options() {
+    let output = run(&["search", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--no-highlights"), "help: {help}");
+    assert!(help.contains("--highlights"), "help: {help}");
+    assert!(help.contains("Global options"), "help: {help}");
+}
+
+#[test]
 fn auth_help_does_not_claim_keyring_storage() {
     let output = run(&["auth", "--help"]);
     assert!(output.status.success());
@@ -729,11 +751,11 @@ fn parse_doctor() {
 #[test]
 fn parse_raw() {
     assert_path(&["raw", "POST", "/search"], "raw");
-    parses(&["raw", "GET", "/v0/websets", "--body", "@req.json"]);
+    parses(&["raw", "GET", "/websets/v0/websets", "--body", "@req.json"]);
     parses(&[
         "raw",
         "GET",
-        "/v0/websets",
+        "/websets/v0/websets",
         "--query",
         "status=running",
         "--query",
@@ -746,7 +768,7 @@ fn raw_dry_run_includes_query_preview() {
     let json = run_ok_json(&[
         "raw",
         "GET",
-        "/v0/websets",
+        "/websets/v0/websets",
         "--query",
         "status=running",
         "--query",
@@ -761,7 +783,7 @@ fn raw_dry_run_includes_query_preview() {
     assert_eq!(json["request"]["redacted"], false);
     assert!(json["dataHash"].as_str().unwrap().starts_with("sha256:"));
     assert_eq!(json["data"]["request"]["method"], "GET");
-    assert_eq!(json["data"]["request"]["path"], "/v0/websets");
+    assert_eq!(json["data"]["request"]["path"], "/websets/v0/websets");
     assert_eq!(
         json["data"]["request"]["query"],
         serde_json::json!([
@@ -776,7 +798,7 @@ fn raw_dry_run_redacts_secret_query_values() {
     let json = run_ok_json(&[
         "raw",
         "GET",
-        "/v0/websets",
+        "/websets/v0/websets",
         "--query",
         "api_key=query-secret",
         "--query",
@@ -795,7 +817,7 @@ fn raw_dry_run_redacts_secret_query_values() {
     let json = run_ok_json(&[
         "raw",
         "GET",
-        "/v0/websets",
+        "/websets/v0/websets",
         "--query",
         "q=11111111-2222-3333-4444-555555555555",
         "--dry-run",
@@ -1143,7 +1165,8 @@ fn search_defaults_to_query_aware_highlights() {
     let body = &json["data"]["request"]["body"];
     assert_eq!(body["query"], "rust async");
     assert_eq!(body["contents"]["highlights"]["query"], "rust async");
-    assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 1);
+    assert_eq!(body["contents"]["highlights"]["maxCharacters"], 800);
+    assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 2);
     assert!(body["contents"].get("text").is_none());
 }
 
@@ -1188,7 +1211,8 @@ fn search_text_full_uncaps_and_bare_explicit_highlights_are_allowed() {
     let body = &json["data"]["request"]["body"];
     assert_eq!(body["contents"]["text"], true);
     assert_eq!(body["contents"]["highlights"]["query"], "rust async");
-    assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 1);
+    assert_eq!(body["contents"]["highlights"]["maxCharacters"], 800);
+    assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 2);
 }
 
 #[test]
@@ -1217,6 +1241,94 @@ fn contents_bare_text_stays_uncapped() {
     ]);
     let body = &json["data"]["request"]["body"];
     assert_eq!(body["text"], true);
+}
+
+#[test]
+fn contents_partial_url_failures_warn_and_exit_zero() {
+    let response = br#"{
+        "results":[{"url":"https://a.test","text":"ok"}],
+        "statuses":[
+            {"id":"https://a.test","status":"success"},
+            {"id":"https://b.test","status":"error","error":{"tag":"NOT_FOUND"}}
+        ]
+    }"#;
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /contents "));
+            assert!(request_text.contains(r#""https://a.test""#));
+            assert!(request_text.contains(r#""https://b.test""#));
+        },
+        response,
+    );
+    let output = run(&[
+        "contents",
+        "https://a.test",
+        "https://b.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "url_failed" && warning["url"] == "https://b.test"));
+}
+
+#[test]
+fn contents_all_url_failures_warn_and_exit_partial() {
+    let response = br#"{
+        "results":[],
+        "statuses":[
+            {"id":"https://a.test","status":"error","error":{"tag":"NOT_FOUND"}},
+            {"id":"https://b.test","status":"error","error":{"tag":"FORBIDDEN"}}
+        ]
+    }"#;
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /contents "));
+        },
+        response,
+    );
+    let output = run(&[
+        "fetch",
+        "https://a.test",
+        "https://b.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warning = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "all_urls_failed")
+        .expect("all_urls_failed warning");
+    assert!(warning["message"]
+        .as_str()
+        .unwrap()
+        .contains("https://a.test=NOT_FOUND"));
 }
 
 #[test]
@@ -1311,6 +1423,110 @@ fn oversized_default_highlights_response_does_not_warn() {
         })
         .unwrap_or(true);
     assert!(no_oversized_warning, "warnings: {}", json["warnings"]);
+}
+
+#[test]
+fn search_omits_empty_resolved_search_type() {
+    let response = br#"{
+        "resolvedSearchType":"",
+        "results":[{"title":"Rust Async","url":"https://example.com","highlights":["snippet"]}]
+    }"#;
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /search "));
+        },
+        response,
+    );
+    let output = run(&[
+        "search",
+        "rust async",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["data"].get("resolvedSearchType").is_none());
+}
+
+#[test]
+fn search_human_format_is_terse() {
+    let response = br#"{
+        "results":[{"title":"Rust Async","url":"https://example.com","publishedDate":"2026-01-02","highlights":["short snippet"]}]
+    }"#;
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /search "));
+        },
+        response,
+    );
+    let output = run(&[
+        "search",
+        "rust async",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--format",
+        "human",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1. Rust Async — https://example.com — 2026-01-02"));
+    assert!(stdout.contains("short snippet"));
+    assert!(!stdout.contains("\"schema\""));
+}
+
+#[test]
+fn search_ndjson_emits_items_then_summary() {
+    let response = br#"{
+        "results":[
+            {"title":"One","url":"https://one.test"},
+            {"title":"Two","url":"https://two.test"}
+        ]
+    }"#;
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /search "));
+        },
+        response,
+    );
+    let output = run(&[
+        "search",
+        "rust async",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--ndjson",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<_> = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["title"], "One");
+    assert_eq!(lines[1]["title"], "Two");
+    assert_eq!(lines[2]["schema"], "exa.cli.response.v1");
+    assert_eq!(lines[2]["summary"], true);
+    assert!(lines[2]["data"].is_null());
 }
 
 #[test]
@@ -1421,6 +1637,25 @@ fn raw_live_without_credential_is_not_authenticated() {
         .unwrap()
         .iter()
         .any(|value| value.as_str().unwrap_or("").contains("credentials")));
+}
+
+#[test]
+fn raw_error_envelope_omits_absent_request_ids() {
+    let output = run(&[
+        "--header",
+        "Authorization: Bearer user-supplied-secret",
+        "raw",
+        "GET",
+        "/search",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(!output.status.success());
+    let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    let request = &stderr["request"];
+    assert!(request.get("upstreamRequestId").is_none());
+    assert!(request.get("correlationId").is_none());
 }
 
 #[test]
@@ -1705,7 +1940,15 @@ fn answer_dry_run_builds_request_body_with_schema_file() {
 }
 
 #[test]
-fn context_dry_run_omits_dynamic_tokens_and_validates_range() {
+fn context_dry_run_defaults_dynamic_tokens_and_validates_range() {
+    let defaulted = run_ok_json(&["context", "rust async patterns", "--dry-run", "--compact"]);
+    assert_eq!(defaulted["command"], "context");
+    assert_eq!(defaulted["data"]["request"]["path"], "/context");
+    assert_eq!(
+        defaulted["data"]["request"]["body"],
+        serde_json::json!({"query":"rust async patterns","tokensNum":"dynamic"})
+    );
+
     let dynamic = run_ok_json(&[
         "context",
         "rust async patterns",
@@ -1718,8 +1961,18 @@ fn context_dry_run_omits_dynamic_tokens_and_validates_range() {
     assert_eq!(dynamic["data"]["request"]["path"], "/context");
     assert_eq!(
         dynamic["data"]["request"]["body"],
-        serde_json::json!({"query":"rust async patterns"})
+        serde_json::json!({"query":"rust async patterns","tokensNum":"dynamic"})
     );
+
+    let numeric = run_ok_json(&[
+        "context",
+        "rust async patterns",
+        "--tokens",
+        "1000",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(numeric["data"]["request"]["body"]["tokensNum"], 1000);
 
     let fixed = run_ok_json(&[
         "context",
@@ -1748,6 +2001,10 @@ fn context_dry_run_omits_dynamic_tokens_and_validates_range() {
         let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(stderr["error"]["code"], "invalid_value");
         assert_eq!(stderr["operation"]["path"], "/context");
+        assert_eq!(
+            stderr["error"]["details"]["acceptedForms"],
+            serde_json::json!(["dynamic", "50..100000"])
+        );
     }
 }
 
@@ -1840,10 +2097,18 @@ fn team_info_dry_run_builds_get_path() {
     let json = run_ok_json(&["team", "info", "--dry-run", "--print-request", "--compact"]);
     assert_eq!(json["command"], "team info");
     assert_eq!(json["data"]["request"]["method"], "GET");
-    assert_eq!(json["data"]["request"]["path"], "/v0/teams/me");
+    assert_eq!(json["data"]["request"]["path"], "/websets/v0/teams/me");
     assert_eq!(json["data"]["request"]["query"], serde_json::json!([]));
     assert_eq!(json["data"]["request"]["body"], serde_json::json!(null));
     assert_eq!(json["data"]["dryRun"], true);
+}
+
+#[test]
+fn bare_team_runs_info() {
+    let bare = run_ok_json(&["team", "--dry-run", "--print-request", "--compact"]);
+    let explicit = run_ok_json(&["team", "info", "--dry-run", "--print-request", "--compact"]);
+    assert_eq!(bare["command"], "team info");
+    assert_eq!(bare["data"]["request"], explicit["data"]["request"]);
 }
 
 #[test]
@@ -2026,6 +2291,53 @@ fn clap_nonsense_subcommand_has_no_false_suggestion() {
 }
 
 #[test]
+fn bare_parent_commands_emit_missing_subcommand_details() {
+    for (argv, expected) in [
+        (&["websets"][..], "list"),
+        (&["robot-docs"][..], "guide"),
+        (&["schema"][..], "list"),
+    ] {
+        let output = run(argv);
+        assert_eq!(output.status.code(), Some(1), "{argv:?}");
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "missing_subcommand", "{argv:?}");
+        assert_eq!(stderr["error"]["message"], "missing subcommand", "{argv:?}");
+        let subcommands = stderr["error"]["details"]["subcommands"]
+            .as_array()
+            .expect("subcommands array");
+        assert!(
+            subcommands
+                .iter()
+                .any(|value| value.as_str() == Some(expected)),
+            "{argv:?} subcommands: {subcommands:?}"
+        );
+        assert!(
+            stderr["error"]["suggestedCommand"]
+                .as_str()
+                .unwrap()
+                .contains("--help"),
+            "{argv:?}"
+        );
+    }
+}
+
+#[test]
+fn unknown_nested_subcommand_lists_valid_subcommands() {
+    let output = run(&["agent", "list"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "unknown_subcommand");
+    assert_eq!(
+        stderr["error"]["details"]["subcommands"],
+        serde_json::json!(["run", "runs"])
+    );
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent agent runs list"
+    );
+}
+
+#[test]
 fn clap_nested_subcommand_typo_suggests_most_similar_not_destructive() {
     // Regression: a `.next()` on clap's ascending-similarity list picked the LEAST
     // similar candidate, steering `websets event` toward the destructive `delete`.
@@ -2047,7 +2359,10 @@ fn placeholder_guard_allows_lowercase_real_id() {
         "--print-request",
         "--compact",
     ]);
-    assert_eq!(ok["data"]["request"]["path"], "/v0/websets/example_abc123");
+    assert_eq!(
+        ok["data"]["request"]["path"],
+        "/websets/v0/websets/example_abc123"
+    );
 }
 
 #[test]
@@ -3517,7 +3832,7 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
         "--compact",
     ]);
     assert_eq!(create["command"], "websets create");
-    assert_eq!(create["data"]["request"]["path"], "/v0/websets");
+    assert_eq!(create["data"]["request"]["path"], "/websets/v0/websets");
     let body = &create["data"]["request"]["body"];
     assert_eq!(body["search"]["query"], "SF startups");
     assert_eq!(body["search"]["count"], 10);
@@ -3581,7 +3896,10 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
         "--compact",
     ]);
     assert_eq!(preview["command"], "websets preview");
-    assert_eq!(preview["data"]["request"]["path"], "/v0/websets/preview");
+    assert_eq!(
+        preview["data"]["request"]["path"],
+        "/websets/v0/websets/preview"
+    );
     let preview_body = &preview["data"]["request"]["body"];
     assert_eq!(preview_body["search"]["query"], "AI tools");
     assert_eq!(preview_body["search"]["count"], 3);
@@ -3668,7 +3986,10 @@ fn websets_get_rejects_placeholder_ids_before_auth() {
 
     let ok = run_ok_json(&["websets", "get", "webset_123", "--dry-run", "--compact"]);
     assert_eq!(ok["command"], "websets get");
-    assert_eq!(ok["data"]["request"]["path"], "/v0/websets/webset_123");
+    assert_eq!(
+        ok["data"]["request"]["path"],
+        "/websets/v0/websets/webset_123"
+    );
 }
 
 fn local_paginated_websets_list_server() -> (String, thread::JoinHandle<()>) {
@@ -3697,12 +4018,14 @@ fn local_paginated_websets_list_server() -> (String, thread::JoinHandle<()>) {
             let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
             if idx == 0 {
                 assert!(
-                    request.starts_with("GET /v0/websets?search=founders&limit=1 "),
+                    request.starts_with("GET /websets/v0/websets?search=founders&limit=1 "),
                     "unexpected first page request:\n{request}"
                 );
             } else {
                 assert!(
-                    request.starts_with("GET /v0/websets?search=founders&limit=1&cursor=cur2 "),
+                    request.starts_with(
+                        "GET /websets/v0/websets?search=founders&limit=1&cursor=cur2 "
+                    ),
                     "unexpected second page request:\n{request}"
                 );
             }
@@ -3776,13 +4099,15 @@ fn local_paginated_websets_items_server() -> (String, thread::JoinHandle<()>) {
             let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
             if idx == 0 {
                 assert!(
-                    request.starts_with("GET /v0/websets/ws_abc/items?sourceId=src_1&limit=1 "),
+                    request.starts_with(
+                        "GET /websets/v0/websets/ws_abc/items?sourceId=src_1&limit=1 "
+                    ),
                     "unexpected first page request:\n{request}"
                 );
             } else {
                 assert!(
                     request.starts_with(
-                        "GET /v0/websets/ws_abc/items?sourceId=src_1&limit=1&cursor=cur2 "
+                        "GET /websets/v0/websets/ws_abc/items?sourceId=src_1&limit=1&cursor=cur2 "
                     ),
                     "unexpected second page request:\n{request}"
                 );
@@ -3835,7 +4160,10 @@ fn websets_items_list_all_preserves_source_id_filter_across_pages() {
 fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
     let get = run_ok_json(&["websets", "get", "ws/abc", "--dry-run", "--compact"]);
     assert_eq!(get["command"], "websets get");
-    assert_eq!(get["data"]["request"]["path"], "/v0/websets/ws%2Fabc");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/websets/v0/websets/ws%2Fabc"
+    );
     assert!(get["data"]["request"]["body"].is_null());
 
     let update = run_ok_json(&[
@@ -3848,7 +4176,10 @@ fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
         "--compact",
     ]);
     assert_eq!(update["command"], "websets update");
-    assert_eq!(update["data"]["request"]["path"], "/v0/websets/ws_abc");
+    assert_eq!(
+        update["data"]["request"]["path"],
+        "/websets/v0/websets/ws_abc"
+    );
     assert_eq!(update["data"]["request"]["body"]["title"], "Renamed");
 
     let empty_update = run(&["websets", "update", "ws_abc", "--dry-run", "--compact"]);
@@ -3860,7 +4191,7 @@ fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
     assert_eq!(delete_preview["command"], "websets delete");
     assert_eq!(
         delete_preview["data"]["request"]["path"],
-        "/v0/websets/ws_abc"
+        "/websets/v0/websets/ws_abc"
     );
     assert!(delete_preview["data"]["request"]["body"].is_null());
 
@@ -3871,7 +4202,7 @@ fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
     assert_eq!(cancel_preview["command"], "websets cancel");
     assert_eq!(
         cancel_preview["data"]["request"]["path"],
-        "/v0/websets/ws_abc/cancel"
+        "/websets/v0/websets/ws_abc/cancel"
     );
 
     let cancel_live = run(&["websets", "cancel", "ws_abc", "--compact"]);
@@ -3893,7 +4224,10 @@ fn websets_items_paths_filters_and_delete_safety() {
         "--compact",
     ]);
     assert_eq!(list["command"], "websets items list");
-    assert_eq!(list["data"]["request"]["path"], "/v0/websets/ws_abc/items");
+    assert_eq!(
+        list["data"]["request"]["path"],
+        "/websets/v0/websets/ws_abc/items"
+    );
     assert_eq!(
         list["data"]["request"]["query"],
         serde_json::json!([
@@ -3913,7 +4247,7 @@ fn websets_items_paths_filters_and_delete_safety() {
     ]);
     assert_eq!(
         get["data"]["request"]["path"],
-        "/v0/websets/ws_abc/items/item%2F1"
+        "/websets/v0/websets/ws_abc/items/item%2F1"
     );
     assert!(get["data"]["request"]["body"].is_null());
 
@@ -3929,7 +4263,7 @@ fn websets_items_paths_filters_and_delete_safety() {
     assert_eq!(delete_preview["command"], "websets items delete");
     assert_eq!(
         delete_preview["data"]["request"]["path"],
-        "/v0/websets/ws_abc/items/item_1"
+        "/websets/v0/websets/ws_abc/items/item_1"
     );
 
     let delete_live = run(&[
@@ -3962,7 +4296,7 @@ fn websets_searches_create_get_cancel_shapes() {
     assert_eq!(create["command"], "websets searches create");
     assert_eq!(
         create["data"]["request"]["path"],
-        "/v0/websets/ws_abc/searches"
+        "/websets/v0/websets/ws_abc/searches"
     );
     let body = &create["data"]["request"]["body"];
     assert_eq!(body["query"], "founders");
@@ -4009,7 +4343,7 @@ fn websets_searches_create_get_cancel_shapes() {
     ]);
     assert_eq!(
         get["data"]["request"]["path"],
-        "/v0/websets/ws_abc/searches/search_1"
+        "/websets/v0/websets/ws_abc/searches/search_1"
     );
 
     let cancel = run_ok_json(&[
@@ -4024,7 +4358,7 @@ fn websets_searches_create_get_cancel_shapes() {
     assert_eq!(cancel["command"], "websets searches cancel");
     assert_eq!(
         cancel["data"]["request"]["path"],
-        "/v0/websets/ws_abc/searches/search_1/cancel"
+        "/websets/v0/websets/ws_abc/searches/search_1/cancel"
     );
 
     let cancel_live = run(&[
@@ -4059,7 +4393,7 @@ fn websets_enrichments_create_update_delete_cancel_shapes() {
     assert_eq!(create["command"], "websets enrichments create");
     assert_eq!(
         create["data"]["request"]["path"],
-        "/v0/websets/ws_abc/enrichments"
+        "/websets/v0/websets/ws_abc/enrichments"
     );
     let body = &create["data"]["request"]["body"];
     assert_eq!(body["description"], "Company size");
@@ -4079,7 +4413,7 @@ fn websets_enrichments_create_update_delete_cancel_shapes() {
     assert_eq!(update["command"], "websets enrichments update");
     assert_eq!(
         update["data"]["request"]["path"],
-        "/v0/websets/ws_abc/enrichments/enr_1"
+        "/websets/v0/websets/ws_abc/enrichments/enr_1"
     );
     assert_eq!(
         update["data"]["request"]["body"]["description"],
@@ -4121,7 +4455,7 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
         "--compact",
     ]);
     assert_eq!(create["command"], "websets imports create");
-    assert_eq!(create["data"]["request"]["path"], "/v0/imports");
+    assert_eq!(create["data"]["request"]["path"], "/websets/v0/imports");
     let body = &create["data"]["request"]["body"];
     assert_eq!(body["format"], "csv");
     assert_eq!(body["size"], 1024);
@@ -4187,7 +4521,7 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
         "--compact",
     ]);
     assert_eq!(list["command"], "websets imports list");
-    assert_eq!(list["data"]["request"]["path"], "/v0/imports");
+    assert_eq!(list["data"]["request"]["path"], "/websets/v0/imports");
 
     let get = run_ok_json(&[
         "websets",
@@ -4197,7 +4531,10 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(get["data"]["request"]["path"], "/v0/imports/imp_abc");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/websets/v0/imports/imp_abc"
+    );
 
     let update = run_ok_json(&[
         "websets",
@@ -4228,7 +4565,10 @@ fn websets_monitors_remain_distinct_from_top_level_monitor() {
 
     let websets_monitors = run_ok_json(&["websets", "monitors", "list", "--dry-run", "--compact"]);
     assert_eq!(websets_monitors["command"], "websets monitors list");
-    assert_eq!(websets_monitors["data"]["request"]["path"], "/v0/monitors");
+    assert_eq!(
+        websets_monitors["data"]["request"]["path"],
+        "/websets/v0/monitors"
+    );
 }
 
 #[test]
@@ -4255,7 +4595,7 @@ fn websets_monitors_create_update_dry_run_and_validation() {
         "--compact",
     ]);
     assert_eq!(create["command"], "websets monitors create");
-    assert_eq!(create["data"]["request"]["path"], "/v0/monitors");
+    assert_eq!(create["data"]["request"]["path"], "/websets/v0/monitors");
     let body = &create["data"]["request"]["body"];
     assert_eq!(body["websetId"], "ws_abc");
     assert_eq!(body["cadence"]["cron"], "0 9 * * 1");
@@ -4342,7 +4682,10 @@ fn websets_monitors_create_update_dry_run_and_validation() {
         "--compact",
     ]);
     assert_eq!(update["command"], "websets monitors update");
-    assert_eq!(update["data"]["request"]["path"], "/v0/monitors/mon_abc");
+    assert_eq!(
+        update["data"]["request"]["path"],
+        "/websets/v0/monitors/mon_abc"
+    );
     let body = &update["data"]["request"]["body"];
     assert_eq!(body["status"], "disabled");
     assert_eq!(body["cadence"]["cron"], "0 14 * * *");
@@ -4398,7 +4741,7 @@ fn websets_monitors_create_update_dry_run_and_validation() {
     assert_eq!(runs_list["command"], "websets monitors runs list");
     assert_eq!(
         runs_list["data"]["request"]["path"],
-        "/v0/monitors/mon_abc/runs"
+        "/websets/v0/monitors/mon_abc/runs"
     );
     assert_eq!(
         runs_list["data"]["request"]["query"],
@@ -4417,7 +4760,7 @@ fn websets_monitors_create_update_dry_run_and_validation() {
     ]);
     assert_eq!(
         runs_get["data"]["request"]["path"],
-        "/v0/monitors/mon_abc/runs/run_xyz"
+        "/websets/v0/monitors/mon_abc/runs/run_xyz"
     );
 }
 
@@ -4441,7 +4784,7 @@ fn websets_events_list_filters_dry_run() {
         "--compact",
     ]);
     assert_eq!(list["command"], "websets events list");
-    assert_eq!(list["data"]["request"]["path"], "/v0/events");
+    assert_eq!(list["data"]["request"]["path"], "/websets/v0/events");
     let query = list["data"]["request"]["query"].as_array().unwrap();
     assert!(query
         .iter()
@@ -4467,7 +4810,7 @@ fn websets_events_list_filters_dry_run() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(get["data"]["request"]["path"], "/v0/events/evt_abc");
+    assert_eq!(get["data"]["request"]["path"], "/websets/v0/events/evt_abc");
 }
 
 fn local_paginated_websets_events_server() -> (String, thread::JoinHandle<()>) {
@@ -4499,14 +4842,14 @@ fn local_paginated_websets_events_server() -> (String, thread::JoinHandle<()>) {
             if idx == 0 {
                 assert!(
                     request.starts_with(
-                        "GET /v0/events?types=webset.created&createdAfter=2026-01-01&limit=1 "
+                        "GET /websets/v0/events?types=webset.created&createdAfter=2026-01-01&limit=1 "
                     ),
                     "unexpected first page request:\n{request}"
                 );
             } else {
                 assert!(
                     request.starts_with(
-                        "GET /v0/events?types=webset.created&createdAfter=2026-01-01&limit=1&cursor=cur2 "
+                        "GET /websets/v0/events?types=webset.created&createdAfter=2026-01-01&limit=1&cursor=cur2 "
                     ),
                     "unexpected second page request:\n{request}"
                 );
@@ -4584,12 +4927,14 @@ fn local_paginated_websets_monitors_list_server() -> (String, thread::JoinHandle
             let request = String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned();
             if idx == 0 {
                 assert!(
-                    request.starts_with("GET /v0/monitors?websetId=ws_abc&limit=1 "),
+                    request.starts_with("GET /websets/v0/monitors?websetId=ws_abc&limit=1 "),
                     "unexpected first page request:\n{request}"
                 );
             } else {
                 assert!(
-                    request.starts_with("GET /v0/monitors?websetId=ws_abc&limit=1&cursor=cur2 "),
+                    request.starts_with(
+                        "GET /websets/v0/monitors?websetId=ws_abc&limit=1&cursor=cur2 "
+                    ),
                     "unexpected second page request:\n{request}"
                 );
             }
@@ -4652,7 +4997,7 @@ fn websets_webhooks_create_update_delete_dry_run_and_secret_output() {
         "--compact",
     ]);
     assert_eq!(create["command"], "websets webhooks create");
-    assert_eq!(create["data"]["request"]["path"], "/v0/webhooks");
+    assert_eq!(create["data"]["request"]["path"], "/websets/v0/webhooks");
     let body = &create["data"]["request"]["body"];
     assert_eq!(body["url"], "https://example.com/hook");
     assert_eq!(body["events"][0], "webset.item.created");
@@ -4696,7 +5041,10 @@ fn websets_webhooks_create_update_delete_dry_run_and_secret_output() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(update["data"]["request"]["path"], "/v0/webhooks/wh_abc");
+    assert_eq!(
+        update["data"]["request"]["path"],
+        "/websets/v0/webhooks/wh_abc"
+    );
     assert_eq!(
         update["data"]["request"]["body"]["url"],
         "https://example.com/new-hook"
@@ -4736,7 +5084,7 @@ fn websets_webhooks_create_update_delete_dry_run_and_secret_output() {
     ]);
     assert_eq!(
         attempts["data"]["request"]["path"],
-        "/v0/webhooks/wh_abc/attempts"
+        "/websets/v0/webhooks/wh_abc/attempts"
     );
     let query = attempts["data"]["request"]["query"].as_array().unwrap();
     assert!(query
@@ -4778,14 +5126,14 @@ fn local_paginated_websets_webhook_attempts_server() -> (String, thread::JoinHan
             if idx == 0 {
                 assert!(
                     request.starts_with(
-                        "GET /v0/webhooks/wh_abc/attempts?eventType=webset.created&successful=false&limit=1 "
+                        "GET /websets/v0/webhooks/wh_abc/attempts?eventType=webset.created&successful=false&limit=1 "
                     ),
                     "unexpected first page request:\n{request}"
                 );
             } else {
                 assert!(
                     request.starts_with(
-                        "GET /v0/webhooks/wh_abc/attempts?eventType=webset.created&successful=false&limit=1&cursor=cur2 "
+                        "GET /websets/v0/webhooks/wh_abc/attempts?eventType=webset.created&successful=false&limit=1&cursor=cur2 "
                     ),
                     "unexpected second page request:\n{request}"
                 );
@@ -4842,7 +5190,7 @@ fn websets_webhooks_create_live_captures_secret_and_redacts_stdout() {
     let response = br#"{"id":"wh_test","secret":"whsec_websets_capture_12345"}"#;
     let (base_url, server) = local_json_server(
         |request| {
-            assert!(request.starts_with("POST /v0/webhooks "));
+            assert!(request.starts_with("POST /websets/v0/webhooks "));
         },
         response,
     );
@@ -4883,7 +5231,7 @@ fn websets_webhooks_create_live_captures_secret_and_redacts_stdout() {
 fn websets_webhooks_create_secret_output_requires_secret_field() {
     let (base_url, server) = local_json_server(
         |request| {
-            assert!(request.starts_with("POST /v0/webhooks "));
+            assert!(request.starts_with("POST /websets/v0/webhooks "));
         },
         br#"{"id":"wh_test"}"#,
     );
@@ -4957,7 +5305,11 @@ fn websets_webhooks_create_ambiguous_failure_records_pending_run() {
     assert!(!output.status.success());
     let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
-    assert_pending_record(&pending_path, "websets webhooks create", "/v0/webhooks");
+    assert_pending_record(
+        &pending_path,
+        "websets webhooks create",
+        "/websets/v0/webhooks",
+    );
 }
 
 #[test]
@@ -5641,9 +5993,11 @@ fn ask_dry_run_expands_to_typed_answer_request() {
     assert_eq!(json["command"], "answer");
     assert_eq!(json["data"]["request"]["path"], "/answer");
     assert_eq!(body["query"], "What is Exa?");
-    assert_eq!(body["text"], true);
-    assert_eq!(json["data"]["expandsTo"], "answer 'What is Exa?' --text");
-    assert_eq!(json["data"]["expands_to"], "answer 'What is Exa?' --text");
+    // /answer's `text` field is boolean-only (no `{maxCharacters}` cap shape), so the macro
+    // must not send it at all.
+    assert!(body.get("text").is_none());
+    assert_eq!(json["data"]["expandsTo"], "answer 'What is Exa?'");
+    assert_eq!(json["data"]["expands_to"], "answer 'What is Exa?'");
 
     let quoted = run_ok_json(&[
         "ask",
@@ -5652,10 +6006,7 @@ fn ask_dry_run_expands_to_typed_answer_request() {
         "--print-request",
         "--compact",
     ]);
-    assert_eq!(
-        quoted["data"]["expandsTo"],
-        "answer 'What'\\''s Exa?' --text"
-    );
+    assert_eq!(quoted["data"]["expandsTo"], "answer 'What'\\''s Exa?'");
 }
 
 #[test]
@@ -5673,9 +6024,12 @@ fn ask_live_response_does_not_include_macro_metadata() {
                 "request did not include explicit test API key:\n{request_text}"
             );
             assert!(
-                request_text.contains(r#""query":"What is Exa?""#)
-                    && request_text.contains(r#""text":true"#),
+                request_text.contains(r#""query":"What is Exa?""#),
                 "ask macro did not send the typed answer body:\n{request_text}"
+            );
+            assert!(
+                !request_text.contains(r#""text""#),
+                "ask macro must not send a `text` field (/answer's text is boolean-only):\n{request_text}"
             );
         },
         br#"{"answer":"done","citations":[]}"#,

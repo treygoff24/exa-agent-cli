@@ -4,15 +4,13 @@
   "command": "websets events list",
   "operation": {
     "method": "GET",
-    "path": "/v0/events",
+    "path": "/websets/v0/events",
     "operationId": "events-list",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/events",
+      "path": "/websets/v0/events",
       "query": [
         {
           "name": "types",
@@ -35,8 +33,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:3e90909e3447d9b47afa6343ff02b6fbab4651bdd5f5c3d2c585e470b04d97e1",
-  "pagination": null,
+  "dataHash": "sha256:6f981e80147a03b83e6709433ed79b0f9e2eecfec1cf7bb4768a97f58361f0b6",
   "costDollars": {
     "total": 0.0
   },
@@ -46,7 +43,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -156,7 +156,7 @@ fn every_op_dry_run_emits_pipeline_preview_and_no_network() {
         assert!(
             value
                 .pointer("/request/upstreamRequestId")
-                .is_some_and(Value::is_null),
+                .is_none_or(Value::is_null),
             "{} should not have an upstream request id in dry-run",
             op.operation_id
         );
@@ -421,6 +421,35 @@ fn capabilities_per_op_key_set_is_pinned() {
             command["operationId"]
         );
     }
+}
+
+#[test]
+fn websets_and_team_paths_use_live_api_prefix() {
+    let websets: Vec<_> = registry::REGISTRY
+        .iter()
+        .filter(|op| op.cli_path.first() == Some(&"websets"))
+        .collect();
+    assert!(!websets.is_empty(), "expected websets registry operations");
+    for op in websets {
+        assert!(
+            op.api_path.starts_with("/websets/v0/"),
+            "{} used stale path {}",
+            op.operation_id,
+            op.api_path
+        );
+        assert!(
+            !op.api_path.starts_with("/v0/"),
+            "{} used stale path {}",
+            op.operation_id,
+            op.api_path
+        );
+    }
+
+    let team = registry::REGISTRY
+        .iter()
+        .find(|op| op.command() == "team info")
+        .expect("team info op");
+    assert_eq!(team.api_path, "/websets/v0/teams/me");
 }
 
 #[test]

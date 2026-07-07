@@ -63,8 +63,6 @@ Written to **stdout**. Field order is stable (serialized in this order).
   },
   "request": {
     "requestId": "req_local_01J...",
-    "upstreamRequestId": "...",
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -84,11 +82,15 @@ Written to **stdout**. Field order is stable (serialized in this order).
   "nextActions": [],
   "warnings": [],
   "diagnostics": { "durationMs": 0, "retries": 0 },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }
 ```
+
+`upstreamRequestId`, `correlationId`, `dataPath`, `bytes`, and `pagination` are shown above only
+where populated for this example (`pagination` on a list/paginated command). On an actual call,
+any of these that would otherwise be `null` are **omitted from the envelope entirely** rather
+than serialized as `null` — an agent should check for key presence, not compare against `null`.
+`warnings[]`/`nextActions[]` are the exception: they always serialize, even when empty.
 
 Rules:
 - `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`.
@@ -97,9 +99,9 @@ Rules:
 - `nextActions[]` carries paste-ready follow-ups (`{ "description": "...", "command": "exa-agent agent runs events <id> --stream" }`) — populated on async-create and cursor-paginated commands (e.g. after `agent run`, the obvious `runs get`/`runs events`). Empty `[]` when there is no obvious next step. This is the success-path analogue of the error envelope's `suggestedCommand`.
 - `costDollars` always present; `{ "total": 0.0 }` when upstream reports none.
 - `warnings[]` carries non-fatal notices (deprecated flag used, livecrawl fallback, empty-result broaden hint, etc.) — never on stdout as prose, always here.
-- `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim (or `null`) so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
-- `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `false`/`null`/`null`.
-- `pagination` present only on list/paginated commands; `null` or omitted otherwise (commands.md specifies per-command). `pagination.total` is the upstream total when the cursor API supplies it, else `null` (pure cursor pagination legitimately can't know it — `count` always can).
+- `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
+- `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `dataTruncated: false`, with `dataPath`/`bytes` omitted.
+- `pagination` present only on list/paginated commands; omitted otherwise (commands.md specifies per-command). `pagination.total` is the upstream total when the cursor API supplies it, else `null` (pure cursor pagination legitimately can't know it — `count` always can).
 
 ## 5. Error envelope — `exa.cli.error.v1`
 

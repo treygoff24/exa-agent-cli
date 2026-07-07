@@ -4,15 +4,13 @@
   "command": "websets imports update",
   "operation": {
     "method": "PATCH",
-    "path": "/v0/imports/import_abc123",
+    "path": "/websets/v0/imports/import_abc123",
     "operationId": "imports-update",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "PATCH",
-      "path": "/v0/imports/import_abc123",
+      "path": "/websets/v0/imports/import_abc123",
       "query": [],
       "body": {
         "title": "Updated import"
@@ -28,8 +26,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:84bcdeeebc937185436519582767d152b0f3d0c538fd2f1c78b09a58cd73833d",
-  "pagination": null,
+  "dataHash": "sha256:e9f9e7eddaf2f3e5e7a6ba3d4dcb6c4372bc551a9606c2d855191918490fe5ea",
   "costDollars": {
     "total": 0.0
   },
@@ -39,7 +36,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -4,15 +4,13 @@
   "command": "websets imports create",
   "operation": {
     "method": "POST",
-    "path": "/v0/imports",
+    "path": "/websets/v0/imports",
     "operationId": "imports-create",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "POST",
-      "path": "/v0/imports",
+      "path": "/websets/v0/imports",
       "query": [],
       "body": {
         "format": "csv",
@@ -33,8 +31,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:919642922bae2903bf630be33a98aed6c60bda2613328f951788fbcba89003ec",
-  "pagination": null,
+  "dataHash": "sha256:b3fa57faeb9bf1c406bb021491107cb1f83d2c4d1585516357609950cd9a605f",
   "costDollars": {
     "total": 0.0
   },
@@ -44,7 +41,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -133,7 +133,7 @@ pub const EXIT_CODES: &[(u8, &str, &str)] = &[
     (
         10,
         "partial",
-        "batch partially succeeded (per-item statuses)",
+        "batch had per-item failures; inspect statuses/warnings",
     ),
     (
         11,
@@ -173,6 +173,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
         (
             "unknown_subcommand",
             spec(1, "usage", false, "an unrecognized subcommand was passed"),
+        ),
+        (
+            "missing_subcommand",
+            spec(
+                1,
+                "usage",
+                false,
+                "a parent command was passed without a subcommand",
+            ),
         ),
         (
             "invalid_value",
@@ -348,6 +357,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
                 "usage",
                 false,
                 "the command is recognized but not yet wired in this build",
+            ),
+        ),
+        (
+            "internal_error",
+            spec(
+                1,
+                "usage",
+                false,
+                "an internal invariant was violated; please report this as a bug",
             ),
         ),
     ])

@@ -4,15 +4,13 @@
   "command": "websets monitors create",
   "operation": {
     "method": "POST",
-    "path": "/v0/monitors",
+    "path": "/websets/v0/monitors",
     "operationId": "monitors-create",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "POST",
-      "path": "/v0/monitors",
+      "path": "/websets/v0/monitors",
       "query": [],
       "body": {
         "websetId": "webset_abc123",
@@ -39,8 +37,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:0ccf99013f6e0b13ebdf3cfe727f750062d8f8952b9082f809f2375bfdf12c97",
-  "pagination": null,
+  "dataHash": "sha256:08838507a5617d5ad8132581f45f2e0bfb8168772ab1c3eb83255d16ceff6d40",
   "costDollars": {
     "total": 0.0
   },
@@ -50,7 +47,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

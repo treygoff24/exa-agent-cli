@@ -4,15 +4,13 @@
   "command": "websets monitors update",
   "operation": {
     "method": "PATCH",
-    "path": "/v0/monitors/monitor_abc123",
+    "path": "/websets/v0/monitors/monitor_abc123",
     "operationId": "monitors-update",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,7 +18,7 @@
   "data": {
     "request": {
       "method": "PATCH",
-      "path": "/v0/monitors/monitor_abc123",
+      "path": "/websets/v0/monitors/monitor_abc123",
       "query": [],
       "body": {
         "status": "disabled"
@@ -28,8 +26,7 @@
     },
     "dryRun": true
   },
-  "dataHash": "sha256:93ee386336e82bfb5e7aa340c63860576f456ea71062e619e009f3fe03b5a2f4",
-  "pagination": null,
+  "dataHash": "sha256:968fa6cc7c660d6a9753066fa7c6d0590682cc9d44dcded9c0237b5e11cf82c8",
   "costDollars": {
     "total": 0.0
   },
@@ -39,7 +36,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

@@ -4,15 +4,13 @@
   "command": "team info",
   "operation": {
     "method": "GET",
-    "path": "/v0/teams/me",
+    "path": "/websets/v0/teams/me",
     "operationId": "teams-me-get",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "GET",
-      "path": "/v0/teams/me",
+      "path": "/websets/v0/teams/me",
       "query": [],
       "body": null
     },
     "dryRun": true
   },
-  "dataHash": "sha256:1a4e8996eb387459cd9225c30793bcfb27930fb361705c0196fbb106829903cb",
-  "pagination": null,
+  "dataHash": "sha256:c0c0889cd1f30bbf62c1e0dfa5d9af19ff5bf7de05f467df5f4343ba69c3b4e2",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

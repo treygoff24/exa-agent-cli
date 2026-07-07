@@ -4,15 +4,13 @@
   "command": "websets enrichments cancel",
   "operation": {
     "method": "POST",
-    "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123/cancel",
+    "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123/cancel",
     "operationId": "websets-enrichments-cancel",
     "source": "exa-spec.json",
     "sourceVersion": "2.0.0"
   },
   "request": {
     "requestId": "req_dry_run",
-    "upstreamRequestId": null,
-    "correlationId": null,
     "profile": "default",
     "redacted": true
   },
@@ -20,14 +18,13 @@
   "data": {
     "request": {
       "method": "POST",
-      "path": "/v0/websets/webset_abc123/enrichments/enrichment_abc123/cancel",
+      "path": "/websets/v0/websets/webset_abc123/enrichments/enrichment_abc123/cancel",
       "query": [],
       "body": {}
     },
     "dryRun": true
   },
-  "dataHash": "sha256:777fd3c1b8184505a2a02e91108db3a2e8cfcff4c3e5d54a1aa40a69ea81de3f",
-  "pagination": null,
+  "dataHash": "sha256:e4f81911906ba151e001f73adef6a0e9dfc60160cdc094fbefa7c51ecf15dba2",
   "costDollars": {
     "total": 0.0
   },
@@ -37,7 +34,5 @@
     "durationMs": 0,
     "retries": 0
   },
-  "dataTruncated": false,
-  "dataPath": null,
-  "bytes": null
+  "dataTruncated": false
 }

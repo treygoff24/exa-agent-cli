@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
 
-    for input in [EXA_SPEC, ADMIN_SPEC, OVERLAY] {
+    for input in ["build.rs", EXA_SPEC, ADMIN_SPEC, OVERLAY] {
         println!("cargo:rerun-if-changed={input}");
     }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
@@ -256,7 +256,7 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
             .ok_or_else(|| anyhow!("op {oid} not found in its spec ({default_source})"))?;
         (
             spec_op.method.clone(),
-            spec_op.api_path.clone(),
+            websets_runtime_path(&spec_op.api_path),
             spec_op.deprecated,
             default_source.to_string(),
             default_version,
@@ -292,6 +292,22 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         fields: meta.fields.to_vec(),
         body_builder: meta.body_builder.clone(),
     })
+}
+
+fn websets_runtime_path(path: &str) -> String {
+    // The vendored OpenAPI path keys are rooted at /v0/..., but the in-repo live docs
+    // examples use the deployed Websets base /websets/v0 (for example the
+    // "Base URL: https://api.exa.ai/websets/v0" guide plus /teams/me). Prefer the runtime route here
+    // while keeping the embedded spec untouched.
+    for resource in [
+        "websets", "teams", "events", "imports", "webhooks", "monitors",
+    ] {
+        let prefix = format!("/v0/{resource}");
+        if let Some(rest) = path.strip_prefix(&prefix) {
+            return format!("/websets/v0/{resource}{rest}");
+        }
+    }
+    path.to_string()
 }
 
 fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
@@ -583,7 +599,44 @@ fn git_sha() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Reproducible-build-friendly: honor SOURCE_DATE_EPOCH, else "unknown" (never wall-clock).
+/// Reproducible-build-friendly: no wall-clock. Prefers `SOURCE_DATE_EPOCH` (the standard
+/// reproducible-builds override), falls back to the HEAD commit's timestamp so a plain
+/// `cargo install` still gets a real date, and gives up to "unknown" outside a checkout.
 fn build_date() -> String {
-    std::env::var("SOURCE_DATE_EPOCH").unwrap_or_else(|_| "unknown".to_string())
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .or_else(git_commit_epoch);
+    match epoch {
+        Some(epoch) => epoch_to_iso_date(epoch),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Unix timestamp (seconds) of the git HEAD commit; `None` off a checkout.
+fn git_commit_epoch() -> Option<i64> {
+    std::process::Command::new("git")
+        .args(["log", "-1", "--format=%ct"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Format a Unix timestamp as an ISO-8601 UTC date (`YYYY-MM-DD`), no external date crate.
+/// Uses Howard Hinnant's `civil_from_days` algorithm (public domain).
+fn epoch_to_iso_date(epoch_secs: i64) -> String {
+    let days = epoch_secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }

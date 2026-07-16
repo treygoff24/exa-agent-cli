@@ -185,7 +185,7 @@ fn required_field_range(command: &str, flag: &str) -> (u64, u64) {
 
 pub fn text_value_parser(
     command: &'static str,
-) -> impl clap::builder::TypedValueParser<Value = String> + Clone {
+) -> impl clap::builder::TypedValueParser<Value = String> {
     move |raw: &str| {
         if raw.is_empty() || raw.eq_ignore_ascii_case("full") {
             return Ok(raw.to_string());
@@ -206,7 +206,7 @@ pub fn text_value_parser(
 pub fn optional_ranged_string_value_parser(
     command: &'static str,
     flag: &'static str,
-) -> impl clap::builder::TypedValueParser<Value = String> + Clone {
+) -> impl clap::builder::TypedValueParser<Value = String> {
     move |raw: &str| {
         if raw.is_empty() {
             return Ok(raw.to_string());
@@ -223,7 +223,7 @@ pub fn optional_ranged_string_value_parser(
 pub fn ranged_u32_value_parser(
     command: &'static str,
     flag: &'static str,
-) -> impl clap::builder::TypedValueParser<Value = u32> + Clone {
+) -> impl clap::builder::TypedValueParser<Value = u32> {
     move |raw: &str| {
         let (min, max) = required_field_range(command, flag);
         raw.parse::<u32>()
@@ -236,7 +236,7 @@ pub fn ranged_u32_value_parser(
 pub fn enum_string_value_parser(
     command: &'static str,
     flag: &'static str,
-) -> impl clap::builder::TypedValueParser<Value = String> + Clone {
+) -> impl clap::builder::TypedValueParser<Value = String> {
     #[derive(Clone)]
     struct Parser(&'static [&'static str]);
 

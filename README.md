@@ -47,7 +47,9 @@ opening a Rust change:
 cargo +1.85 clippy --all-features --all-targets
 ```
 
-CI runs the same MSRV check with `--locked` and `-D warnings`.
+After a push, CI confirms the stricter
+`cargo +1.85 clippy --locked --all-features --all-targets -- -D warnings`
+variant.
 
 ## Usage
 

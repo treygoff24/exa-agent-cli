@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Changed
+
+- `--text` character caps now accept only bare `--text`, `--text full`, or an
+  integer from 1 through 10000. The legacy `--text 0`, `--text true`, and
+  `--text false` forms from 0.2-era recipes are intentionally removed; use
+  bare `--text` for the command default or `--text full` for uncapped text.
+
 ### Fixed
 
 - Wave 5 contract hardening: contents metadata distinguishes positional URLs,

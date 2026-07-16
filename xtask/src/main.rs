@@ -86,6 +86,10 @@ fn vendor_spec(check_only: bool) -> Result<()> {
         return Ok(());
     }
 
+    if std::env::var_os("EXA_AGENT_NO_NETWORK").is_some() {
+        bail!("vendor-spec refused because EXA_AGENT_NO_NETWORK is set");
+    }
+
     // Live re-vendor. The Exa public spec is served as JSON; the admin spec as YAML, so it is
     // normalized to JSON via ruby (no YAML parser ships in the binary, D21).
     fetch_json(EXA_SPEC_URL, &root.join(EXA_SPEC))?;

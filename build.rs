@@ -101,6 +101,23 @@ struct FieldMeta {
     enum_values: Vec<String>,
     #[serde(default)]
     range: Option<[f64; 2]>,
+    #[serde(default)]
+    input_kind: Option<String>,
+    #[serde(default)]
+    input_name: Option<String>,
+    #[serde(default)]
+    value_name: Option<String>,
+    #[serde(default)]
+    arity: Option<ArityMeta>,
+    #[serde(default)]
+    input_range: Option<[u64; 2]>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ArityMeta {
+    min: usize,
+    #[serde(default)]
+    max: Option<usize>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -345,6 +362,28 @@ fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
         return Err(anyhow!("{}: co_fields paths cannot be empty", who()));
     }
 
+    if let Some(input_kind) = field.input_kind.as_deref() {
+        if !matches!(input_kind, "flag" | "argument") {
+            return Err(anyhow!("{}: unknown input_kind {input_kind:?}", who()));
+        }
+    }
+    if field.input_name.as_deref().is_some_and(str::is_empty) {
+        return Err(anyhow!("{}: input_name cannot be empty", who()));
+    }
+    if field.value_name.as_deref().is_some_and(str::is_empty) {
+        return Err(anyhow!("{}: value_name cannot be empty", who()));
+    }
+    if let Some(arity) = &field.arity {
+        if arity.max.is_some_and(|max| arity.min > max) {
+            return Err(anyhow!("{}: arity min must be <= max", who()));
+        }
+    }
+    if let Some([min, max]) = field.input_range {
+        if min > max {
+            return Err(anyhow!("{}: input_range min must be <= max", who()));
+        }
+    }
+
     Ok(())
 }
 
@@ -369,10 +408,27 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         };
         let enum_values = enum_values_literal(&f.enum_values);
         let range = range_literal(f.range)?;
+        // Body fields are flags unless the overlay explicitly records a positional input.
+        // This keeps self-description authoritative for every modeled flag without pretending
+        // that unmodeled/local-only Clap arguments belong to the request registry.
+        let input_kind = input_kind_literal(Some(f.input_kind.as_deref().unwrap_or("flag")))?;
+        let input_name = f
+            .input_name
+            .as_ref()
+            .map(|name| option_string_literal(&Some(name.clone())))
+            .unwrap_or_else(|| format!("Some({:?})", format!("--{}", f.flag)));
+        let value_name = option_string_literal(&f.value_name);
+        let default_arity = ArityMeta {
+            min: usize::from(f.kind != "bool"),
+            max: Some(usize::from(f.kind != "bool")),
+        };
+        let arity = arity_literal(Some(f.arity.as_ref().unwrap_or(&default_arity)))?;
+        let input_range = input_range_literal(f.input_range)?;
         write!(
             fields,
             "FieldDef {{ flag: {:?}, body_path: {:?}, kind: {}, required: {}, \
-             co_fields: {co_fields}, item_template: {item_template}, enum_values: {enum_values}, range: {range} }}, ",
+             co_fields: {co_fields}, item_template: {item_template}, enum_values: {enum_values}, range: {range}, \
+             input_kind: {input_kind}, input_name: {input_name}, value_name: {value_name}, arity: {arity}, input_range: {input_range} }}, ",
             f.flag,
             f.body_path,
             field_kind_variant(&f.kind)?,
@@ -404,6 +460,49 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         sver = r.source_version,
     )?;
     Ok(())
+}
+
+fn input_kind_literal(kind: Option<&str>) -> Result<String> {
+    Ok(match kind {
+        None => "None".to_string(),
+        Some("flag") => "Some(InputKind::Flag)".to_string(),
+        Some("argument") => "Some(InputKind::Argument)".to_string(),
+        Some(other) => return Err(anyhow!("unknown input_kind {other:?}")),
+    })
+}
+
+fn option_string_literal(value: &Option<String>) -> String {
+    value
+        .as_ref()
+        .map(|value| format!("Some({value:?})"))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn arity_literal(arity: Option<&ArityMeta>) -> Result<String> {
+    let Some(arity) = arity else {
+        return Ok("None".to_string());
+    };
+    if arity.max.is_some_and(|max| arity.min > max) {
+        return Err(anyhow!("field arity min must be <= max"));
+    }
+    Ok(format!(
+        "Some(InputArity {{ min: {}, max: {} }})",
+        arity.min,
+        arity
+            .max
+            .map(|max| format!("Some({max})"))
+            .unwrap_or_else(|| "None".to_string())
+    ))
+}
+
+fn input_range_literal(range: Option<[u64; 2]>) -> Result<String> {
+    let Some([min, max]) = range else {
+        return Ok("None".to_string());
+    };
+    if min > max {
+        return Err(anyhow!("field input_range min must be <= max"));
+    }
+    Ok(format!("Some(({min}, {max}))"))
 }
 
 fn co_fields_literal(fields: &[(String, ConstMeta)]) -> String {

@@ -10,6 +10,7 @@ pub fn run_cli(args: &[&str]) -> CliRun {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
     cmd.args(args)
         .env("SOURCE_DATE_EPOCH", "1782777600")
+        .env("EXA_AGENT_NO_NETWORK", "1")
         .env_remove("EXA_OUTPUT")
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")

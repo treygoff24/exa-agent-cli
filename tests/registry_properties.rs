@@ -35,9 +35,22 @@ enum ConstraintKind {
 }
 
 const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
+    ("createAgentRun", "effort", ConstraintKind::Enum),
+    ("findSimilar", "category", ConstraintKind::Enum),
+    ("findSimilar", "num-results", ConstraintKind::Range),
     ("search", "category", ConstraintKind::Enum),
     ("search", "num-results", ConstraintKind::Range),
     ("search", "type", ConstraintKind::Enum),
+    (
+        "websets-enrichments-create",
+        "enrichment-format",
+        ConstraintKind::Enum,
+    ),
+    (
+        "websets-enrichments-update",
+        "enrichment-format",
+        ConstraintKind::Enum,
+    ),
 ];
 
 #[test]

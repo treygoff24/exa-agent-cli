@@ -1,0 +1,29 @@
+{
+  "argv": [
+    "fetch",
+    "https://known-failure.test",
+    "https://missing-status.test",
+    "--correlation-id",
+    "fetch-undercount"
+  ],
+  "upstream": {
+    "results": [],
+    "statuses": [
+      {
+        "id": "https://known-failure.test",
+        "status": "error",
+        "error": {
+          "tag": "NOT_FOUND"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "command": "contents",
+    "exit": 10,
+    "correlationId": "fetch-undercount",
+    "warnings": [
+      "all_urls_failed"
+    ]
+  }
+}

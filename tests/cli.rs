@@ -55,6 +55,7 @@ fn command(args: &[&str]) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_exa-agent"));
     cmd.args(args)
         .env_remove("EXA_OUTPUT")
+        .env_remove("EXA_AGENT_NO_NETWORK")
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")
         .env_remove("EXA_ADMIN_BASE_URL")
@@ -574,10 +575,60 @@ fn schema_commands_work_offline() {
         .as_str()
         .unwrap()
         .contains("unsupported"));
+}
 
-    let refresh = run_ok_json(&["schema", "refresh", "--check", "--compact"]);
+#[test]
+fn schema_refresh_check_fetches_and_compares_live_spec() {
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(
+                request_text.starts_with("GET /docs/exa-spec.json "),
+                "unexpected request:\n{request_text}"
+            );
+            assert!(!request_text.to_ascii_lowercase().contains("x-api-key:"));
+        },
+        br#"{"openapi":"stale"}"#,
+    );
+    let output = run(&[
+        "schema",
+        "refresh",
+        "--check",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().expect("local test server panicked");
+    assert!(output.stderr.is_empty());
+    let refresh: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(refresh["schema"], "exa.cli.schema_refresh.v1");
-    assert_eq!(refresh["status"], "current");
+    assert_eq!(refresh["status"], "drift");
+    assert_ne!(refresh["liveSpecSha256"], refresh["embeddedSpecSha256"]);
+}
+
+#[test]
+fn schema_refresh_check_reports_network_failure_instead_of_current() {
+    let base_url = closed_local_base_url();
+    let output = run(&[
+        "schema",
+        "refresh",
+        "--check",
+        "--base-url",
+        base_url.as_str(),
+        "--retry",
+        "0",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr_json(&output)["error"]["code"], "network_error");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("\"status\":\"current\""));
 }
 
 #[test]
@@ -700,6 +751,118 @@ fn auth_test_dry_run_previews_without_touching_network() {
     // Proof it never reached the network: no upstream HTTP status / HTML body leaked in.
     let raw = String::from_utf8_lossy(&output.stdout);
     assert!(!raw.contains("httpStatus") && !raw.contains("DOCTYPE"));
+}
+
+#[test]
+fn no_network_refuses_live_paths_before_credentials_or_transport() {
+    let dir = temp_path("no-network-guard");
+    let credentials = dir.join("credentials.json");
+    let original = br#"{"api_key":"test-key-abcdef12"}"#;
+    fs::write(&credentials, original).unwrap();
+    let base_url = closed_local_base_url();
+    for args in [
+        vec![
+            "contents",
+            "https://example.test",
+            "--base-url",
+            base_url.as_str(),
+        ],
+        vec![
+            "fetch",
+            "https://example.test",
+            "--base-url",
+            base_url.as_str(),
+        ],
+        vec!["raw", "POST", "/search", "--base-url", base_url.as_str()],
+        vec!["auth", "status"],
+        vec!["schema", "refresh", "--check"],
+        vec!["schema", "refresh"],
+        vec!["websets", "list", "--all", "--base-url", base_url.as_str()],
+        vec!["auth", "test", "--base-url", base_url.as_str()],
+        vec!["doctor", "--online", "--base-url", base_url.as_str()],
+        vec![
+            "answer",
+            "network guard",
+            "--stream",
+            "--base-url",
+            base_url.as_str(),
+        ],
+    ] {
+        let output = run_with_env(
+            &args,
+            &[
+                ("EXA_AGENT_NO_NETWORK", "1"),
+                ("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        assert!(output.stdout.is_empty(), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "usage_error", "args: {args:?}");
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("EXA_AGENT_NO_NETWORK is set"));
+        assert_eq!(
+            error["error"]["suggestedCommand"],
+            "unset EXA_AGENT_NO_NETWORK and retry"
+        );
+        assert_eq!(fs::read(&credentials).unwrap(), original);
+    }
+}
+
+#[test]
+fn no_network_recovery_never_suggests_an_unavailable_dry_run() {
+    for args in [
+        &["auth", "status", "--dry-run"][..],
+        &["schema", "refresh", "--check", "--dry-run"][..],
+        &["doctor", "--online", "--dry-run"][..],
+    ] {
+        let output = run_with_env(args, &[("EXA_AGENT_NO_NETWORK", "1")]);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(
+            error["error"]["suggestedCommand"], "unset EXA_AGENT_NO_NETWORK and retry",
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn no_network_keeps_dry_run_request_building_credential_free() {
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://example.test/path?q=rust&sort=new",
+            "--text",
+            "10000",
+            "--dry-run",
+            "--compact",
+        ],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        envelope["data"]["request"]["body"]["text"]["maxCharacters"],
+        10000
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn no_network_cli_guard_uses_presence_not_a_truthy_value() {
+    for value in ["1", "true", "TRUE", "yes", "01", ""] {
+        let output = run_with_env(
+            &["raw", "POST", "/search"],
+            &[("EXA_AGENT_NO_NETWORK", value)],
+        );
+        assert_eq!(output.status.code(), Some(1), "value {value:?}");
+        assert_eq!(stderr_json(&output)["error"]["code"], "usage_error");
+    }
+    let absent = run(&["raw", "POST", "/search"]);
+    assert_eq!(absent.status.code(), Some(2));
+    assert_eq!(stderr_json(&absent)["error"]["code"], "not_authenticated");
 }
 
 #[test]
@@ -1244,26 +1407,259 @@ fn contents_bare_text_stays_uncapped() {
 }
 
 #[test]
-fn contents_partial_url_failures_warn_and_exit_zero() {
-    let response = br#"{
-        "results":[{"url":"https://a.test","text":"ok"}],
-        "statuses":[
-            {"id":"https://a.test","status":"success"},
-            {"id":"https://b.test","status":"error","error":{"tag":"NOT_FOUND"}}
+fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
+    let help = run(&["contents", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--text [<N|full>]"), "{help}");
+    assert!(help.contains("--text accepts bare, `full`, or"), "{help}");
+
+    let dry_run = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--text",
+        "10000",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        dry_run["data"]["request"]["body"]["text"]["maxCharacters"],
+        10000
+    );
+
+    for args in [
+        ["capabilities", "contents", "--compact"].as_slice(),
+        ["schema", "show", "contents", "--compact"].as_slice(),
+    ] {
+        let json = run_ok_json(args);
+        let fields = json
+            .pointer("/command/fields")
+            .or_else(|| json.pointer("/operation/fields"))
+            .expect("contents fields");
+        let text = fields
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["flag"] == "text")
+            .expect("text field");
+        assert_eq!(text["flag"], "text"); // legacy compatibility key
+        assert_eq!(text["inputKind"], "flag");
+        assert_eq!(text["name"], "--text");
+        assert_eq!(text["valueName"], "N|full");
+        assert_eq!(text["arity"], serde_json::json!({"min": 0, "max": 1}));
+        assert_eq!(text["range"], serde_json::json!({"min": 1, "max": 10000}));
+    }
+
+    for command in ["search", "similar"] {
+        let help = run(&[command, "--help"]);
+        assert!(help.status.success());
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(
+            help.contains("--text accepts bare, `full`, or 1..=10000"),
+            "{help}"
+        );
+
+        for args in [
+            ["capabilities", command, "--compact"].as_slice(),
+            ["schema", "show", command, "--compact"].as_slice(),
+        ] {
+            let json = run_ok_json(args);
+            let fields = json
+                .pointer("/command/fields")
+                .or_else(|| json.pointer("/operation/fields"))
+                .expect("command fields");
+            let text = fields
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["flag"] == "text")
+                .expect("text field");
+            assert_eq!(
+                text["range"],
+                serde_json::json!({"min": 1, "max": 10000}),
+                "{command}"
+            );
+        }
+    }
+
+    let answer_help = run(&["answer", "--help"]);
+    assert!(answer_help.status.success());
+    let answer_help = String::from_utf8(answer_help.stdout).unwrap();
+    assert!(answer_help.contains("<QUESTION>"), "{answer_help}");
+    assert!(
+        answer_help.contains("Set the `text` request field."),
+        "{answer_help}"
+    );
+
+    let contents = run_ok_json(&["capabilities", "contents", "--compact"]);
+    let urls = contents["command"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["flag"] == "urls")
+        .expect("urls field");
+    assert_eq!(urls["inputKind"], "argument");
+    assert_eq!(urls["name"], "URLS");
+    assert_eq!(urls["legacyFlagIsCliFlag"], false);
+    let search = run_ok_json(&["capabilities", "search", "--compact"]);
+    for field in search["command"]["fields"].as_array().unwrap() {
+        assert!(
+            field.get("inputKind").is_some(),
+            "modeled search field lacks input metadata: {field}"
+        );
+        assert!(
+            field.get("name").is_some(),
+            "modeled search field lacks an authoritative input name: {field}"
+        );
+    }
+    assert!(contents["command"]["contentDefaults"]["text"]
+        .get("zero")
+        .is_none());
+}
+
+#[test]
+fn contents_dry_run_is_a_request_preview_without_outcome() {
+    let preview = run_ok_json(&[
+        "contents",
+        "https://example.test",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(preview["data"]["dryRun"], true);
+    assert!(preview.get("outcome").is_none());
+}
+
+#[test]
+fn search_and_similar_text_share_normalization_boundaries() {
+    for command in ["search", "similar"] {
+        let mut valid = vec![command, "https://example.com", "--text"];
+        if command == "search" {
+            valid[1] = "rust async";
+        }
+        for raw in ["full", "1", "10000"] {
+            let mut args = valid.clone();
+            args.push(raw);
+            args.extend(["--dry-run", "--compact"]);
+            let json = run_ok_json(&args);
+            let body = &json["data"]["request"]["body"];
+            let text = &body["contents"]["text"];
+            let expected = if raw == "full" {
+                serde_json::json!(true)
+            } else {
+                serde_json::json!({"maxCharacters": raw.parse::<u64>().unwrap()})
+            };
+            assert_eq!(text, &expected, "{command} {raw}");
+        }
+        for raw in ["0", "false", "-1", "10001"] {
+            let mut args = valid.clone();
+            args.push(raw);
+            args.extend(["--compact"]);
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(1), "{command} {raw}");
+            let error = stderr_json(&output);
+            assert_eq!(error["error"]["code"], "invalid_value", "{command} {raw}");
+        }
+    }
+}
+
+#[test]
+fn contents_text_forms_match_help_and_reject_legacy_boolean_spellings() {
+    for (raw, expected) in [
+        ("full", serde_json::json!(true)),
+        ("1", serde_json::json!({"maxCharacters": 1})),
+        ("10000", serde_json::json!({"maxCharacters": 10000})),
+    ] {
+        let json = run_ok_json(&[
+            "contents",
+            "https://example.com",
+            "--text",
+            raw,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(json["data"]["request"]["body"]["text"], expected, "{raw}");
+    }
+
+    for args in [
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "0",
+            "--compact",
         ]
-    }"#;
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "true",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "false",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "-1",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "10001",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--compact",
+        ]
+        .as_slice(),
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "invalid_value", "{args:?}");
+        let rendered = error["error"]["message"].as_str().unwrap();
+        assert!(rendered.contains("bare"), "{rendered}");
+        assert!(rendered.contains("--text full"), "{rendered}");
+        assert!(rendered.contains("--text 10000"), "{rendered}");
+    }
+}
+
+#[test]
+fn contents_partial_url_failures_warn_and_exit_zero() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/contents/partial-empty-error.json")).unwrap();
+    let response = Box::leak(
+        serde_json::to_vec(&fixture["upstream"])
+            .unwrap()
+            .into_boxed_slice(),
+    );
     let (base_url, server) = local_json_server(
         |request_text| {
             assert!(request_text.starts_with("POST /contents "));
-            assert!(request_text.contains(r#""https://a.test""#));
-            assert!(request_text.contains(r#""https://b.test""#));
+            assert!(request_text.contains(r#""https://partial-a.test""#));
+            assert!(request_text.contains(r#""https://partial-b.test""#));
         },
         response,
     );
     let output = run(&[
         "contents",
-        "https://a.test",
-        "https://b.test",
+        "https://partial-a.test",
+        "https://partial-b.test",
         "--api-key",
         "test-key-abcdef12",
         "--base-url",
@@ -1282,7 +1678,10 @@ fn contents_partial_url_failures_warn_and_exit_zero() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|warning| warning["code"] == "url_failed" && warning["url"] == "https://b.test"));
+        .any(|warning| warning["code"] == "url_failed"
+            && warning["url"] == "https://partial-b.test"
+            && warning["error"] == serde_json::json!({})));
+    assert_eq!(json["outcome"], "partial");
 }
 
 #[test]
@@ -1319,6 +1718,7 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "partial");
     let warning = json["warnings"]
         .as_array()
         .unwrap()
@@ -1329,6 +1729,217 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         .as_str()
         .unwrap()
         .contains("https://a.test=NOT_FOUND"));
+}
+
+#[test]
+fn contents_compatibility_fixtures_preserve_frozen_legacy_envelopes() {
+    for fixture_name in [
+        "no-content",
+        "partial",
+        "all-failed",
+        "full",
+        "incomplete-success",
+    ] {
+        let fixture: serde_json::Value = serde_json::from_str(match fixture_name {
+            "no-content" => include_str!("fixtures/contents/no-content.json"),
+            "partial" => include_str!("fixtures/contents/partial.json"),
+            "all-failed" => include_str!("fixtures/contents/all-failed.json"),
+            "full" => include_str!("fixtures/contents/full.json"),
+            "incomplete-success" => include_str!("fixtures/contents/incomplete-success.json"),
+            _ => unreachable!(),
+        })
+        .expect("contents fixture JSON");
+        let upstream = Box::leak(
+            serde_json::to_vec(&fixture["upstream"])
+                .expect("serialize contents fixture")
+                .into_boxed_slice(),
+        );
+        let (base_url, server) = local_json_server(|_| {}, upstream);
+        let mut args: Vec<String> = fixture["argv"]
+            .as_array()
+            .expect("fixture argv")
+            .iter()
+            .map(|value| value.as_str().expect("argv string").to_string())
+            .collect();
+        args.extend([
+            "--api-key".to_string(),
+            "test-key-abcdef12".to_string(),
+            "--base-url".to_string(),
+            base_url,
+            "--compact".to_string(),
+        ]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = run(&args);
+        server.join().expect("local test server panicked");
+
+        let expected = &fixture["expected"];
+        assert_eq!(
+            output.status.code(),
+            Some(expected["exit"].as_i64().unwrap() as i32)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        envelope["request"]["requestId"] = serde_json::json!("req_legacy");
+        envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
+        let mut expected_envelope = fixture["legacyEnvelope"].clone();
+        expected_envelope["outcome"] = expected["outcome"].clone();
+        assert_eq!(
+            serde_json::to_string(&envelope).unwrap(),
+            serde_json::to_string(&expected_envelope).unwrap(),
+            "{fixture_name} changed more than the intended outcome field"
+        );
+    }
+}
+
+#[test]
+fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/contents/empty-reason.json")).unwrap();
+    let upstream = Box::leak(
+        serde_json::to_vec(&fixture["upstream"])
+            .unwrap()
+            .into_boxed_slice(),
+    );
+    let (base_url, server) = local_json_server(|_| {}, upstream);
+    let output = run(&[
+        "contents",
+        "https://opaque.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(10));
+    assert!(output.stderr.is_empty());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warning = &envelope["warnings"][0];
+    assert_eq!(warning["reason"], fixture["expected"]["reason"]);
+    assert_eq!(
+        warning["statuses"][0],
+        "https://opaque.test=upstream_reason_unavailable"
+    );
+    assert_eq!(
+        warning["suggestedCommand"],
+        fixture["expected"]["suggestedCommand"]
+    );
+    let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    envelope["request"]["requestId"] = serde_json::json!("req_legacy");
+    envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
+    let mut expected = fixture["legacyEnvelope"].clone();
+    expected["outcome"] = fixture["expected"]["outcome"].clone();
+    // Main labeled a missing upstream reason as "error". Wave 5 changes only that
+    // label/action contract in addition to the additive outcome field.
+    expected["warnings"][0]["message"] = serde_json::json!(
+        "all requested URLs failed: https://opaque.test=upstream_reason_unavailable"
+    );
+    expected["warnings"][0]["statuses"][0] =
+        serde_json::json!("https://opaque.test=upstream_reason_unavailable");
+    expected["warnings"][0]["suggestedCommand"] = fixture["expected"]["suggestedCommand"].clone();
+    expected["warnings"][0]["reason"] = fixture["expected"]["reason"].clone();
+    assert_eq!(
+        serde_json::to_string(&envelope).unwrap(),
+        serde_json::to_string(&expected).unwrap()
+    );
+}
+
+#[test]
+fn contents_id_recovery_command_preserves_ids_request_shape() {
+    let upstream = br#"{
+        "results":[],
+        "statuses":[{"id":"doc_opaque_123","status":"error","error":{}}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, upstream);
+    let output = run(&[
+        "contents",
+        "--ids",
+        "doc_opaque_123",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(10));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        envelope["warnings"][0]["suggestedCommand"],
+        "exa-agent contents --ids 'doc_opaque_123' --text full"
+    );
+
+    let recovery = run_ok_json(&[
+        "contents",
+        "--ids",
+        "doc_opaque_123",
+        "--text",
+        "full",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        recovery["data"]["request"]["body"]["ids"],
+        serde_json::json!(["doc_opaque_123"])
+    );
+    assert!(recovery["data"]["request"]["body"].get("urls").is_none());
+}
+
+#[test]
+fn fetch_undercounted_statuses_preserve_legacy_exit_warning_and_correlation() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/contents/undercounted-fetch.json")).unwrap();
+    let upstream = Box::leak(
+        serde_json::to_vec(&fixture["upstream"])
+            .unwrap()
+            .into_boxed_slice(),
+    );
+    let (base_url, server) = local_json_server(|_| {}, upstream);
+    let mut args: Vec<String> = fixture["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    args.extend([
+        "--api-key".to_string(),
+        "test-key-abcdef12".to_string(),
+        "--base-url".to_string(),
+        base_url,
+        "--compact".to_string(),
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&args);
+    server.join().expect("local test server panicked");
+    assert_eq!(
+        output.status.code(),
+        Some(fixture["expected"]["exit"].as_i64().unwrap() as i32)
+    );
+    assert!(output.stderr.is_empty());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["command"], fixture["expected"]["command"]);
+    assert_eq!(envelope["outcome"], "partial");
+    assert_eq!(
+        envelope["request"]["correlationId"],
+        fixture["expected"]["correlationId"]
+    );
+    let warning_codes: Vec<&str> = envelope["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|warning| warning["code"].as_str().unwrap())
+        .collect();
+    let expected_warnings: Vec<&str> = fixture["expected"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap())
+        .collect();
+    assert_eq!(warning_codes, expected_warnings);
 }
 
 #[test]
@@ -2379,6 +2990,99 @@ fn clap_unknown_flag_includes_did_you_mean() {
         .as_str()
         .unwrap()
         .contains("--num-results"));
+}
+
+#[test]
+fn search_num_results_does_not_hijack_other_clap_value_errors() {
+    let output = run(&[
+        "search",
+        "rust async",
+        "--num-results",
+        "5",
+        "--format",
+        "bogus",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--format"));
+}
+
+#[test]
+fn search_num_results_error_context_is_argument_order_independent() {
+    let output = run(&[
+        "search",
+        "--num-results",
+        "0",
+        "rust async",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["operation"]["path"], "/search");
+    assert_eq!(error["error"]["details"]["received"], "0");
+    assert!(error["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("'rust async' --num-results 1"));
+}
+
+#[test]
+fn search_num_results_parse_error_preserves_all_correlation_id_forms() {
+    let separated = run(&[
+        "--correlation-id",
+        "corr-separated",
+        "search",
+        "rust async",
+        "--num-results",
+        "101",
+        "--compact",
+    ]);
+    assert_eq!(separated.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&separated)["request"]["correlationId"],
+        "corr-separated"
+    );
+
+    let equals = run(&[
+        "--correlation-id=corr-equals",
+        "search",
+        "rust async",
+        "--num-results",
+        "101",
+        "--compact",
+    ]);
+    assert_eq!(equals.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&equals)["request"]["correlationId"],
+        "corr-equals"
+    );
+
+    let env = run_with_env(
+        &["search", "rust async", "--num-results", "101", "--compact"],
+        &[("EXA_CORRELATION_ID", "corr-env")],
+    );
+    assert_eq!(env.status.code(), Some(1));
+    assert_eq!(stderr_json(&env)["request"]["correlationId"], "corr-env");
+}
+
+#[test]
+fn contents_urls_flag_is_rejected_with_a_positional_url_suggestion() {
+    let output = run(&["contents", "--urls", "https://exa.ai"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "unknown_flag");
+    assert_eq!(error["error"]["details"]["inputKind"], "argument");
+    assert_eq!(error["error"]["details"]["name"], "URLS");
+    assert!(error["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("exa-agent contents https://exa.ai"));
 }
 
 #[test]
@@ -6108,6 +6812,7 @@ fn fetch_live_response_does_not_include_macro_metadata() {
     let upstream: serde_json::Value = serde_json::from_slice(upstream).unwrap();
     assert_eq!(json["command"], "contents");
     assert_eq!(json["data"], upstream);
+    assert_eq!(json["outcome"], "full");
     assert!(json["data"].get("expandsTo").is_none());
     assert!(json["data"].get("expands_to").is_none());
     assert_eq!(json["dataHash"], transport::data_hash(&upstream).unwrap());

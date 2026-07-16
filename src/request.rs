@@ -513,6 +513,11 @@ mod tests {
             item_template: None,
             enum_values: &[],
             range: None,
+            input_kind: None,
+            input_name: None,
+            value_name: None,
+            arity: None,
+            input_range: None,
         },
         crate::registry::FieldDef {
             flag: "text",
@@ -523,6 +528,11 @@ mod tests {
             item_template: None,
             enum_values: &[],
             range: None,
+            input_kind: None,
+            input_name: None,
+            value_name: None,
+            arity: None,
+            input_range: None,
         },
     ];
 
@@ -572,6 +582,11 @@ mod tests {
         item_template: None,
         enum_values: &[],
         range: None,
+        input_kind: None,
+        input_name: None,
+        value_name: None,
+        arity: None,
+        input_range: None,
     }];
 
     static CO_OP: OperationDef = OperationDef {
@@ -624,6 +639,11 @@ mod tests {
         item_template: Some("description"),
         enum_values: &[],
         range: None,
+        input_kind: None,
+        input_name: None,
+        value_name: None,
+        arity: None,
+        input_range: None,
     }];
 
     static PLAIN_ARRAY_FIELDS: &[FieldDef] = &[FieldDef {
@@ -635,6 +655,11 @@ mod tests {
         item_template: None,
         enum_values: &[],
         range: None,
+        input_kind: None,
+        input_name: None,
+        value_name: None,
+        arity: None,
+        input_range: None,
     }];
 
     static ITEM_TEMPLATE_OP: OperationDef = OperationDef {
@@ -716,6 +741,11 @@ mod tests {
             item_template: None,
             enum_values: &[],
             range: None,
+            input_kind: None,
+            input_name: None,
+            value_name: None,
+            arity: None,
+            input_range: None,
         },
         FieldDef {
             flag: "field-only",
@@ -726,6 +756,11 @@ mod tests {
             item_template: None,
             enum_values: &[],
             range: None,
+            input_kind: None,
+            input_name: None,
+            value_name: None,
+            arity: None,
+            input_range: None,
         },
     ];
 

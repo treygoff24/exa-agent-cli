@@ -328,16 +328,40 @@ fn command_entry(op: &OperationDef) -> serde_json::Value {
     })
 }
 
-fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
+pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
     op.fields
         .iter()
         .map(|field| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
+                // `flag` is retained for one compatibility release.
                 "flag": field.flag,
                 "bodyPath": field.body_path,
                 "kind": field_kind(field.kind),
                 "required": field.required,
-            })
+            });
+            if let Some(input_kind) = field.input_kind {
+                value["legacyFlagIsCliFlag"] =
+                    serde_json::Value::Bool(input_kind != registry::InputKind::Argument);
+                value["inputKind"] = serde_json::Value::String(input_kind.as_str().to_string());
+                value["name"] = serde_json::Value::String(
+                    field
+                        .input_name
+                        .expect("input metadata has a name")
+                        .to_string(),
+                );
+                if let Some(arity) = field.arity {
+                    value["arity"] = serde_json::json!({ "min": arity.min, "max": arity.max });
+                }
+                if let Some(value_name) = field.value_name {
+                    value["valueName"] = serde_json::Value::String(value_name.to_string());
+                }
+                if let Some((min, max)) = field.input_range {
+                    value["range"] = serde_json::json!({ "min": min, "max": max });
+                } else if let Some((min, max)) = field.range {
+                    value["range"] = serde_json::json!({ "min": min, "max": max });
+                }
+            }
+            value
         })
         .collect()
 }
@@ -375,7 +399,6 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
             "text": {
                 "bare": { "maxCharacters": crate::DEFAULT_TEXT_MAX_CHARACTERS },
                 "full": true,
-                "zero": true,
             },
             "noHighlights": "metadata-only; suppresses the default highlights request",
         }),
@@ -383,7 +406,6 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
             "text": {
                 "bare": { "maxCharacters": crate::DEFAULT_TEXT_MAX_CHARACTERS },
                 "full": true,
-                "zero": true,
             }
         }),
         "contents" => serde_json::json!({
@@ -391,7 +413,6 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
                 "bare": true,
                 "explicitCap": { "maxCharacters": "N" },
                 "full": true,
-                "zero": true,
             }
         }),
         _ => serde_json::Value::Null,

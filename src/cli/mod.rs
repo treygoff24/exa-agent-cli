@@ -420,21 +420,26 @@ pub enum Command {
 #[derive(Args, Debug)]
 pub struct SearchArgs {
     /// The search query.
+    #[arg(value_name = crate::registry::field_value_name("search", "query").expect("search query metadata"))]
     pub query: String,
     /// Number of results, 1..=100 (maps `numResults`). Search is not cursor-paginated.
     #[arg(
         short = 'n',
         long,
-        value_name = "N",
+        help = crate::registry::field_input_help("search", "num-results").expect("search num-results metadata"),
+        value_name = crate::registry::field_value_name("search", "num-results").expect("search num-results metadata"),
+        value_parser = crate::registry::optional_ranged_string_value_parser("search", "num-results"),
         num_args = 0..=1,
         default_missing_value = "",
         allow_negative_numbers = true
     )]
     pub num_results: Option<String>,
-    /// Return text in each result. Bare --text caps search text at 1500 chars/result; default highlights are usually smaller. Use --text full or --text 0 for uncapped.
+    /// Return text in each result. Bare --text caps search text at 1500 chars/result; default highlights are usually smaller. Use --text full for uncapped.
     #[arg(
         long,
-        value_name = "N|full",
+        help = crate::registry::field_input_help("search", "text").expect("search text metadata"),
+        value_name = crate::registry::field_value_name("search", "text").expect("search text metadata"),
+        value_parser = crate::registry::text_value_parser("search"),
         num_args = 0..=1,
         default_missing_value = "",
         allow_negative_numbers = true
@@ -458,7 +463,11 @@ pub struct SearchArgs {
     /// Result category.
     ///
     /// Valid values: company, people, research paper, news, personal site, financial report.
-    #[arg(long, value_name = "CATEGORY")]
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        value_parser = crate::registry::permissive_enum_string_value_parser(SEARCH_CATEGORY_VALUES)
+    )]
     pub category: Option<String>,
     /// Restrict results to matching domains.
     #[arg(long, value_name = "DOMAIN")]
@@ -528,20 +537,35 @@ impl SearchArgs {
 #[derive(Args, Debug)]
 pub struct ContentsArgs {
     /// URLs to fetch.
-    #[arg(required_unless_present = "ids", conflicts_with = "ids", num_args = 1..)]
+    #[arg(
+        required_unless_present = "ids",
+        conflicts_with = "ids",
+        value_name = crate::registry::field_value_name("contents", "urls").expect("contents urls metadata"),
+        num_args = 1..
+    )]
     pub urls: Vec<String>,
-    #[arg(long, conflicts_with = "urls", num_args = 1..)]
-    pub ids: Vec<String>,
-    /// Return text. Bare --text is uncapped for contents; use --text N to cap, --text full/0 for uncapped.
     #[arg(
         long,
-        value_name = "N|full",
+        conflicts_with = "urls",
+        value_name = crate::registry::field_value_name("contents", "ids").expect("contents ids metadata"),
+        num_args = 1..
+    )]
+    pub ids: Vec<String>,
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("contents", "text").expect("contents text metadata"),
+        value_name = crate::registry::field_value_name("contents", "text").expect("contents text metadata"),
+        value_parser = crate::registry::text_value_parser("contents"),
         num_args = 0..=1,
         default_missing_value = "",
         allow_negative_numbers = true
     )]
     pub text: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = crate::registry::field_value_name("contents", "summary-query").expect("contents summary-query metadata"),
+        num_args = 1
+    )]
     pub summary_query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub chunk_size: Option<u32>,
@@ -560,17 +584,26 @@ impl ContentsArgs {
 
 #[derive(Args, Debug)]
 pub struct SimilarArgs {
+    #[arg(value_name = crate::registry::field_value_name("similar", "url").expect("similar url metadata"))]
     pub url: String,
-    #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=100))]
+    #[arg(
+        short = 'n',
+        long,
+        help = crate::registry::field_input_help("similar", "num-results").expect("similar num-results metadata"),
+        value_name = crate::registry::field_value_name("similar", "num-results").expect("similar num-results metadata"),
+        value_parser = crate::registry::ranged_u32_value_parser("similar", "num-results")
+    )]
     pub num_results: Option<u32>,
     #[arg(long)]
     pub exclude_source_domain: bool,
     #[arg(long, value_enum, ignore_case = true)]
     pub category: Option<SearchCategory>,
-    /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full or --text 0 for uncapped.
+    /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full for uncapped.
     #[arg(
         long,
-        value_name = "N|full",
+        help = crate::registry::field_input_help("similar", "text").expect("similar text metadata"),
+        value_name = crate::registry::field_value_name("similar", "text").expect("similar text metadata"),
+        value_parser = crate::registry::text_value_parser("similar"),
         num_args = 0..=1,
         default_missing_value = "",
         allow_negative_numbers = true
@@ -603,8 +636,9 @@ impl SimilarArgs {
 
 #[derive(Args, Debug)]
 pub struct AnswerArgs {
+    #[arg(value_name = crate::registry::field_value_name("answer", "question").expect("answer question metadata"))]
     pub question: String,
-    #[arg(long)]
+    #[arg(long, help = crate::registry::field_input_help("answer", "text").expect("answer text metadata"))]
     pub text: bool,
     #[arg(long)]
     pub stream: bool,

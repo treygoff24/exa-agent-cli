@@ -16,7 +16,8 @@ pub mod request;
 pub mod stream;
 pub mod transport;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
 use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
@@ -53,7 +54,7 @@ const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 49_152;
 const DEFAULT_TEXT_MAX_CHARACTERS: u32 = 1_500;
 const DEFAULT_HIGHLIGHTS_MAX_CHARACTERS: u32 = 800;
-const MAX_TEXT_MAX_CHARACTERS: u32 = 10_000;
+const MAX_HIGHLIGHTS_MAX_CHARACTERS: u32 = 10_000;
 const SEARCH_OVERSIZED_DATA_WARNING_BYTES: usize = 10 * 1024;
 
 #[derive(Clone, Copy)]
@@ -149,6 +150,40 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 }
             }
 
+            let invalid_search_num_results =
+                matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation)
+                    && clap_ctx_strings(&e, ContextKind::InvalidArg)
+                        .iter()
+                        .any(|arg| arg.contains("--num-results"));
+            if invalid_search_num_results {
+                if let Some((query, raw, correlation_id)) = search_num_results_args() {
+                    let err = validate_search_num_results(&query, &raw)
+                        .expect_err("clap rejected an invalid search num-results value");
+                    let op = registry::lookup_by_segments(&["search"])
+                        .expect("search is in the registry");
+                    let argv: Vec<String> = std::env::args().collect();
+                    let request_id = if argv
+                        .iter()
+                        .any(|arg| arg == "--dry-run" || arg == "--print-request")
+                    {
+                        "req_dry_run".to_string()
+                    } else {
+                        transport::new_request_id()
+                    };
+                    let env = ErrorEnvelope::from_error(&err).with_context(
+                        op.method.as_str(),
+                        op.api_path,
+                        request_id,
+                        correlation_id,
+                    );
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+                    );
+                    return err.category() as i32;
+                }
+            }
+
             let code = match kind {
                 ErrorKind::UnknownArgument => "unknown_flag",
                 ErrorKind::InvalidSubcommand => "unknown_subcommand",
@@ -160,6 +195,22 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             let mut details = serde_json::Map::new();
             let mut message = first_line(&e.to_string());
             let mut suggestion = None;
+
+            if kind == ErrorKind::UnknownArgument
+                && message.contains("--urls")
+                && e.to_string().contains("contents")
+            {
+                message = "contents URLs are positional, not a named flag".to_string();
+                details.insert(
+                    "inputKind".to_string(),
+                    serde_json::Value::String("argument".to_string()),
+                );
+                details.insert(
+                    "name".to_string(),
+                    serde_json::Value::String("URLS".to_string()),
+                );
+                suggestion = Some("exa-agent contents https://exa.ai [URL...]".to_string());
+            }
 
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
                 let missing = clap_ctx_strings(&e, ContextKind::InvalidArg);
@@ -177,18 +228,20 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 }
                 _ => None,
             };
-            if let Some(kind) = suggested_kind {
-                // clap orders suggestions by ascending similarity (most similar LAST)
-                // and emits none when there is no good match. Trust it rather than
-                // re-deriving a suggestion ourselves — an ad-hoc edit-distance pass
-                // invents false matches for nonsense input and can point an agent at a
-                // destructive command (`websets event` → `delete`).
-                if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
-                    details.insert(
-                        "didYouMean".to_string(),
-                        serde_json::Value::String(did_you_mean.clone()),
-                    );
-                    suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
+            if suggestion.is_none() {
+                if let Some(kind) = suggested_kind {
+                    // clap orders suggestions by ascending similarity (most similar LAST)
+                    // and emits none when there is no good match. Trust it rather than
+                    // re-deriving a suggestion ourselves — an ad-hoc edit-distance pass
+                    // invents false matches for nonsense input and can point an agent at a
+                    // destructive command (`websets event` → `delete`).
+                    if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
+                        details.insert(
+                            "didYouMean".to_string(),
+                            serde_json::Value::String(did_you_mean.clone()),
+                        );
+                        suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
+                    }
                 }
             }
 
@@ -212,6 +265,22 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             err.category() as i32
         }
     }
+}
+
+fn search_num_results_args() -> Option<(String, String, Option<String>)> {
+    let command = Cli::command().mut_subcommand("search", |search| {
+        search.mut_arg("num_results", |arg| {
+            arg.value_parser(clap::builder::StringValueParser::new())
+        })
+    });
+    let matches = command.try_get_matches_from(std::env::args()).ok()?;
+    let correlation_id = matches.get_one::<String>("correlation_id").cloned();
+    let search = matches.subcommand_matches("search")?;
+    Some((
+        search.get_one::<String>("query")?.clone(),
+        search.get_one::<String>("num_results")?.clone(),
+        correlation_id,
+    ))
 }
 
 fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Option<CliError> {
@@ -381,6 +450,9 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 online: args.online,
                 checks,
             };
+            if options.online {
+                transport::ensure_network_allowed()?;
+            }
             let mut ctx = doctor::DoctorCtx::from_process();
             if options.online {
                 ctx.online_probes = Some(run_doctor_online_probes(&cli.globals));
@@ -471,8 +543,7 @@ fn build_search_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     validate_search_intent_args(args)?;
-    let flag_values =
-        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), &args.query)?;
+    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
@@ -913,8 +984,7 @@ fn build_contents_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
-    let flag_values =
-        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), "")?;
+    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), "")?;
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_contents_body_shape(&spec.body)?;
     validate_content_options(op, &spec.body)?;
@@ -938,7 +1008,7 @@ fn validate_content_options(
     op: &'static registry::OperationDef,
     body: &serde_json::Value,
 ) -> Result<(), CliError> {
-    let Some(details) = content_option_shape_issue(op.command().as_str(), body) else {
+    let Some(details) = content_option_shape_issue(op, body) else {
         return Ok(());
     };
     Err(registry_validation_error(ValidateInputOutcome {
@@ -966,8 +1036,7 @@ fn build_similar_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
-    let flag_values =
-        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), "")?;
+    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), "")?;
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
@@ -4495,15 +4564,16 @@ fn typed_preview_headers(
 }
 
 fn normalize_content_flag_values(
-    command: &str,
+    op: &registry::OperationDef,
     flag_values: Vec<(&'static str, Option<String>)>,
     query: &str,
 ) -> Result<Vec<(&'static str, Option<String>)>, CliError> {
+    let command = op.command();
     flag_values
         .into_iter()
         .map(|(flag, value)| {
-            let value = match (command, flag, value) {
-                (_, "text", Some(raw)) => Some(normalize_text_flag(command, &raw)?),
+            let value = match (command.as_str(), flag, value) {
+                (_, "text", Some(raw)) => Some(normalize_text_flag(op, &raw)?),
                 ("search", "highlights", Some(raw)) => {
                     Some(normalize_highlights_flag(&raw, query)?)
                 }
@@ -4514,40 +4584,51 @@ fn normalize_content_flag_values(
         .collect()
 }
 
-fn normalize_text_flag(command: &str, raw: &str) -> Result<String, CliError> {
+fn normalize_text_flag(op: &registry::OperationDef, raw: &str) -> Result<String, CliError> {
+    let command = op.command();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
         "" if command == "contents" => return Ok("true".to_string()),
-        "" => return Ok(text_cap_json(DEFAULT_TEXT_MAX_CHARACTERS)),
-        "full" | "0" | "true" => return Ok("true".to_string()),
-        "false" => return Ok("false".to_string()),
+        "" => return Ok(text_cap_json(DEFAULT_TEXT_MAX_CHARACTERS.into())),
+        "full" => return Ok("true".to_string()),
         _ => {}
     }
 
-    let cap = raw.parse::<u32>().map_err(|_| invalid_text_cap(raw))?;
-    if (1..=MAX_TEXT_MAX_CHARACTERS).contains(&cap) {
+    let (min, max) = text_input_range(op);
+    let cap = raw.parse::<u64>().map_err(|_| invalid_text_cap(op, raw))?;
+    if (min..=max).contains(&cap) {
         Ok(text_cap_json(cap))
     } else {
-        Err(invalid_text_cap(raw))
+        Err(invalid_text_cap(op, raw))
     }
 }
 
-fn invalid_text_cap(raw: &str) -> CliError {
-    CliError::Usage(
-        Diag::new(
-            "invalid_value",
-            "`--text` must be a character cap from 1 to 10000, `full`, or `0`",
+fn invalid_text_cap(op: &registry::OperationDef, raw: &str) -> CliError {
+    let (min, max) = text_input_range(op);
+    let command = op.command();
+    let message = if command == "contents" {
+        format!(
+            "`--text` accepts bare, `full`, or a character cap from {min} to {max}; use `--text full` for uncapped text or `--text {max}` for the largest cap"
         )
-        .with_details(serde_json::json!({
-            "received": raw,
-            "min": 1,
-            "max": MAX_TEXT_MAX_CHARACTERS,
-        }))
-        .with_suggestion("exa-agent search <query> --text 1500"),
+    } else {
+        format!("`--text` accepts bare, `full`, or a character cap from {min} to {max}")
+    };
+    CliError::Usage(
+        Diag::new("invalid_value", message)
+            .with_details(serde_json::json!({
+                "received": raw,
+                "min": min,
+                "max": max,
+            }))
+            .with_suggestion(if command == "contents" {
+                format!("exa-agent contents <url-or-id> --text {max}")
+            } else {
+                "exa-agent search <query> --text 1500".to_string()
+            }),
     )
 }
 
-fn text_cap_json(cap: u32) -> String {
+fn text_cap_json(cap: u64) -> String {
     serde_json::json!({ "maxCharacters": cap }).to_string()
 }
 
@@ -4558,7 +4639,7 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
         Some(
             raw.parse::<u32>()
                 .ok()
-                .filter(|value| (1..=MAX_TEXT_MAX_CHARACTERS).contains(value))
+                .filter(|value| (1..=MAX_HIGHLIGHTS_MAX_CHARACTERS).contains(value))
                 .ok_or_else(|| {
                     CliError::Usage(
                         Diag::new(
@@ -4568,7 +4649,7 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
                         .with_details(serde_json::json!({
                             "received": raw,
                             "min": 1,
-                            "max": MAX_TEXT_MAX_CHARACTERS,
+                            "max": MAX_HIGHLIGHTS_MAX_CHARACTERS,
                         }))
                         .with_suggestion("exa-agent search <query> --highlights 800"),
                     )
@@ -4875,6 +4956,7 @@ fn dispatch_typed_inner(
         );
         return Ok(0);
     }
+    transport::ensure_network_allowed()?;
     live_typed_preflight(spec, globals)?;
 
     let effective_globals = options
@@ -4922,6 +5004,7 @@ fn dispatch_paginated_typed_command(
             .with_suggestion("exa-agent research list --all --ndjson"),
         ));
     }
+    transport::ensure_network_allowed()?;
     parse_user_headers(&globals.headers)?;
     let credential = resolve_operation_credential(spec.op, globals)?;
     let cfg = config::Config::load()?;
@@ -5323,6 +5406,7 @@ fn dispatch_typed_chunks_inner(
         }
         return Ok(0);
     }
+    transport::ensure_network_allowed()?;
     for spec in &specs {
         live_typed_preflight(spec, globals)?;
     }
@@ -5508,11 +5592,23 @@ fn execute_typed_live<T: Transport>(
     if let Some((field, _, _)) = spec.op.secret_capture() {
         redaction::redact_named_field(&mut data, field);
     }
-    append_response_warnings(spec.op, &body, &data, &mut warnings);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let exit_code = if spec.op.mixed_status_exit {
-        transport::contents_mixed_status_exit_code(&data)
+    let requested_contents_count = spec.op.mixed_status_exit.then(|| {
+        contents_inputs_from_body(&body)
+            .expect("validated contents body")
+            .1
+            .len()
+    });
+    append_response_warnings(
+        spec.op,
+        &body,
+        &data,
+        requested_contents_count,
+        &mut warnings,
+    );
+    let exit_code = if let Some(requested_count) = requested_contents_count {
+        transport::contents_status_summary(&data, requested_count).exit_code
     } else {
         0
     };
@@ -5531,6 +5627,11 @@ fn execute_typed_live<T: Transport>(
         duration_ms: result.duration_ms,
         warnings: &warnings,
     });
+    if let Some(requested_count) = requested_contents_count {
+        envelope["outcome"] = serde_json::Value::String(
+            transport::contents_outcome(&envelope["data"], requested_count).to_string(),
+        );
+    }
     apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     emit_response_value(&envelope, globals, execution.pretty);
     Ok(exit_code)
@@ -5991,10 +6092,17 @@ fn append_response_warnings(
     op: &'static registry::OperationDef,
     request_body: &serde_json::Value,
     data: &serde_json::Value,
+    requested_contents_count: Option<usize>,
     warnings: &mut Vec<serde_json::Value>,
 ) {
     if op.command() == "contents" {
-        append_contents_status_warnings(data, warnings);
+        if let Some(requested_count) = requested_contents_count {
+            let uses_ids = request_body
+                .get("ids")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ids| !ids.is_empty());
+            append_contents_status_warnings(data, requested_count, uses_ids, warnings);
+        }
         return;
     }
     if op.command() != "search" {
@@ -6029,43 +6137,59 @@ fn append_response_warnings(
 
 fn append_contents_status_warnings(
     data: &serde_json::Value,
+    requested_count: usize,
+    uses_ids: bool,
     warnings: &mut Vec<serde_json::Value>,
 ) {
-    let Some(statuses) = data.get("statuses").and_then(serde_json::Value::as_array) else {
-        return;
-    };
+    let statuses = data.get("statuses").and_then(serde_json::Value::as_array);
     let failed: Vec<&serde_json::Value> = statuses
-        .iter()
+        .into_iter()
+        .flatten()
         .filter(|entry| entry.get("status").and_then(serde_json::Value::as_str) == Some("error"))
         .collect();
-    if failed.is_empty() {
-        return;
-    }
-    let tags: Vec<String> = failed
-        .iter()
-        .map(|entry| contents_status_tag(entry))
-        .collect();
-    let results_count = data
-        .get("results")
-        .or_else(|| data.get("data"))
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    if failed.len() == statuses.len() && results_count == 0 {
-        warnings.push(serde_json::json!({
-            "code": "all_urls_failed",
-            "message": format!("all requested URLs failed: {}", tags.join(", ")),
-            "statuses": tags,
-        }));
-        return;
-    }
-    for (entry, tag) in failed.into_iter().zip(tags) {
-        warnings.push(serde_json::json!({
-            "code": "url_failed",
-            "message": format!("requested URL failed: {tag}"),
-            "url": entry.get("id").or_else(|| entry.get("url")).cloned().unwrap_or(serde_json::Value::Null),
-            "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
-            "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
-        }));
+    let summary = transport::contents_status_summary(data, requested_count);
+    if !failed.is_empty() {
+        let tags: Vec<String> = failed
+            .iter()
+            .map(|entry| contents_status_tag(entry))
+            .collect();
+        let suggested_command = failed
+            .iter()
+            .find_map(|entry| contents_status_suggested_command(entry, uses_ids));
+        if summary.exit_code == 10 {
+            let mut warning = serde_json::json!({
+                "code": "all_urls_failed",
+                "message": format!("all requested URLs failed: {}", tags.join(", ")),
+                "statuses": tags,
+            });
+            if let Some(command) = suggested_command {
+                warning["suggestedCommand"] = serde_json::Value::String(command);
+            }
+            if failed
+                .iter()
+                .any(|entry| contents_status_reason(entry).is_none())
+            {
+                warning["reason"] =
+                    serde_json::Value::String("upstream_reason_unavailable".to_string());
+            }
+            warnings.push(warning);
+            return;
+        }
+        for (entry, tag) in failed.into_iter().zip(tags) {
+            let mut warning = serde_json::json!({
+                "code": "url_failed",
+                "message": format!("requested URL failed: {tag}"),
+                "url": entry.get("id").or_else(|| entry.get("url")).cloned().unwrap_or(serde_json::Value::Null),
+                "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
+                "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
+            });
+            if let Some(command) = contents_status_suggested_command(entry, uses_ids) {
+                warning["suggestedCommand"] = serde_json::Value::String(command);
+                warning["reason"] =
+                    serde_json::Value::String("upstream_reason_unavailable".to_string());
+            }
+            warnings.push(warning);
+        }
     }
 }
 
@@ -6075,22 +6199,43 @@ fn contents_status_tag(entry: &serde_json::Value) -> String {
         .or_else(|| entry.get("url"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<unknown>");
-    let error = entry
+    let error = contents_status_reason(entry).unwrap_or("upstream_reason_unavailable");
+    format!("{id}={error}")
+}
+
+fn contents_status_reason(entry: &serde_json::Value) -> Option<&str> {
+    let reason = entry
         .get("error")
         .and_then(|error| {
             error
                 .as_str()
                 .or_else(|| error.get("tag").and_then(serde_json::Value::as_str))
                 .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
+                .or_else(|| error.get("reason").and_then(serde_json::Value::as_str))
         })
-        .or_else(|| entry.get("tag").and_then(serde_json::Value::as_str))
-        .unwrap_or("error");
-    format!("{id}={error}")
+        .or_else(|| entry.get("tag").and_then(serde_json::Value::as_str));
+    reason.map(str::trim).filter(|reason| !reason.is_empty())
+}
+
+fn contents_status_suggested_command(entry: &serde_json::Value, uses_ids: bool) -> Option<String> {
+    if contents_status_reason(entry).is_some() {
+        return None;
+    }
+    let target = entry
+        .get("id")
+        .or_else(|| entry.get("url"))
+        .and_then(serde_json::Value::as_str)?;
+    Some(format!(
+        "exa-agent contents {}{} --text full",
+        if uses_ids { "--ids " } else { "" },
+        shell_quote(target)
+    ))
 }
 
 fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         AuthCmd::Status => {
+            transport::ensure_network_allowed()?;
             let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
             let service_input = credential_input(auth::CredentialNamespace::Service, globals)?;
             let api = auth::resolve_api_credential(&api_input, &auth::NoopKeyring);
@@ -6226,6 +6371,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
         );
         return Ok(0);
     }
+    transport::ensure_network_allowed()?;
     let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
@@ -6351,17 +6497,43 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             Ok(0)
         }
         SchemaCmd::Refresh(args) => {
+            transport::ensure_network_allowed()?;
+            let spec_url = globals
+                .base_url
+                .as_deref()
+                .map(|base| transport::build_url(base, "/docs/exa-spec.json", &[]))
+                .transpose()?
+                .unwrap_or_else(|| registry::SPEC_URL.to_string());
+            let request = transport::HttpRequest {
+                method: "GET".to_string(),
+                url: spec_url.clone(),
+                headers: Vec::new(),
+                body: None,
+            };
+            let (response, _) = transport::send_with_retry(
+                &UreqTransport::with_defaults(),
+                &request,
+                &transport::SendOptions {
+                    retry: globals.retry,
+                    retry_after: globals.retry_after,
+                    idempotency_key: None,
+                },
+            )?;
+            let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
+            let current = live_spec_sha256 == registry::EMBEDDED_SPEC_SHA256;
             emit_stdout(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
                     "ok": true,
                     "check": args.check,
-                    "status": "current",
+                    "status": if current { "current" } else { "drift" },
+                    "specUrl": spec_url,
                     "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
+                    "liveSpecSha256": live_spec_sha256,
                 }),
                 pretty,
             );
-            Ok(0)
+            Ok(i32::from(args.check && !current))
         }
     }
 }
@@ -6379,8 +6551,14 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
+                    "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
+                    "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
+                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[.data.results[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
+                    "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
-                    "Contents/fetch all-URL failures return exit 10 with warning code all_urls_failed; partial URL failures warn and exit 0.",
+                    "Contents/fetch success envelopes add outcome no_content (no failures and no returned rows), partial, or full (one results row per requested item with no failure evidence); missing statuses do not downgrade full coverage, and all-URL failures remain outcome partial with exit 10.",
+                    "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
+                    "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
@@ -6415,7 +6593,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                         "code": "all_urls_failed",
                         "exit": 10,
                         "description": "contents/fetch returned zero results and every requested URL failed; inspect warnings.statuses for per-URL status tags"
-                    }
+                    },
                 ],
             }),
             pretty,
@@ -6429,7 +6607,8 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "examples": [
                     "exa-agent capabilities --compact",
                     "exa-agent capabilities search --compact",
-                    "exa-agent search \"AI infrastructure news\" --dry-run --print-request --compact",
+                    "exa-agent search \"AI infrastructure news\" --include-domain \"exa.ai\" --num-results 5 --dry-run --print-request --compact",
+                    "exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --dry-run --print-request --compact",
                     "exa-agent team info --dry-run --print-request --compact"
                 ],
             }),
@@ -6470,11 +6649,7 @@ fn operation_schema(op: &registry::OperationDef) -> serde_json::Value {
         "destructive": op.destructive(),
         "idempotencySensitive": op.idempotency_sensitive,
         "deprecated": op.deprecated,
-        "fields": op.fields.iter().map(|field| serde_json::json!({
-            "flag": field.flag,
-            "bodyPath": field.body_path,
-            "required": field.required,
-        })).collect::<Vec<_>>(),
+        "fields": output::envelope::command_fields(op),
         "contentDefaults": command_content_defaults(op),
     })
 }
@@ -6574,7 +6749,7 @@ fn validate_registry_input(
         }
     }
 
-    if let Some(issue) = content_option_shape_issue(op.command().as_str(), body) {
+    if let Some(issue) = content_option_shape_issue(op, body) {
         return ValidateInputOutcome {
             valid: serde_json::Value::Bool(false),
             details: Some(issue),
@@ -6641,14 +6816,15 @@ fn validate_registry_input(
 }
 
 fn content_option_shape_issue(
-    command: &str,
+    op: &registry::OperationDef,
     body: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    match command {
+    match op.command().as_str() {
         "search" | "similar" => validate_text_option_shape(
             body_value_at_path(body, "contents.text"),
             "contents.text",
             "text",
+            text_input_range(op),
         )
         .or_else(|| {
             validate_highlights_option_shape(
@@ -6657,7 +6833,12 @@ fn content_option_shape_issue(
                 "highlights",
             )
         }),
-        "contents" => validate_text_option_shape(body_value_at_path(body, "text"), "text", "text"),
+        "contents" => validate_text_option_shape(
+            body_value_at_path(body, "text"),
+            "text",
+            "text",
+            text_input_range(op),
+        ),
         _ => None,
     }
 }
@@ -6666,6 +6847,7 @@ fn validate_text_option_shape(
     value: Option<&serde_json::Value>,
     field: &str,
     flag: &str,
+    range: (u64, u64),
 ) -> Option<serde_json::Value> {
     let value = value?;
     if value.is_null() || value.is_boolean() {
@@ -6684,9 +6866,22 @@ fn validate_text_option_shape(
         field,
         "maxCharacters",
         flag,
-        1,
-        Some(10_000),
+        range.0,
+        Some(range.1),
     )
+}
+
+fn text_input_range(op: &registry::OperationDef) -> (u64, u64) {
+    op.fields
+        .iter()
+        .find(|field| field.flag == "text")
+        .and_then(|field| field.input_range)
+        .unwrap_or_else(|| {
+            panic!(
+                "{} --text requires registry input_range metadata",
+                op.command()
+            )
+        })
 }
 
 fn validate_highlights_option_shape(
@@ -6747,14 +6942,20 @@ fn validate_positive_integer_field(
         return None;
     }
     let field = format!("{parent_field}.{child_field}");
+    let message = match max {
+        Some(max) if parent_field == "text" && flag == "text" => format!(
+            "{parent_field}.{child_field} must be an integer from {min} to {max} or null; use --text full for uncapped text or --text {max} for the largest cap"
+        ),
+        Some(max) => format!(
+            "{parent_field}.{child_field} must be an integer from {min} to {max} or null"
+        ),
+        None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
+    };
     let mut issue = serde_json::json!({
         "issue": "invalid_value",
         "field": field,
         "flag": flag,
-        "message": match max {
-            Some(max) => format!("{parent_field}.{child_field} must be an integer from {min} to {max} or null"),
-            None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
-        },
+        "message": message,
         "min": min,
         "received": value,
     });
@@ -7433,6 +7634,7 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
+    transport::ensure_network_allowed()?;
     let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
@@ -7786,6 +7988,11 @@ mod tests {
         item_template: None,
         enum_values: &[],
         range: Some((1.0, 5.0)),
+        input_kind: None,
+        input_name: None,
+        value_name: None,
+        arity: None,
+        input_range: None,
     }];
 
     static GENERIC_RANGE_OP: OperationDef = OperationDef {

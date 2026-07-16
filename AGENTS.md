@@ -59,6 +59,11 @@ Before running any mutation for real, preview the exact upstream request it woul
 exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
 ```
 
+For generated docs, examples, and local probes that must not touch credentials or the network,
+set `EXA_AGENT_NO_NETWORK` (any value, including empty; unset it to turn the guard off). It refuses live typed, raw, streaming, `auth test`/`status`,
+`schema refresh --check`, and `doctor --online` before credential resolution; dry-run and
+self-description commands still work.
+
 ## Reading the output
 
 Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.

@@ -94,11 +94,14 @@ than serialized as `null` — an agent should check for key presence, not compar
 
 Rules:
 - `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`.
+- Live `/contents` and `fetch` result envelopes add required `outcome`: returned content means one `results[]` row per requested item, without inspecting text or summary fields. `full` is complete row coverage with no failure evidence; missing statuses do not downgrade it. `partial` means any failure evidence or a non-empty response that under-returns rows; `no_content` means no failures and no returned rows. This field is additive and independent of exit classification: `url_failed` remains exit 0, and `all_urls_failed` remains exit 10 while its outcome is `partial`. `--dry-run`/`--print-request` envelopes are request previews, not result envelopes, and never carry `outcome`.
+- Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs or `--ids`; agents must never infer a named URL flag.
 - `count` is the number of primary items in this response (results, items, citations — whichever the command's `data` is a list of), or `null` for single-object responses. It is **always populated even when `data` is spilled** (`dataTruncated: true`, §9) so an agent can size a spilled result without reading the file.
 - `dataHash` is a sha256 over the serialized `data` (or `null` when spilled-without-hashing). For the offline/registry-derived surfaces it is deterministic; for live-index results it is a change-fingerprint for cheap dedup/drift detection, **not** a determinism guarantee (§12).
 - `nextActions[]` carries paste-ready follow-ups (`{ "description": "...", "command": "exa-agent agent runs events <id> --stream" }`) — populated on async-create and cursor-paginated commands (e.g. after `agent run`, the obvious `runs get`/`runs events`). Empty `[]` when there is no obvious next step. This is the success-path analogue of the error envelope's `suggestedCommand`.
 - `costDollars` always present; `{ "total": 0.0 }` when upstream reports none.
 - `warnings[]` carries non-fatal notices (deprecated flag used, livecrawl fallback, empty-result broaden hint, etc.) — never on stdout as prose, always here.
+- For a `/contents` status whose upstream `error` object is empty or has no non-empty `tag`, `message`, or `reason`, warnings use the stable label `upstream_reason_unavailable` and include a suggested direct-fetch command. The CLI never invents an upstream reason.
 - `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
 - `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `dataTruncated: false`, with `dataPath`/`bytes` omitted.
 - `pagination` present only on list/paginated commands; omitted otherwise (commands.md specifies per-command). `pagination.total` is the upstream total when the cursor API supplies it, else `null` (pure cursor pagination legitimately can't know it — `count` always can).
@@ -174,7 +177,7 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 | Exit | category | Meaning | Example |
 |---:|---|---|---|
 | 0 | success | Completed; empty results are success. | `results: []` |
-| 1 | usage | Invalid command/flag/JSON body/schema, or local validation. | `--all` on search; `--urls`+`--ids`; bad category filter |
+| 1 | usage | Invalid command/flag/JSON body/schema, or local validation. | `--all` on search; positional URLS plus `--ids`; bad category filter |
 | 2 | auth | Missing/invalid API key or team context (upstream 401/403). | no key; revoked key |
 | 3 | config | Config/profile/env problem. | malformed TOML; unknown profile |
 | 4 | network | DNS/connect/TLS/timeout *before* an upstream response. | offline; connect timeout |
@@ -301,7 +304,6 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
     { "flag": "--api-key" }, { "flag": "--api-key-stdin" }, { "flag": "--profile" }
   ],
   "outputFormats": ["human", "json", "ndjson", "raw"],
-  "env": ["EXA_API_KEY", "EXA_SERVICE_KEY", "EXA_PROFILE", "EXA_OUTPUT", "EXA_CORRELATION_ID", "EXA_ADMIN_BASE_URL", "NO_COLOR", "SOURCE_DATE_EPOCH"],
   "configPrecedence": ["--api-key", "EXA_API_KEY", "keyring", "config-metadata"],
   "exitCodes": {
     "0": "success", "1": "usage", "2": "auth", "3": "config", "4": "network",
@@ -327,6 +329,10 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
 }
 ```
 
+The presence of `EXA_AGENT_NO_NETWORK` is an execution guard, not a `capabilities` field: it refuses all
+networked paths before credential resolution or transport creation while preserving dry-run and
+self-description commands.
+
 `errorCodes` is shown abbreviated above; the binary emits the **full** §5.1 dictionary. Each command entry carries the blast-radius triad an agent reasons about before calling: `readOnly` / `destructive` / `idempotencySensitive` (plus `requiresConfirm`, `dangerous`), all derived from the registry + overlay (D17). `build.commit`/`buildDate`/`target` are baked at compile time so an agent (or `doctor`) can detect a stale binary.
 
 ## 14. Golden-pinned surfaces
@@ -350,4 +356,4 @@ These outputs are frozen with insta snapshots (see implementation plan); any dri
 }
 ```
 
-`status` is `healthy` (exit 0) when no finding is `fail`, else `findings` (exit 1). Each finding mirrors the error envelope's `suggestedCommand` so the fix is one paste-ready line (every `fail`/`warn` finding MUST name one). Read-only and offline by default; `--online` adds the networked detectors (D8).
+`status` is `healthy` (exit 0) when no finding is `fail`, else `findings` (exit 1). Each finding mirrors the error envelope's `suggestedCommand` so the fix is one paste-ready line (every `fail`/`warn` finding MUST name one). Read-only and offline by default; `--online` adds the networked detectors (D8). The presence of `EXA_AGENT_NO_NETWORK` (any value, including empty) refuses every live typed, raw, stream, `auth test`, `auth status`, `schema refresh --check`, and `doctor --online` path with `usage_error` on stderr and exit 1 before credential resolution, transport construction, or sending; unset it to allow live paths. Dry-run request previews and offline description/help/schema/capabilities/robot-docs remain available.

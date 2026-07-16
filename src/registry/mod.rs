@@ -54,6 +54,30 @@ pub enum FieldKind {
     Json,
 }
 
+/// How a request field is supplied at the CLI boundary. `None` means the
+/// older registry entry has API metadata only; the contents pilot uses this
+/// to keep CLI-facing metadata with its request mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    Flag,
+    Argument,
+}
+
+impl InputKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Argument => "argument",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputArity {
+    pub min: usize,
+    pub max: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConstValue {
     Str(&'static str),
@@ -101,6 +125,7 @@ pub enum ValidatorId {}
 /// One named flag ⇄ request-body-field mapping (arch §4).
 #[derive(Debug, Clone, Copy)]
 pub struct FieldDef {
+    /// Legacy schema key; retain for one compatibility release.
     pub flag: &'static str,
     pub body_path: &'static str,
     pub kind: FieldKind,
@@ -109,6 +134,138 @@ pub struct FieldDef {
     pub item_template: Option<&'static str>,
     pub enum_values: &'static [&'static str],
     pub range: Option<(f64, f64)>,
+    pub input_kind: Option<InputKind>,
+    /// User-facing input spelling, e.g. `--text` or `URLS`.
+    pub input_name: Option<&'static str>,
+    pub value_name: Option<&'static str>,
+    pub arity: Option<InputArity>,
+    /// Numeric range for a CLI value. This is distinct from `range`, which
+    /// validates a numeric JSON request-body field.
+    pub input_range: Option<(u64, u64)>,
+}
+
+pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
+    let field = lookup_by_command(command)?
+        .fields
+        .iter()
+        .find(|field| field.flag == flag)?;
+    let name = field.input_name?;
+    match field_range(field) {
+        Some((min, max)) if flag == "text" => Some(format!(
+            "Optional character cap: {name} accepts bare, `full`, or {min}..={max}."
+        )),
+        Some((min, max)) => Some(format!("{name} accepts {min}..={max}.")),
+        None => Some(format!("Set the `{}` request field.", field.body_path)),
+    }
+}
+
+pub fn field_value_name(command: &str, flag: &str) -> Option<&'static str> {
+    let field = lookup_by_command(command)?
+        .fields
+        .iter()
+        .find(|field| field.flag == flag)?;
+    field.value_name.or(field.input_name)
+}
+
+pub fn field_range(field: &FieldDef) -> Option<(u64, u64)> {
+    field.input_range.or_else(|| {
+        field.range.and_then(|(min, max)| {
+            (min >= 0.0 && min.fract() == 0.0 && max.fract() == 0.0)
+                .then_some((min as u64, max as u64))
+        })
+    })
+}
+
+fn required_field_range(command: &str, flag: &str) -> (u64, u64) {
+    lookup_by_command(command)
+        .and_then(|op| op.fields.iter().find(|field| field.flag == flag))
+        .and_then(field_range)
+        .unwrap_or_else(|| panic!("{command} --{flag} requires registry range metadata"))
+}
+
+pub fn text_value_parser(
+    command: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = String> {
+    move |raw: &str| {
+        if raw.is_empty() || raw.eq_ignore_ascii_case("full") {
+            return Ok(raw.to_string());
+        }
+        let (min, max) = required_field_range(command, "text");
+        raw.parse::<u64>()
+            .ok()
+            .filter(|value| (min..=max).contains(value))
+            .map(|_| raw.to_string())
+            .ok_or_else(|| {
+                format!(
+                    "--text accepts bare, `full`, or {min}..={max}; use --text full or --text {max}"
+                )
+            })
+    }
+}
+
+pub fn optional_ranged_string_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = String> {
+    move |raw: &str| {
+        if raw.is_empty() {
+            return Ok(raw.to_string());
+        }
+        let (min, max) = required_field_range(command, flag);
+        raw.parse::<u64>()
+            .ok()
+            .filter(|value| (min..=max).contains(value))
+            .map(|_| raw.to_string())
+            .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
+    }
+}
+
+pub fn ranged_u32_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = u32> {
+    move |raw: &str| {
+        let (min, max) = required_field_range(command, flag);
+        raw.parse::<u32>()
+            .ok()
+            .filter(|value| (min..=max).contains(&u64::from(*value)))
+            .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
+    }
+}
+
+pub fn permissive_enum_string_value_parser(
+    values: &'static [&'static str],
+) -> impl clap::builder::TypedValueParser<Value = String> {
+    #[derive(Clone)]
+    struct Parser(&'static [&'static str]);
+
+    impl clap::builder::TypedValueParser for Parser {
+        type Value = String;
+
+        fn parse_ref(
+            &self,
+            _command: &clap::Command,
+            _arg: Option<&clap::Arg>,
+            value: &std::ffi::OsStr,
+        ) -> Result<Self::Value, clap::Error> {
+            // Search category validation stays in the operation-aware validator so
+            // typos retain its targeted recovery commands. This parser independently
+            // advertises Clap's accepted vocabulary for registry parity checks.
+            Ok(value.to_string_lossy().into_owned())
+        }
+
+        fn possible_values(
+            &self,
+        ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+            Some(Box::new(
+                self.0
+                    .iter()
+                    .map(|value| clap::builder::PossibleValue::new(*value)),
+            ))
+        }
+    }
+
+    Parser(values)
 }
 
 /// One Exa operation. Carries exactly what the contracts surface plus the internal

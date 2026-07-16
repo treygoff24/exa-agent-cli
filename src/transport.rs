@@ -18,6 +18,20 @@ use crate::redaction;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Refuse every live network path when the caller explicitly requested a local-only run.
+pub fn ensure_network_allowed() -> Result<(), CliError> {
+    if std::env::var_os("EXA_AGENT_NO_NETWORK").is_some() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "usage_error",
+                "network access is disabled because EXA_AGENT_NO_NETWORK is set",
+            )
+            .with_suggestion("unset EXA_AGENT_NO_NETWORK and retry"),
+        ));
+    }
+    Ok(())
+}
+
 /// A fully-resolved outbound HTTP call (after auth/header validation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
@@ -128,6 +142,7 @@ impl UreqTransport {
 
 impl Transport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
+        ensure_network_allowed()?;
         let response = send_ureq_request(&self.agent, req)?;
 
         let status = response.status().as_u16();
@@ -149,6 +164,7 @@ impl Transport for UreqTransport {
     where
         F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
     {
+        ensure_network_allowed()?;
         crate::stream::install_sigint_handler()?;
         crate::stream::reset_interrupt();
         let max_retries = options.retry;
@@ -657,6 +673,7 @@ pub fn probe_auth<T: Transport>(
     base_url: &str,
     secret: &Secret,
 ) -> Result<AuthProbe, CliError> {
+    ensure_network_allowed()?;
     let url = build_url(base_url, "/search", &[])?;
     let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
     inject_auth_headers(&mut headers, secret);
@@ -684,6 +701,7 @@ pub fn probe_auth<T: Transport>(
 /// Any status counts (the unrouted `GET /search` returns 404 and that is fine); only a
 /// transport-level failure — DNS, TLS, timeout, connection refused — is a connectivity failure.
 pub fn probe_connectivity<T: Transport>(transport: &T, base_url: &str) -> Result<u16, CliError> {
+    ensure_network_allowed()?;
     let url = build_url(base_url, "/search", &[])?;
     let req = HttpRequest {
         method: "GET".to_string(),
@@ -752,6 +770,7 @@ pub fn send_with_retry<T: Transport>(
     req: &HttpRequest,
     options: &SendOptions,
 ) -> Result<(HttpResponse, u32), CliError> {
+    ensure_network_allowed()?;
     let max_retries = options.retry;
     let mut attempt = 0u32;
     loop {
@@ -983,11 +1002,22 @@ pub fn primary_count(data: &Value) -> Option<u64> {
 /// `/contents` may return HTTP 200 with per-item failures in `statuses[]` (contracts §11).
 /// A total per-URL failure exits 10 after the success envelope is emitted; mixed success/error
 /// stays exit 0 and is represented by warnings.
-pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
-    let Some(statuses) = data.get("statuses").and_then(Value::as_array) else {
-        return 0;
-    };
-    let failed = statuses
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentsStatusSummary {
+    pub requested_count: usize,
+    pub status_count: usize,
+    pub failed_count: usize,
+    pub results_count: usize,
+    pub exit_code: i32,
+}
+
+pub fn contents_status_summary(data: &Value, requested_count: usize) -> ContentsStatusSummary {
+    let statuses = data
+        .get("statuses")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let failed_count = statuses
         .iter()
         .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
         .count();
@@ -996,10 +1026,38 @@ pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
         .or_else(|| data.get("data"))
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    if !statuses.is_empty() && failed == statuses.len() && results_count == 0 {
+    let exit_code = if !statuses.is_empty() && failed_count == statuses.len() && results_count == 0
+    {
         10
     } else {
         0
+    };
+    ContentsStatusSummary {
+        requested_count,
+        status_count: statuses.len(),
+        failed_count,
+        results_count,
+        exit_code,
+    }
+}
+
+pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> i32 {
+    contents_status_summary(data, requested_count).exit_code
+}
+
+/// Classify a `/contents` response against the request that produced it.
+/// `full` means one `results[]` row per requested item and no failure evidence; statuses are
+/// optional metadata and their absence does not downgrade complete row coverage.
+pub fn contents_outcome(data: &Value, requested_count: usize) -> &'static str {
+    let summary = contents_status_summary(data, requested_count);
+    if summary.failed_count > 0 {
+        "partial"
+    } else if summary.results_count == 0 {
+        "no_content"
+    } else if summary.results_count == requested_count {
+        "full"
+    } else {
+        "partial"
     }
 }
 
@@ -1201,6 +1259,7 @@ where
     T: Transport,
     F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
 {
+    ensure_network_allowed()?;
     let prepared = prepare_raw_request(&params)?;
     let start = Instant::now();
     let mut body = Vec::new();
@@ -1699,19 +1758,19 @@ mod tests {
                 { "id": "https://b.test", "status": "error" }
             ]
         });
-        assert_eq!(contents_mixed_status_exit_code(&mixed), 0);
+        assert_eq!(contents_mixed_status_exit_code(&mixed, 2), 0);
 
         let all_ok = serde_json::json!({
             "results": [{ "url": "https://a.test" }],
             "statuses": [{ "id": "https://a.test", "status": "success" }]
         });
-        assert_eq!(contents_mixed_status_exit_code(&all_ok), 0);
+        assert_eq!(contents_mixed_status_exit_code(&all_ok, 1), 0);
 
         let all_err = serde_json::json!({
             "results": [],
             "statuses": [{ "id": "https://a.test", "status": "error" }]
         });
-        assert_eq!(contents_mixed_status_exit_code(&all_err), 10);
+        assert_eq!(contents_mixed_status_exit_code(&all_err, 1), 10);
     }
 
     #[test]

@@ -1,0 +1,76 @@
+{
+  "argv": [
+    "contents",
+    "https://incomplete-a.test",
+    "https://incomplete-b.test"
+  ],
+  "upstream": {
+    "results": [
+      {
+        "url": "https://incomplete-a.test",
+        "text": "a"
+      }
+    ],
+    "statuses": [
+      {
+        "id": "https://incomplete-a.test",
+        "status": "success"
+      },
+      {
+        "id": "https://incomplete-b.test",
+        "status": "success"
+      }
+    ]
+  },
+  "legacyEnvelope": {
+    "schema": "exa.cli.response.v1",
+    "ok": true,
+    "command": "contents",
+    "operation": {
+      "method": "POST",
+      "path": "/contents",
+      "operationId": "getContents",
+      "source": "exa-spec.json",
+      "sourceVersion": "2.0.0"
+    },
+    "request": {
+      "requestId": "req_legacy",
+      "profile": "default",
+      "redacted": true
+    },
+    "count": 1,
+    "data": {
+      "results": [
+        {
+          "url": "https://incomplete-a.test",
+          "text": "a"
+        }
+      ],
+      "statuses": [
+        {
+          "id": "https://incomplete-a.test",
+          "status": "success"
+        },
+        {
+          "id": "https://incomplete-b.test",
+          "status": "success"
+        }
+      ]
+    },
+    "dataHash": "sha256:07d141a98e30eb585ea9427f67376d139a37033c89007d7b998cb4fd242f663a",
+    "costDollars": {
+      "total": 0.0
+    },
+    "nextActions": [],
+    "warnings": [],
+    "diagnostics": {
+      "durationMs": 0,
+      "retries": 0
+    },
+    "dataTruncated": false
+  },
+  "expected": {
+    "outcome": "partial",
+    "exit": 0
+  }
+}

@@ -499,6 +499,11 @@ arity = { min = 1, max = 1 }
 flag = "num-results"
 body_path = "numResults"
 kind = "int"
+range = [1, 100]
+input_kind = "flag"
+input_name = "--num-results"
+value_name = "N"
+arity = { min = 1, max = 1 }
 
 [[operations."findSimilar".fields]]
 flag = "exclude-source-domain"
@@ -509,12 +514,17 @@ kind = "bool"
 flag = "category"
 body_path = "category"
 kind = "str"
+enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
 
 [[operations."findSimilar".fields]]
 flag = "text"
 body_path = "contents.text"
 kind = "json"
+input_kind = "flag"
+input_name = "--text"
+value_name = "N|full"
 arity = { min = 0, max = 1 }
+input_range = [1, 10000]
 
 [[operations."search".fields]]
 flag = "query"
@@ -530,6 +540,9 @@ flag = "num-results"
 body_path = "numResults"
 kind = "int"
 range = [1, 100]
+input_kind = "flag"
+input_name = "--num-results"
+value_name = "N"
 arity = { min = 0, max = 1 }
 
 [[operations."search".fields]]
@@ -548,7 +561,11 @@ enum_values = ["company", "people", "research paper", "news", "personal site", "
 flag = "text"
 body_path = "contents.text"
 kind = "json"
+input_kind = "flag"
+input_name = "--text"
+value_name = "N|full"
 arity = { min = 0, max = 1 }
+input_range = [1, 10000]
 
 [[operations."search".fields]]
 flag = "highlights"
@@ -620,6 +637,7 @@ required = true
 flag = "enrichment-format"
 body_path = "format"
 kind = "str"
+enum_values = ["text", "date", "number", "options", "email", "phone", "url"]
 
 [[operations."websets-enrichments-update".fields]]
 flag = "description"
@@ -630,6 +648,7 @@ kind = "str"
 flag = "enrichment-format"
 body_path = "format"
 kind = "str"
+enum_values = ["text", "date", "number", "options", "email", "phone", "url"]
 
 [[operations."imports-create".fields]]
 flag = "source"
@@ -721,6 +740,7 @@ kind = "str"
 flag = "effort"
 body_path = "effort"
 kind = "str"
+enum_values = ["auto", "minimal", "low", "medium", "high", "xhigh"]
 
 [[operations."createAgentRun".fields]]
 flag = "data-source"

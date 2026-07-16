@@ -53,7 +53,7 @@ const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 49_152;
 const DEFAULT_TEXT_MAX_CHARACTERS: u32 = 1_500;
 const DEFAULT_HIGHLIGHTS_MAX_CHARACTERS: u32 = 800;
-const MAX_TEXT_MAX_CHARACTERS: u32 = 10_000;
+const MAX_HIGHLIGHTS_MAX_CHARACTERS: u32 = 10_000;
 const SEARCH_OVERSIZED_DATA_WARNING_BYTES: usize = 10 * 1024;
 
 #[derive(Clone, Copy)]
@@ -4588,7 +4588,7 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
         Some(
             raw.parse::<u32>()
                 .ok()
-                .filter(|value| (1..=MAX_TEXT_MAX_CHARACTERS).contains(value))
+                .filter(|value| (1..=MAX_HIGHLIGHTS_MAX_CHARACTERS).contains(value))
                 .ok_or_else(|| {
                     CliError::Usage(
                         Diag::new(
@@ -4598,7 +4598,7 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
                         .with_details(serde_json::json!({
                             "received": raw,
                             "min": 1,
-                            "max": MAX_TEXT_MAX_CHARACTERS,
+                            "max": MAX_HIGHLIGHTS_MAX_CHARACTERS,
                         }))
                         .with_suggestion("exa-agent search <query> --highlights 800"),
                     )
@@ -6794,7 +6794,12 @@ fn text_input_range(op: &registry::OperationDef) -> (u64, u64) {
         .iter()
         .find(|field| field.flag == "text")
         .and_then(|field| field.input_range)
-        .unwrap_or((1, MAX_TEXT_MAX_CHARACTERS as u64))
+        .unwrap_or_else(|| {
+            panic!(
+                "{} --text requires registry input_range metadata",
+                op.command()
+            )
+        })
 }
 
 fn validate_highlights_option_shape(

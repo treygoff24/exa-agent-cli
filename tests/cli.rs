@@ -1383,6 +1383,47 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
         assert_eq!(text["range"], serde_json::json!({"min": 1, "max": 10000}));
     }
 
+    for command in ["search", "similar"] {
+        let help = run(&[command, "--help"]);
+        assert!(help.status.success());
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(
+            help.contains("--text accepts bare, `full`, or 1..=10000"),
+            "{help}"
+        );
+
+        for args in [
+            ["capabilities", command, "--compact"].as_slice(),
+            ["schema", "show", command, "--compact"].as_slice(),
+        ] {
+            let json = run_ok_json(args);
+            let fields = json
+                .pointer("/command/fields")
+                .or_else(|| json.pointer("/operation/fields"))
+                .expect("command fields");
+            let text = fields
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["flag"] == "text")
+                .expect("text field");
+            assert_eq!(
+                text["range"],
+                serde_json::json!({"min": 1, "max": 10000}),
+                "{command}"
+            );
+        }
+    }
+
+    let answer_help = run(&["answer", "--help"]);
+    assert!(answer_help.status.success());
+    let answer_help = String::from_utf8(answer_help.stdout).unwrap();
+    assert!(answer_help.contains("<QUESTION>"), "{answer_help}");
+    assert!(
+        answer_help.contains("Set the `text` request field."),
+        "{answer_help}"
+    );
+
     let contents = run_ok_json(&["capabilities", "contents", "--compact"]);
     let urls = contents["command"]["fields"]
         .as_array()
@@ -1407,6 +1448,19 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
     assert!(contents["command"]["contentDefaults"]["text"]
         .get("zero")
         .is_none());
+}
+
+#[test]
+fn contents_dry_run_is_a_request_preview_without_outcome() {
+    let preview = run_ok_json(&[
+        "contents",
+        "https://example.test",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(preview["data"]["dryRun"], true);
+    assert!(preview.get("outcome").is_none());
 }
 
 #[test]
@@ -1712,6 +1766,15 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
     envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
     let mut expected = fixture["legacyEnvelope"].clone();
     expected["outcome"] = fixture["expected"]["outcome"].clone();
+    // Main labeled a missing upstream reason as "error". Wave 5 changes only that
+    // label/action contract in addition to the additive outcome field.
+    expected["warnings"][0]["message"] = serde_json::json!(
+        "all requested URLs failed: https://opaque.test=upstream_reason_unavailable"
+    );
+    expected["warnings"][0]["statuses"][0] =
+        serde_json::json!("https://opaque.test=upstream_reason_unavailable");
+    expected["warnings"][0]["suggestedCommand"] = fixture["expected"]["suggestedCommand"].clone();
+    expected["warnings"][0]["reason"] = fixture["expected"]["reason"].clone();
     assert_eq!(
         serde_json::to_string(&envelope).unwrap(),
         serde_json::to_string(&expected).unwrap()

@@ -149,14 +149,14 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
         .fields
         .iter()
         .find(|field| field.flag == flag)?;
-    let (name, min, max) = (
-        field.input_name?,
-        field.input_range?.0,
-        field.input_range?.1,
-    );
-    Some(format!(
-        "Optional character cap: {name} accepts bare, `full`, or {min}..={max}."
-    ))
+    let name = field.input_name?;
+    match field_range(field) {
+        Some((min, max)) if flag == "text" => Some(format!(
+            "Optional character cap: {name} accepts bare, `full`, or {min}..={max}."
+        )),
+        Some((min, max)) => Some(format!("{name} accepts {min}..={max}.")),
+        None => Some(format!("Set the `{}` request field.", field.body_path)),
+    }
 }
 
 pub fn field_value_name(command: &str, flag: &str) -> Option<&'static str> {
@@ -165,6 +165,72 @@ pub fn field_value_name(command: &str, flag: &str) -> Option<&'static str> {
         .iter()
         .find(|field| field.flag == flag)?;
     field.value_name.or(field.input_name)
+}
+
+pub fn field_range(field: &FieldDef) -> Option<(u64, u64)> {
+    field.input_range.or_else(|| {
+        field.range.and_then(|(min, max)| {
+            (min >= 0.0 && min.fract() == 0.0 && max.fract() == 0.0)
+                .then_some((min as u64, max as u64))
+        })
+    })
+}
+
+fn required_field_range(command: &str, flag: &str) -> (u64, u64) {
+    lookup_by_command(command)
+        .and_then(|op| op.fields.iter().find(|field| field.flag == flag))
+        .and_then(field_range)
+        .unwrap_or_else(|| panic!("{command} --{flag} requires registry range metadata"))
+}
+
+pub fn text_value_parser(
+    command: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = String> + Clone {
+    move |raw: &str| {
+        if raw.is_empty() || raw.eq_ignore_ascii_case("full") {
+            return Ok(raw.to_string());
+        }
+        let (min, max) = required_field_range(command, "text");
+        raw.parse::<u64>()
+            .ok()
+            .filter(|value| (min..=max).contains(value))
+            .map(|_| raw.to_string())
+            .ok_or_else(|| {
+                format!(
+                    "--text accepts bare, `full`, or {min}..={max}; use --text full or --text {max}"
+                )
+            })
+    }
+}
+
+pub fn optional_ranged_string_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = String> + Clone {
+    move |raw: &str| {
+        if raw.is_empty() {
+            return Ok(raw.to_string());
+        }
+        let (min, max) = required_field_range(command, flag);
+        raw.parse::<u64>()
+            .ok()
+            .filter(|value| (min..=max).contains(value))
+            .map(|_| raw.to_string())
+            .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
+    }
+}
+
+pub fn ranged_u32_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = u32> + Clone {
+    move |raw: &str| {
+        let (min, max) = required_field_range(command, flag);
+        raw.parse::<u32>()
+            .ok()
+            .filter(|value| (min..=max).contains(&u64::from(*value)))
+            .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
+    }
 }
 
 /// One Exa operation. Carries exactly what the contracts surface plus the internal

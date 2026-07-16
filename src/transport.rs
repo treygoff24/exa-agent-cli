@@ -26,9 +26,7 @@ pub fn ensure_network_allowed() -> Result<(), CliError> {
                 "usage_error",
                 "network access is disabled because EXA_AGENT_NO_NETWORK is set",
             )
-            .with_suggestion(
-                "unset EXA_AGENT_NO_NETWORK or use --dry-run for an offline request preview",
-            ),
+            .with_suggestion("unset EXA_AGENT_NO_NETWORK and retry"),
         ));
     }
     Ok(())

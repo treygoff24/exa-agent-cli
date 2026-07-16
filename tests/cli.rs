@@ -803,11 +803,28 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
             .as_str()
             .unwrap()
             .contains("EXA_AGENT_NO_NETWORK is set"));
-        assert!(error["error"]["suggestedCommand"]
-            .as_str()
-            .unwrap()
-            .contains("--dry-run"));
+        assert_eq!(
+            error["error"]["suggestedCommand"],
+            "unset EXA_AGENT_NO_NETWORK and retry"
+        );
         assert_eq!(fs::read(&credentials).unwrap(), original);
+    }
+}
+
+#[test]
+fn no_network_recovery_never_suggests_an_unavailable_dry_run() {
+    for args in [
+        &["auth", "status", "--dry-run"][..],
+        &["schema", "refresh", "--check", "--dry-run"][..],
+        &["doctor", "--online", "--dry-run"][..],
+    ] {
+        let output = run_with_env(args, &[("EXA_AGENT_NO_NETWORK", "1")]);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(
+            error["error"]["suggestedCommand"], "unset EXA_AGENT_NO_NETWORK and retry",
+            "args: {args:?}"
+        );
     }
 }
 
@@ -3013,6 +3030,30 @@ fn search_num_results_error_context_is_argument_order_independent() {
         .as_str()
         .unwrap()
         .contains("'rust async' --num-results 1"));
+}
+
+#[test]
+fn search_num_results_parse_error_preserves_all_correlation_id_forms() {
+    let equals = run(&[
+        "--correlation-id=corr-equals",
+        "search",
+        "rust async",
+        "--num-results",
+        "101",
+        "--compact",
+    ]);
+    assert_eq!(equals.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&equals)["request"]["correlationId"],
+        "corr-equals"
+    );
+
+    let env = run_with_env(
+        &["search", "rust async", "--num-results", "101", "--compact"],
+        &[("EXA_CORRELATION_ID", "corr-env")],
+    );
+    assert_eq!(env.status.code(), Some(1));
+    assert_eq!(stderr_json(&env)["request"]["correlationId"], "corr-env");
 }
 
 #[test]

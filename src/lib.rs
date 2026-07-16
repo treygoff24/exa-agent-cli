@@ -170,10 +170,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     } else {
                         transport::new_request_id()
                     };
-                    let correlation_id = argv
-                        .windows(2)
-                        .find(|pair| pair[0] == "--correlation-id")
-                        .map(|pair| pair[1].clone());
+                    let correlation_id = process_correlation_id();
                     let env = ErrorEnvelope::from_error(&err).with_context(
                         op.method.as_str(),
                         op.api_path,
@@ -269,6 +266,19 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             err.category() as i32
         }
     }
+}
+
+fn process_correlation_id() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--correlation-id" {
+            return args.next();
+        }
+        if let Some(value) = arg.strip_prefix("--correlation-id=") {
+            return Some(value.to_string());
+        }
+    }
+    std::env::var("EXA_CORRELATION_ID").ok()
 }
 
 fn search_num_results_args() -> Option<(String, String)> {

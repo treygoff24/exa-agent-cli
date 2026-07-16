@@ -44,7 +44,7 @@ The minimum supported Rust version is 1.85. Run the local MSRV gate before
 opening a Rust change:
 
 ```sh
-cargo +1.85 clippy --all-features --all-targets
+cargo +1.85 clippy --all-features --all-targets -- -D warnings
 ```
 
 ## Usage
@@ -62,8 +62,8 @@ exa-agent search "rust async runtimes" --num-results 5
 exa-agent answer "what changed in the EU AI Act in 2025?"
 
 # Page contents
-exa-agent contents https://exa.ai --text
-# Bare contents --text is uncapped; use --text N (1..10000) to cap deep reads.
+exa-agent contents https://exa.ai https://docs.exa.ai --text
+# URLs are positional (not --urls). Text accepts bare, full, or N (1..10000).
 
 # Code/docs context for a coding agent
 exa-agent context "how to stream SSE in Rust with ureq"

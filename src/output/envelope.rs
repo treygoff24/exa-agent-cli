@@ -241,13 +241,6 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         envelope["request"]["correlationId"] =
             serde_json::Value::String(correlation_id.to_string());
     }
-    if args.operation.is_some_and(|op| op.command() == "contents")
-        && envelope["data"].get("request").is_none()
-    {
-        envelope["outcome"] = serde_json::Value::String(
-            crate::transport::contents_outcome(&envelope["data"]).to_string(),
-        );
-    }
     envelope
 }
 
@@ -342,6 +335,7 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
             let mut value = serde_json::json!({
                 // `flag` is retained for one compatibility release.
                 "flag": field.flag,
+                "legacyFlagIsCliFlag": field.input_kind != Some(registry::InputKind::Argument),
                 "bodyPath": field.body_path,
                 "kind": field_kind(field.kind),
                 "required": field.required,
@@ -401,7 +395,6 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
             "text": {
                 "bare": { "maxCharacters": crate::DEFAULT_TEXT_MAX_CHARACTERS },
                 "full": true,
-                "zero": true,
             },
             "noHighlights": "metadata-only; suppresses the default highlights request",
         }),
@@ -409,7 +402,6 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
             "text": {
                 "bare": { "maxCharacters": crate::DEFAULT_TEXT_MAX_CHARACTERS },
                 "full": true,
-                "zero": true,
             }
         }),
         "contents" => serde_json::json!({
@@ -417,7 +409,6 @@ pub(crate) fn command_content_defaults(op: &OperationDef) -> serde_json::Value {
                 "bare": true,
                 "explicitCap": { "maxCharacters": "N" },
                 "full": true,
-                "zero": true,
             }
         }),
         _ => serde_json::Value::Null,

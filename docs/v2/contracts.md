@@ -94,7 +94,8 @@ than serialized as `null` — an agent should check for key presence, not compar
 
 Rules:
 - `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`.
-- `/contents` and the `fetch` macro add required `outcome`: `full` when content was returned for every requested item, `partial` when any requested item failed, and `no_content` when no item failed but no content was returned. This field is additive; the existing `ok`, warning, and exit-code behavior is unchanged (`url_failed` remains exit 0, `all_urls_failed` remains exit 10).
+- `/contents` and the `fetch` macro add required `outcome`: `full` only when every requested item has a successful status and returned content; `partial` when any item fails or a non-empty response under-returns content; and `no_content` when there are no failures and no returned content. This field is additive; the existing `ok`, warning, and exit-code behavior is unchanged (`url_failed` remains exit 0, `all_urls_failed` remains exit 10).
+- Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs; agents must never infer a `--urls` flag.
 - `count` is the number of primary items in this response (results, items, citations — whichever the command's `data` is a list of), or `null` for single-object responses. It is **always populated even when `data` is spilled** (`dataTruncated: true`, §9) so an agent can size a spilled result without reading the file.
 - `dataHash` is a sha256 over the serialized `data` (or `null` when spilled-without-hashing). For the offline/registry-derived surfaces it is deterministic; for live-index results it is a change-fingerprint for cheap dedup/drift detection, **not** a determinism guarantee (§12).
 - `nextActions[]` carries paste-ready follow-ups (`{ "description": "...", "command": "exa-agent agent runs events <id> --stream" }`) — populated on async-create and cursor-paginated commands (e.g. after `agent run`, the obvious `runs get`/`runs events`). Empty `[]` when there is no obvious next step. This is the success-path analogue of the error envelope's `suggestedCommand`.
@@ -303,7 +304,6 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
     { "flag": "--api-key" }, { "flag": "--api-key-stdin" }, { "flag": "--profile" }
   ],
   "outputFormats": ["human", "json", "ndjson", "raw"],
-  "env": ["EXA_API_KEY", "EXA_SERVICE_KEY", "EXA_PROFILE", "EXA_OUTPUT", "EXA_CORRELATION_ID", "EXA_ADMIN_BASE_URL", "EXA_AGENT_NO_NETWORK", "NO_COLOR", "SOURCE_DATE_EPOCH"],
   "configPrecedence": ["--api-key", "EXA_API_KEY", "keyring", "config-metadata"],
   "exitCodes": {
     "0": "success", "1": "usage", "2": "auth", "3": "config", "4": "network",
@@ -328,6 +328,10 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   }
 }
 ```
+
+`EXA_AGENT_NO_NETWORK=1` is an execution guard, not a `capabilities` field: it refuses all
+networked paths before credential resolution or transport creation while preserving dry-run and
+self-description commands.
 
 `errorCodes` is shown abbreviated above; the binary emits the **full** §5.1 dictionary. Each command entry carries the blast-radius triad an agent reasons about before calling: `readOnly` / `destructive` / `idempotencySensitive` (plus `requiresConfirm`, `dangerous`), all derived from the registry + overlay (D17). `build.commit`/`buildDate`/`target` are baked at compile time so an agent (or `doctor`) can detect a stale binary.
 

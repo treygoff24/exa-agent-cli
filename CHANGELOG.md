@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Wave 5 contract hardening: contents metadata distinguishes positional URLs,
+  contents/fetch envelopes report outcomes, and repo probes can forbid network.
+
 ## 0.3.0 — 2026-07-07
 
 Fix pass driven by a cold-start dogfood audit (`audit.md`): a fresh agent using only `--help`

@@ -62,6 +62,7 @@ fn capabilities_covers_every_operation() {
     );
     assert_eq!(caps["spec"]["title"], "Exa Public API");
     assert_eq!(caps["spec"]["version"], "2.0.0");
+    assert!(caps.get("env").is_none(), "env is not a capabilities field");
     assert_eq!(caps["errorCodes"]["not_authenticated"]["category"], "auth");
     assert_eq!(caps["errorCodes"]["not_authenticated"]["exit"], 2);
     assert_eq!(caps["errorCodes"]["not_authenticated"]["retryable"], false);
@@ -120,9 +121,17 @@ fn contents_registry_input_metadata_matches_clap() {
 
     for field in op.fields.iter().filter(|field| field.input_kind.is_some()) {
         let arg = match field.input_kind.expect("filtered above") {
-            registry::InputKind::Flag => contents
-                .get_arguments()
-                .find(|arg| arg.get_long() == Some(field.flag)),
+            registry::InputKind::Flag => {
+                let arg = contents
+                    .get_arguments()
+                    .find(|arg| arg.get_long() == Some(field.flag));
+                let long = arg.and_then(|arg| arg.get_long()).expect("clap long flag");
+                assert!(flag_input_name_matches_clap_long(
+                    field.input_name.expect("flag input name"),
+                    long
+                ));
+                arg
+            }
             registry::InputKind::Argument => contents.get_arguments().find(|arg| {
                 arg.get_long().is_none()
                     && arg
@@ -152,4 +161,13 @@ fn contents_registry_input_metadata_matches_clap() {
             );
         }
     }
+}
+
+fn flag_input_name_matches_clap_long(input_name: &str, long: &str) -> bool {
+    input_name == format!("--{long}")
+}
+
+#[test]
+fn flag_input_name_parity_detects_deliberate_registry_drift() {
+    assert!(!flag_input_name_matches_clap_long("--wrong", "text"));
 }

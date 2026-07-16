@@ -1,27 +1,23 @@
 {
   "argv": [
     "contents",
-    "https://full-a.test",
-    "https://full-b.test"
+    "https://incomplete-a.test",
+    "https://incomplete-b.test"
   ],
   "upstream": {
     "results": [
       {
-        "url": "https://full-a.test",
+        "url": "https://incomplete-a.test",
         "text": "a"
-      },
-      {
-        "url": "https://full-b.test",
-        "text": "b"
       }
     ],
     "statuses": [
       {
-        "id": "https://full-a.test",
+        "id": "https://incomplete-a.test",
         "status": "success"
       },
       {
-        "id": "https://full-b.test",
+        "id": "https://incomplete-b.test",
         "status": "success"
       }
     ]
@@ -42,30 +38,26 @@
       "profile": "default",
       "redacted": true
     },
-    "count": 2,
+    "count": 1,
     "data": {
       "results": [
         {
-          "url": "https://full-a.test",
+          "url": "https://incomplete-a.test",
           "text": "a"
-        },
-        {
-          "url": "https://full-b.test",
-          "text": "b"
         }
       ],
       "statuses": [
         {
-          "id": "https://full-a.test",
+          "id": "https://incomplete-a.test",
           "status": "success"
         },
         {
-          "id": "https://full-b.test",
+          "id": "https://incomplete-b.test",
           "status": "success"
         }
       ]
     },
-    "dataHash": "sha256:61b625a92ac2f5385ff4ae55d0c1c2935490e5b7bee3a46390b13a13a2f01d57",
+    "dataHash": "sha256:07d141a98e30eb585ea9427f67376d139a37033c89007d7b998cb4fd242f663a",
     "costDollars": {
       "total": 0.0
     },
@@ -78,7 +70,7 @@
     "dataTruncated": false
   },
   "expected": {
-    "outcome": "full",
+    "outcome": "partial",
     "exit": 0
   }
 }

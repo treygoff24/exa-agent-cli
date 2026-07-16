@@ -155,7 +155,7 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
         field.input_range?.1,
     );
     Some(format!(
-        "Optional character cap: {name} accepts {min}..={max}; omit its value, or use `full`/`0`, for uncapped text."
+        "Optional character cap: {name} accepts bare, `full`, or {min}..={max}."
     ))
 }
 

@@ -59,7 +59,7 @@ fn robot_docs_guide_mentions_core_agent_surfaces() {
         "robot-docs errors",
         ".data.results[]",
         "--include-domain",
-        "contents \\\"https://exa.ai\\\" --text 10000",
+        "contents \\\"https://exa.ai\\\" \\\"https://docs.exa.ai\\\" --text 10000",
         "EXA_AGENT_NO_NETWORK=1",
         "schema refresh --check",
     ] {

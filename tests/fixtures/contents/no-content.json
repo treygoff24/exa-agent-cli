@@ -1,13 +1,66 @@
 {
+  "argv": [
+    "contents",
+    "https://empty-a.test",
+    "https://empty-b.test"
+  ],
   "upstream": {
     "results": [],
     "statuses": [
-      { "id": "https://empty.test", "status": "success" }
+      {
+        "id": "https://empty-a.test",
+        "status": "success"
+      },
+      {
+        "id": "https://empty-b.test",
+        "status": "success"
+      }
     ]
+  },
+  "legacyEnvelope": {
+    "schema": "exa.cli.response.v1",
+    "ok": true,
+    "command": "contents",
+    "operation": {
+      "method": "POST",
+      "path": "/contents",
+      "operationId": "getContents",
+      "source": "exa-spec.json",
+      "sourceVersion": "2.0.0"
+    },
+    "request": {
+      "requestId": "req_legacy",
+      "profile": "default",
+      "redacted": true
+    },
+    "count": 0,
+    "data": {
+      "results": [],
+      "statuses": [
+        {
+          "id": "https://empty-a.test",
+          "status": "success"
+        },
+        {
+          "id": "https://empty-b.test",
+          "status": "success"
+        }
+      ]
+    },
+    "dataHash": "sha256:0c5046bf1cfbda3bb407b933779ccec405327b658df254be1e1871ce99f498c5",
+    "costDollars": {
+      "total": 0.0
+    },
+    "nextActions": [],
+    "warnings": [],
+    "diagnostics": {
+      "durationMs": 0,
+      "retries": 0
+    },
+    "dataTruncated": false
   },
   "expected": {
     "outcome": "no_content",
-    "exit": 0,
-    "warnings": []
+    "exit": 0
   }
 }

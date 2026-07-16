@@ -61,31 +61,43 @@ fn probe_connectivity_ok_on_any_status_fails_only_on_transport_error() {
 #[test]
 fn contents_outcome_distinguishes_empty_complete_partial_and_full() {
     assert_eq!(
-        contents_outcome(&serde_json::json!({
-            "results": [],
-            "statuses": [{"status": "success"}]
-        })),
+        contents_outcome(
+            &serde_json::json!({
+                "results": [],
+                "statuses": [{"status": "success"}]
+            }),
+            1
+        ),
         "no_content"
     );
     assert_eq!(
-        contents_outcome(&serde_json::json!({
-            "results": [{"url": "https://ok.test"}],
-            "statuses": [{"status": "error"}]
-        })),
+        contents_outcome(
+            &serde_json::json!({
+                "results": [{"url": "https://ok.test"}],
+                "statuses": [{"status": "error"}]
+            }),
+            1
+        ),
         "partial"
     );
     assert_eq!(
-        contents_outcome(&serde_json::json!({
-            "results": [],
-            "statuses": [{"status": "error"}]
-        })),
+        contents_outcome(
+            &serde_json::json!({
+                "results": [],
+                "statuses": [{"status": "error"}]
+            }),
+            1
+        ),
         "partial"
     );
     assert_eq!(
-        contents_outcome(&serde_json::json!({
-            "results": [{"url": "https://ok.test"}],
-            "statuses": [{"status": "success"}]
-        })),
+        contents_outcome(
+            &serde_json::json!({
+                "results": [{"url": "https://ok.test"}],
+                "statuses": [{"status": "success"}]
+            }),
+            1
+        ),
         "full"
     );
 }

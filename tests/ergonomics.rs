@@ -10,3 +10,5 @@ mod intent_mistakes;
 mod robot_docs;
 #[path = "ergonomics/scoring.rs"]
 mod scoring;
+#[path = "ergonomics/skill.rs"]
+mod skill;

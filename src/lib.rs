@@ -4521,8 +4521,7 @@ fn normalize_text_flag(op: &registry::OperationDef, raw: &str) -> Result<String,
     match lower.as_str() {
         "" if command == "contents" => return Ok("true".to_string()),
         "" => return Ok(text_cap_json(DEFAULT_TEXT_MAX_CHARACTERS.into())),
-        "full" | "0" | "true" => return Ok("true".to_string()),
-        "false" => return Ok("false".to_string()),
+        "full" => return Ok("true".to_string()),
         _ => {}
     }
 
@@ -4540,10 +4539,10 @@ fn invalid_text_cap(op: &registry::OperationDef, raw: &str) -> CliError {
     let command = op.command();
     let message = if command == "contents" {
         format!(
-            "`--text` must be a character cap from {min} to {max}; use `--text full` for uncapped text or `--text {max}` for the largest cap"
+            "`--text` accepts bare, `full`, or a character cap from {min} to {max}; use `--text full` for uncapped text or `--text {max}` for the largest cap"
         )
     } else {
-        format!("`--text` must be a character cap from {min} to {max}, `full`, or `0`")
+        format!("`--text` accepts bare, `full`, or a character cap from {min} to {max}")
     };
     CliError::Usage(
         Diag::new("invalid_value", message)
@@ -5527,8 +5526,14 @@ fn execute_typed_live<T: Transport>(
     append_response_warnings(spec.op, &body, &data, &mut warnings);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let exit_code = if spec.op.mixed_status_exit {
-        transport::contents_mixed_status_exit_code(&data)
+    let requested_contents_count = spec.op.mixed_status_exit.then(|| {
+        contents_inputs_from_body(&body)
+            .expect("validated contents body")
+            .1
+            .len()
+    });
+    let exit_code = if let Some(requested_count) = requested_contents_count {
+        transport::contents_mixed_status_exit_code(&data, requested_count)
     } else {
         0
     };
@@ -5547,6 +5552,11 @@ fn execute_typed_live<T: Transport>(
         duration_ms: result.duration_ms,
         warnings: &warnings,
     });
+    if let Some(requested_count) = requested_contents_count {
+        envelope["outcome"] = serde_json::Value::String(
+            transport::contents_outcome(&envelope["data"], requested_count).to_string(),
+        );
+    }
     apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     emit_response_value(&envelope, globals, execution.pretty);
     Ok(exit_code)
@@ -6438,9 +6448,9 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
-                    "Quote URLs: `exa-agent contents \"https://exa.ai\" --text 10000 --json`; numeric contents text caps are 1..10000, while `--text full` requests uncapped text.",
+                    "Contents URLs are positional, never `--urls`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
-                    "Contents/fetch success envelopes add outcome no_content, partial, or full; all-URL failures retain exit 10 and warning code all_urls_failed, while partial URL failures retain exit 0.",
+                    "Contents/fetch success envelopes add outcome no_content (no failures and no returned content), partial, or full (content for every requested item); all-URL failures retain exit 10 and warning code all_urls_failed, while partial URL failures retain exit 0.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
                     "Set EXA_AGENT_NO_NETWORK=1 to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
@@ -6492,7 +6502,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "exa-agent capabilities --compact",
                     "exa-agent capabilities search --compact",
                     "exa-agent search \"AI infrastructure news\" --include-domain \"exa.ai\" --num-results 5 --dry-run --print-request --compact",
-                    "exa-agent contents \"https://exa.ai\" --text 10000 --dry-run --print-request --compact",
+                    "exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --dry-run --print-request --compact",
                     "exa-agent team info --dry-run --print-request --compact"
                 ],
             }),

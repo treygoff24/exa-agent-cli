@@ -431,7 +431,7 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub num_results: Option<String>,
-    /// Return text in each result. Bare --text caps search text at 1500 chars/result; default highlights are usually smaller. Use --text full or --text 0 for uncapped.
+    /// Return text in each result. Bare --text caps search text at 1500 chars/result; default highlights are usually smaller. Use --text full for uncapped.
     #[arg(
         long,
         value_name = "N|full",
@@ -581,7 +581,7 @@ pub struct SimilarArgs {
     pub exclude_source_domain: bool,
     #[arg(long, value_enum, ignore_case = true)]
     pub category: Option<SearchCategory>,
-    /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full or --text 0 for uncapped.
+    /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full for uncapped.
     #[arg(
         long,
         value_name = "N|full",

@@ -1004,7 +1004,7 @@ pub fn primary_count(data: &Value) -> Option<u64> {
 /// `/contents` may return HTTP 200 with per-item failures in `statuses[]` (contracts §11).
 /// A total per-URL failure exits 10 after the success envelope is emitted; mixed success/error
 /// stays exit 0 and is represented by warnings.
-pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
+pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> i32 {
     let Some(statuses) = data.get("statuses").and_then(Value::as_array) else {
         return 0;
     };
@@ -1017,37 +1017,53 @@ pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
         .or_else(|| data.get("data"))
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    if !statuses.is_empty() && failed == statuses.len() && results_count == 0 {
+    if requested_count > 0
+        && statuses.len() == requested_count
+        && failed == requested_count
+        && results_count == 0
+    {
         10
     } else {
         0
     }
 }
 
-/// Classify the successful `/contents` payload once, independently of its exit code.
-/// A failed URL is partial even when every URL failed (that case still exits 10 below).
-pub fn contents_outcome(data: &Value) -> &'static str {
+/// Classify a `/contents` response against the request that produced it.
+/// `full` means every requested item has both a successful status and returned content.
+pub fn contents_outcome(data: &Value, requested_count: usize) -> &'static str {
     let results_count = data
         .get("results")
         .or_else(|| data.get("data"))
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let failed = data
+    let statuses = data
         .get("statuses")
         .and_then(Value::as_array)
-        .map(|statuses| {
-            statuses
-                .iter()
-                .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
-                .count()
-        })
-        .unwrap_or(0);
+        .map(Vec::as_slice);
+    let failed = statuses.map_or(0, |statuses| {
+        statuses
+            .iter()
+            .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
+            .count()
+    });
+    let successful = statuses.map_or(0, |statuses| {
+        statuses
+            .iter()
+            .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("success"))
+            .count()
+    });
     if failed > 0 {
         "partial"
     } else if results_count == 0 {
         "no_content"
-    } else {
+    } else if results_count == requested_count
+        && statuses.is_none_or(|statuses| {
+            statuses.len() == requested_count && successful == requested_count
+        })
+    {
         "full"
+    } else {
+        "partial"
     }
 }
 
@@ -1747,19 +1763,19 @@ mod tests {
                 { "id": "https://b.test", "status": "error" }
             ]
         });
-        assert_eq!(contents_mixed_status_exit_code(&mixed), 0);
+        assert_eq!(contents_mixed_status_exit_code(&mixed, 2), 0);
 
         let all_ok = serde_json::json!({
             "results": [{ "url": "https://a.test" }],
             "statuses": [{ "id": "https://a.test", "status": "success" }]
         });
-        assert_eq!(contents_mixed_status_exit_code(&all_ok), 0);
+        assert_eq!(contents_mixed_status_exit_code(&all_ok, 1), 0);
 
         let all_err = serde_json::json!({
             "results": [],
             "statuses": [{ "id": "https://a.test", "status": "error" }]
         });
-        assert_eq!(contents_mixed_status_exit_code(&all_err), 10);
+        assert_eq!(contents_mixed_status_exit_code(&all_err, 1), 10);
     }
 
     #[test]

@@ -1327,7 +1327,7 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--text [<N|full>]"), "{help}");
-    assert!(help.contains("--text accepts 1..=10000"), "{help}");
+    assert!(help.contains("--text accepts bare, `full`, or"), "{help}");
 
     let dry_run = run_ok_json(&[
         "contents",
@@ -1364,28 +1364,78 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
         assert_eq!(text["arity"], serde_json::json!({"min": 0, "max": 1}));
         assert_eq!(text["range"], serde_json::json!({"min": 1, "max": 10000}));
     }
+
+    let contents = run_ok_json(&["capabilities", "contents", "--compact"]);
+    let urls = contents["command"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["flag"] == "urls")
+        .expect("urls field");
+    assert_eq!(urls["inputKind"], "argument");
+    assert_eq!(urls["name"], "URLS");
+    assert_eq!(urls["legacyFlagIsCliFlag"], false);
+    assert!(contents["command"]["contentDefaults"]["text"]
+        .get("zero")
+        .is_none());
 }
 
 #[test]
-fn contents_text_invalid_values_fail_before_network_with_cap_suggestions() {
+fn contents_text_forms_match_help_and_reject_legacy_boolean_spellings() {
+    for (raw, expected) in [
+        ("full", serde_json::json!(true)),
+        ("1", serde_json::json!({"maxCharacters": 1})),
+        ("10000", serde_json::json!({"maxCharacters": 10000})),
+    ] {
+        let json = run_ok_json(&[
+            "contents",
+            "https://example.com",
+            "--text",
+            raw,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(json["data"]["request"]["body"]["text"], expected, "{raw}");
+    }
+
     for args in [
         [
             "contents",
             "https://example.com",
             "--text",
-            "10001",
-            "--api-key",
-            "test-key-abcdef12",
-            "--base-url",
-            "http://127.0.0.1:9",
+            "0",
             "--compact",
         ]
         .as_slice(),
         [
             "contents",
             "https://example.com",
-            "--body",
-            r#"{"text":{"maxCharacters":"not-a-number"}}"#,
+            "--text",
+            "true",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "false",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "-1",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "10001",
             "--api-key",
             "test-key-abcdef12",
             "--base-url",
@@ -1400,6 +1450,7 @@ fn contents_text_invalid_values_fail_before_network_with_cap_suggestions() {
         let error = stderr_json(&output);
         assert_eq!(error["error"]["code"], "invalid_value", "{args:?}");
         let rendered = error["error"]["message"].as_str().unwrap();
+        assert!(rendered.contains("bare"), "{rendered}");
         assert!(rendered.contains("--text full"), "{rendered}");
         assert!(rendered.contains("--text 10000"), "{rendered}");
     }
@@ -1494,18 +1545,20 @@ fn contents_all_url_failures_warn_and_exit_partial() {
 }
 
 #[test]
-fn contents_compatibility_fixtures_preserve_warnings_and_add_outcome() {
-    for (fixture_name, command_name, url) in [
-        ("no-content", "contents", "https://empty.test"),
-        ("partial", "contents", "https://bad.test"),
-        ("all-failed", "fetch", "https://missing-a.test"),
-        ("full", "fetch", "https://full.test"),
+fn contents_compatibility_fixtures_preserve_frozen_legacy_envelopes() {
+    for fixture_name in [
+        "no-content",
+        "partial",
+        "all-failed",
+        "full",
+        "incomplete-success",
     ] {
         let fixture: serde_json::Value = serde_json::from_str(match fixture_name {
             "no-content" => include_str!("fixtures/contents/no-content.json"),
             "partial" => include_str!("fixtures/contents/partial.json"),
             "all-failed" => include_str!("fixtures/contents/all-failed.json"),
             "full" => include_str!("fixtures/contents/full.json"),
+            "incomplete-success" => include_str!("fixtures/contents/incomplete-success.json"),
             _ => unreachable!(),
         })
         .expect("contents fixture JSON");
@@ -1515,15 +1568,21 @@ fn contents_compatibility_fixtures_preserve_warnings_and_add_outcome() {
                 .into_boxed_slice(),
         );
         let (base_url, server) = local_json_server(|_| {}, upstream);
-        let output = run(&[
-            command_name,
-            url,
-            "--api-key",
-            "test-key-abcdef12",
-            "--base-url",
-            base_url.as_str(),
-            "--compact",
+        let mut args: Vec<String> = fixture["argv"]
+            .as_array()
+            .expect("fixture argv")
+            .iter()
+            .map(|value| value.as_str().expect("argv string").to_string())
+            .collect();
+        args.extend([
+            "--api-key".to_string(),
+            "test-key-abcdef12".to_string(),
+            "--base-url".to_string(),
+            base_url,
+            "--compact".to_string(),
         ]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = run(&args);
         server.join().expect("local test server panicked");
 
         let expected = &fixture["expected"];
@@ -1536,28 +1595,16 @@ fn contents_compatibility_fixtures_preserve_warnings_and_add_outcome() {
             "unexpected stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(envelope["schema"], "exa.cli.response.v1");
-        assert_eq!(envelope["ok"], true);
-        assert_eq!(envelope["command"], "contents");
-        assert_eq!(envelope["operation"]["method"], "POST");
-        assert_eq!(envelope["operation"]["path"], "/contents");
-        assert_eq!(envelope["data"], fixture["upstream"]);
-        assert_eq!(envelope["outcome"], expected["outcome"]);
-        assert_eq!(envelope["warnings"], expected["warnings"]);
-        for key in [
-            "count",
-            "dataHash",
-            "costDollars",
-            "nextActions",
-            "diagnostics",
-            "dataTruncated",
-        ] {
-            assert!(
-                envelope.get(key).is_some(),
-                "compatibility envelope missing {key}"
-            );
-        }
+        let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        envelope["request"]["requestId"] = serde_json::json!("req_legacy");
+        envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
+        let mut expected_envelope = fixture["legacyEnvelope"].clone();
+        expected_envelope["outcome"] = expected["outcome"].clone();
+        assert_eq!(
+            serde_json::to_string(&envelope).unwrap(),
+            serde_json::to_string(&expected_envelope).unwrap(),
+            "{fixture_name} changed more than the intended outcome field"
+        );
     }
 }
 
@@ -1572,7 +1619,7 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
     );
     let (base_url, server) = local_json_server(|_| {}, upstream);
     let output = run(&[
-        "fetch",
+        "contents",
         "https://opaque.test",
         "--api-key",
         "test-key-abcdef12",
@@ -1593,6 +1640,22 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
     assert_eq!(
         warning["suggestedCommand"],
         fixture["expected"]["suggestedCommand"]
+    );
+    let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    envelope["request"]["requestId"] = serde_json::json!("req_legacy");
+    envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
+    let mut expected = fixture["legacyEnvelope"].clone();
+    expected["outcome"] = fixture["expected"]["outcome"].clone();
+    let warning = &mut expected["warnings"][0];
+    warning["message"] = serde_json::json!(
+        "all requested URLs failed: https://opaque.test=upstream_reason_unavailable"
+    );
+    warning["statuses"] = serde_json::json!(["https://opaque.test=upstream_reason_unavailable"]);
+    warning["suggestedCommand"] = fixture["expected"]["suggestedCommand"].clone();
+    warning["reason"] = fixture["expected"]["reason"].clone();
+    assert_eq!(
+        serde_json::to_string(&envelope).unwrap(),
+        serde_json::to_string(&expected).unwrap()
     );
 }
 
@@ -6373,6 +6436,7 @@ fn fetch_live_response_does_not_include_macro_metadata() {
     let upstream: serde_json::Value = serde_json::from_slice(upstream).unwrap();
     assert_eq!(json["command"], "contents");
     assert_eq!(json["data"], upstream);
+    assert_eq!(json["outcome"], "full");
     assert!(json["data"].get("expandsTo").is_none());
     assert!(json["data"].get("expands_to").is_none());
     assert_eq!(json["dataHash"], transport::data_hash(&upstream).unwrap());

@@ -1,24 +1,92 @@
 {
+  "argv": [
+    "contents",
+    "https://partial-a.test",
+    "https://partial-b.test"
+  ],
   "upstream": {
     "results": [
-      { "url": "https://ok.test", "text": "ok" }
+      {
+        "url": "https://partial-a.test",
+        "text": "a"
+      }
     ],
     "statuses": [
-      { "id": "https://ok.test", "status": "success" },
-      { "id": "https://bad.test", "status": "error", "error": { "tag": "NOT_FOUND" } }
+      {
+        "id": "https://partial-a.test",
+        "status": "success"
+      },
+      {
+        "id": "https://partial-b.test",
+        "status": "error",
+        "error": {
+          "tag": "NOT_FOUND"
+        }
+      }
     ]
   },
-  "expected": {
-    "outcome": "partial",
-    "exit": 0,
+  "legacyEnvelope": {
+    "schema": "exa.cli.response.v1",
+    "ok": true,
+    "command": "contents",
+    "operation": {
+      "method": "POST",
+      "path": "/contents",
+      "operationId": "getContents",
+      "source": "exa-spec.json",
+      "sourceVersion": "2.0.0"
+    },
+    "request": {
+      "requestId": "req_legacy",
+      "profile": "default",
+      "redacted": true
+    },
+    "count": 1,
+    "data": {
+      "results": [
+        {
+          "url": "https://partial-a.test",
+          "text": "a"
+        }
+      ],
+      "statuses": [
+        {
+          "id": "https://partial-a.test",
+          "status": "success"
+        },
+        {
+          "id": "https://partial-b.test",
+          "status": "error",
+          "error": {
+            "tag": "NOT_FOUND"
+          }
+        }
+      ]
+    },
+    "dataHash": "sha256:876e5871628eda2be123e279a4fc299e5d266fb4fc9748d9610bd1cefa4b9da2",
+    "costDollars": {
+      "total": 0.0
+    },
+    "nextActions": [],
     "warnings": [
       {
         "code": "url_failed",
-        "message": "requested URL failed: https://bad.test=NOT_FOUND",
-        "url": "https://bad.test",
+        "message": "requested URL failed: https://partial-b.test=NOT_FOUND",
+        "url": "https://partial-b.test",
         "status": "error",
-        "error": { "tag": "NOT_FOUND" }
+        "error": {
+          "tag": "NOT_FOUND"
+        }
       }
-    ]
+    ],
+    "diagnostics": {
+      "durationMs": 0,
+      "retries": 0
+    },
+    "dataTruncated": false
+  },
+  "expected": {
+    "outcome": "partial",
+    "exit": 0
   }
 }

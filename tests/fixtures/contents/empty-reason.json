@@ -1,9 +1,64 @@
 {
+  "argv": [
+    "contents",
+    "https://opaque.test"
+  ],
   "upstream": {
     "results": [],
     "statuses": [
-      { "id": "https://opaque.test", "status": "error", "error": {} }
+      {
+        "id": "https://opaque.test",
+        "status": "error",
+        "error": {}
+      }
     ]
+  },
+  "legacyEnvelope": {
+    "schema": "exa.cli.response.v1",
+    "ok": true,
+    "command": "contents",
+    "operation": {
+      "method": "POST",
+      "path": "/contents",
+      "operationId": "getContents",
+      "source": "exa-spec.json",
+      "sourceVersion": "2.0.0"
+    },
+    "request": {
+      "requestId": "req_legacy",
+      "profile": "default",
+      "redacted": true
+    },
+    "count": 0,
+    "data": {
+      "results": [],
+      "statuses": [
+        {
+          "id": "https://opaque.test",
+          "status": "error",
+          "error": {}
+        }
+      ]
+    },
+    "dataHash": "sha256:5f89cf450d600fd16b8d432e9d2da71b26b86e606fdd557b2a4d74563839a642",
+    "costDollars": {
+      "total": 0.0
+    },
+    "nextActions": [],
+    "warnings": [
+      {
+        "code": "all_urls_failed",
+        "message": "all requested URLs failed: https://opaque.test=error",
+        "statuses": [
+          "https://opaque.test=error"
+        ]
+      }
+    ],
+    "diagnostics": {
+      "durationMs": 0,
+      "retries": 0
+    },
+    "dataTruncated": false
   },
   "expected": {
     "outcome": "partial",

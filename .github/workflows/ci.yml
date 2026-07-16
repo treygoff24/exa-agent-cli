@@ -18,7 +18,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: MSRV clippy
-        run: cargo +1.85 clippy --locked --all-features --all-targets -- -D warnings
+        run: cargo clippy --locked --all-features --all-targets -- -D warnings
   test:
     strategy:
       fail-fast: false

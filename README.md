@@ -47,9 +47,8 @@ opening a Rust change:
 cargo +1.85 clippy --all-features --all-targets
 ```
 
-After a push, CI confirms the stricter
-`cargo +1.85 clippy --locked --all-features --all-targets -- -D warnings`
-variant.
+After installing Rust 1.85, CI confirms the stricter
+`cargo clippy --locked --all-features --all-targets -- -D warnings` variant.
 
 ## Usage
 

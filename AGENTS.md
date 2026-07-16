@@ -114,4 +114,4 @@ If anything in this file disagrees with `capabilities` output, trust `capabiliti
 
 ## Maintainers
 
-Release process and CI are driven by cargo-dist (`dist-workspace.toml`); the design record lives under `docs/v2/`, starting with `docs/v2/decisions.md`.
+Release process and CI are driven by cargo-dist (`dist-workspace.toml`); the design record lives under `docs/v2/`, starting with `docs/v2/decisions.md`. Local working docs (audits, reviews, plans, journals, research) belong in `work/`, which is gitignored — keep them out of the repo; `work/generated/` is the tracked exception pinned by tests.

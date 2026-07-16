@@ -24,7 +24,7 @@ All notable changes to this project are documented here.
 
 ## 0.3.0 — 2026-07-07
 
-Fix pass driven by a cold-start dogfood audit (`audit.md`): a fresh agent using only `--help`
+Fix pass driven by a cold-start dogfood audit: a fresh agent using only `--help`
 and error messages hit a first-call failure on `context`, two entirely dead command trees
 (`websets`, `team`), and error messages that destroyed the one piece of information an agent
 needed to recover. All four are fixed.

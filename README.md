@@ -44,8 +44,10 @@ The minimum supported Rust version is 1.85. Run the local MSRV gate before
 opening a Rust change:
 
 ```sh
-cargo +1.85 clippy --locked --all-features --all-targets -- -D warnings
+cargo +1.85 clippy --all-features --all-targets
 ```
+
+CI runs the same MSRV check with `--locked` and `-D warnings`.
 
 ## Usage
 

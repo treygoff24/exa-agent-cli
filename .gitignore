@@ -14,3 +14,12 @@
 # Project-local Claude scaffolding is currently empty; if you later add
 # committable project agents/skills, un-ignore the specific path below.
 /.claude/
+
+# work/ is the local scratch home for working docs (audits, reviews, plans,
+# journals, research) — kept out of the repo. Exception: work/generated/ is
+# tracked because tests and xtask pin the generated skill golden.
+/work/*
+!/work/generated/
+
+# Agent friction log, written by local tooling convention; kept local.
+/.papercuts.jsonl

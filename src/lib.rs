@@ -6912,18 +6912,14 @@ fn validate_positive_integer_field(
         return None;
     }
     let field = format!("{parent_field}.{child_field}");
-    let message = if parent_field == "text" && flag == "text" && max.is_some() {
-        let max = max.expect("checked above");
-        format!(
+    let message = match max {
+        Some(max) if parent_field == "text" && flag == "text" => format!(
             "{parent_field}.{child_field} must be an integer from {min} to {max} or null; use --text full for uncapped text or --text {max} for the largest cap"
-        )
-    } else {
-        match max {
-            Some(max) => format!(
-                "{parent_field}.{child_field} must be an integer from {min} to {max} or null"
-            ),
-            None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
-        }
+        ),
+        Some(max) => format!(
+            "{parent_field}.{child_field} must be an integer from {min} to {max} or null"
+        ),
+        None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
     };
     let mut issue = serde_json::json!({
         "issue": "invalid_value",

@@ -1244,6 +1244,90 @@ fn contents_bare_text_stays_uncapped() {
 }
 
 #[test]
+fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
+    let help = run(&["contents", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--text [<N|full>]"), "{help}");
+    assert!(help.contains("--text accepts 1..=10000"), "{help}");
+
+    let dry_run = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--text",
+        "10000",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        dry_run["data"]["request"]["body"]["text"]["maxCharacters"],
+        10000
+    );
+
+    for args in [
+        ["capabilities", "contents", "--compact"].as_slice(),
+        ["schema", "show", "contents", "--compact"].as_slice(),
+    ] {
+        let json = run_ok_json(args);
+        let fields = json
+            .pointer("/command/fields")
+            .or_else(|| json.pointer("/operation/fields"))
+            .expect("contents fields");
+        let text = fields
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["flag"] == "text")
+            .expect("text field");
+        assert_eq!(text["flag"], "text"); // legacy compatibility key
+        assert_eq!(text["inputKind"], "flag");
+        assert_eq!(text["name"], "--text");
+        assert_eq!(text["valueName"], "N|full");
+        assert_eq!(text["arity"], serde_json::json!({"min": 0, "max": 1}));
+        assert_eq!(text["range"], serde_json::json!({"min": 1, "max": 10000}));
+    }
+}
+
+#[test]
+fn contents_text_invalid_values_fail_before_network_with_cap_suggestions() {
+    for args in [
+        [
+            "contents",
+            "https://example.com",
+            "--text",
+            "10001",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--compact",
+        ]
+        .as_slice(),
+        [
+            "contents",
+            "https://example.com",
+            "--body",
+            r#"{"text":{"maxCharacters":"not-a-number"}}"#,
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--compact",
+        ]
+        .as_slice(),
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "invalid_value", "{args:?}");
+        let rendered = error["error"]["message"].as_str().unwrap();
+        assert!(rendered.contains("--text full"), "{rendered}");
+        assert!(rendered.contains("--text 10000"), "{rendered}");
+    }
+}
+
+#[test]
 fn contents_partial_url_failures_warn_and_exit_zero() {
     let response = br#"{
         "results":[{"url":"https://a.test","text":"ok"}],

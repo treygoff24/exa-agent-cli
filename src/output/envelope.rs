@@ -328,16 +328,35 @@ fn command_entry(op: &OperationDef) -> serde_json::Value {
     })
 }
 
-fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
+pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
     op.fields
         .iter()
         .map(|field| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
+                // `flag` is retained for one compatibility release.
                 "flag": field.flag,
                 "bodyPath": field.body_path,
                 "kind": field_kind(field.kind),
                 "required": field.required,
-            })
+            });
+            if let Some(input_kind) = field.input_kind {
+                value["inputKind"] = serde_json::Value::String(input_kind.as_str().to_string());
+                value["name"] = serde_json::Value::String(
+                    field
+                        .input_name
+                        .expect("input metadata has a name")
+                        .to_string(),
+                );
+                let arity = field.arity.expect("input metadata has arity");
+                value["arity"] = serde_json::json!({ "min": arity.min, "max": arity.max });
+                if let Some(value_name) = field.value_name {
+                    value["valueName"] = serde_json::Value::String(value_name.to_string());
+                }
+                if let Some((min, max)) = field.input_range {
+                    value["range"] = serde_json::json!({ "min": min, "max": max });
+                }
+            }
+            value
         })
         .collect()
 }

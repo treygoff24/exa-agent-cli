@@ -528,20 +528,34 @@ impl SearchArgs {
 #[derive(Args, Debug)]
 pub struct ContentsArgs {
     /// URLs to fetch.
-    #[arg(required_unless_present = "ids", conflicts_with = "ids", num_args = 1..)]
+    #[arg(
+        required_unless_present = "ids",
+        conflicts_with = "ids",
+        value_name = crate::registry::field_value_name("contents", "urls").expect("contents urls metadata"),
+        num_args = 1..
+    )]
     pub urls: Vec<String>,
-    #[arg(long, conflicts_with = "urls", num_args = 1..)]
-    pub ids: Vec<String>,
-    /// Return text. Bare --text is uncapped for contents; use --text N to cap, --text full/0 for uncapped.
     #[arg(
         long,
-        value_name = "N|full",
+        conflicts_with = "urls",
+        value_name = crate::registry::field_value_name("contents", "ids").expect("contents ids metadata"),
+        num_args = 1..
+    )]
+    pub ids: Vec<String>,
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("contents", "text").expect("contents text metadata"),
+        value_name = crate::registry::field_value_name("contents", "text").expect("contents text metadata"),
         num_args = 0..=1,
         default_missing_value = "",
         allow_negative_numbers = true
     )]
     pub text: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = crate::registry::field_value_name("contents", "summary-query").expect("contents summary-query metadata"),
+        num_args = 1
+    )]
     pub summary_query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub chunk_size: Option<u32>,

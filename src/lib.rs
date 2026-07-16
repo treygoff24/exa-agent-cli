@@ -471,8 +471,7 @@ fn build_search_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     validate_search_intent_args(args)?;
-    let flag_values =
-        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), &args.query)?;
+    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
@@ -913,8 +912,7 @@ fn build_contents_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["contents"]).expect("contents is in the registry");
-    let flag_values =
-        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), "")?;
+    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), "")?;
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_contents_body_shape(&spec.body)?;
     validate_content_options(op, &spec.body)?;
@@ -938,7 +936,7 @@ fn validate_content_options(
     op: &'static registry::OperationDef,
     body: &serde_json::Value,
 ) -> Result<(), CliError> {
-    let Some(details) = content_option_shape_issue(op.command().as_str(), body) else {
+    let Some(details) = content_option_shape_issue(op, body) else {
         return Ok(());
     };
     Err(registry_validation_error(ValidateInputOutcome {
@@ -966,8 +964,7 @@ fn build_similar_spec(
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
-    let flag_values =
-        normalize_content_flag_values(op.command().as_str(), args.into_flag_values(), "")?;
+    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), "")?;
     let spec = build_typed_spec(op, &flag_values, globals)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
@@ -4495,15 +4492,16 @@ fn typed_preview_headers(
 }
 
 fn normalize_content_flag_values(
-    command: &str,
+    op: &registry::OperationDef,
     flag_values: Vec<(&'static str, Option<String>)>,
     query: &str,
 ) -> Result<Vec<(&'static str, Option<String>)>, CliError> {
+    let command = op.command();
     flag_values
         .into_iter()
         .map(|(flag, value)| {
-            let value = match (command, flag, value) {
-                (_, "text", Some(raw)) => Some(normalize_text_flag(command, &raw)?),
+            let value = match (command.as_str(), flag, value) {
+                (_, "text", Some(raw)) => Some(normalize_text_flag(op, &raw)?),
                 ("search", "highlights", Some(raw)) => {
                     Some(normalize_highlights_flag(&raw, query)?)
                 }
@@ -4514,40 +4512,52 @@ fn normalize_content_flag_values(
         .collect()
 }
 
-fn normalize_text_flag(command: &str, raw: &str) -> Result<String, CliError> {
+fn normalize_text_flag(op: &registry::OperationDef, raw: &str) -> Result<String, CliError> {
+    let command = op.command();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
         "" if command == "contents" => return Ok("true".to_string()),
-        "" => return Ok(text_cap_json(DEFAULT_TEXT_MAX_CHARACTERS)),
+        "" => return Ok(text_cap_json(DEFAULT_TEXT_MAX_CHARACTERS.into())),
         "full" | "0" | "true" => return Ok("true".to_string()),
         "false" => return Ok("false".to_string()),
         _ => {}
     }
 
-    let cap = raw.parse::<u32>().map_err(|_| invalid_text_cap(raw))?;
-    if (1..=MAX_TEXT_MAX_CHARACTERS).contains(&cap) {
+    let (min, max) = text_input_range(op);
+    let cap = raw.parse::<u64>().map_err(|_| invalid_text_cap(op, raw))?;
+    if (min..=max).contains(&cap) {
         Ok(text_cap_json(cap))
     } else {
-        Err(invalid_text_cap(raw))
+        Err(invalid_text_cap(op, raw))
     }
 }
 
-fn invalid_text_cap(raw: &str) -> CliError {
-    CliError::Usage(
-        Diag::new(
-            "invalid_value",
-            "`--text` must be a character cap from 1 to 10000, `full`, or `0`",
+fn invalid_text_cap(op: &registry::OperationDef, raw: &str) -> CliError {
+    let (min, max) = text_input_range(op);
+    let command = op.command();
+    let message = if command == "contents" {
+        format!(
+            "`--text` must be a character cap from {min} to {max}; use `--text full` for uncapped text or `--text {max}` for the largest cap"
         )
-        .with_details(serde_json::json!({
-            "received": raw,
-            "min": 1,
-            "max": MAX_TEXT_MAX_CHARACTERS,
-        }))
-        .with_suggestion("exa-agent search <query> --text 1500"),
+    } else {
+        format!("`--text` must be a character cap from {min} to {max}, `full`, or `0`")
+    };
+    CliError::Usage(
+        Diag::new("invalid_value", message)
+            .with_details(serde_json::json!({
+                "received": raw,
+                "min": min,
+                "max": max,
+            }))
+            .with_suggestion(if command == "contents" {
+                format!("exa-agent contents <url-or-id> --text {max}")
+            } else {
+                "exa-agent search <query> --text 1500".to_string()
+            }),
     )
 }
 
-fn text_cap_json(cap: u32) -> String {
+fn text_cap_json(cap: u64) -> String {
     serde_json::json!({ "maxCharacters": cap }).to_string()
 }
 
@@ -6470,11 +6480,7 @@ fn operation_schema(op: &registry::OperationDef) -> serde_json::Value {
         "destructive": op.destructive(),
         "idempotencySensitive": op.idempotency_sensitive,
         "deprecated": op.deprecated,
-        "fields": op.fields.iter().map(|field| serde_json::json!({
-            "flag": field.flag,
-            "bodyPath": field.body_path,
-            "required": field.required,
-        })).collect::<Vec<_>>(),
+        "fields": output::envelope::command_fields(op),
         "contentDefaults": command_content_defaults(op),
     })
 }
@@ -6574,7 +6580,7 @@ fn validate_registry_input(
         }
     }
 
-    if let Some(issue) = content_option_shape_issue(op.command().as_str(), body) {
+    if let Some(issue) = content_option_shape_issue(op, body) {
         return ValidateInputOutcome {
             valid: serde_json::Value::Bool(false),
             details: Some(issue),
@@ -6641,14 +6647,15 @@ fn validate_registry_input(
 }
 
 fn content_option_shape_issue(
-    command: &str,
+    op: &registry::OperationDef,
     body: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    match command {
+    match op.command().as_str() {
         "search" | "similar" => validate_text_option_shape(
             body_value_at_path(body, "contents.text"),
             "contents.text",
             "text",
+            text_input_range(op),
         )
         .or_else(|| {
             validate_highlights_option_shape(
@@ -6657,7 +6664,12 @@ fn content_option_shape_issue(
                 "highlights",
             )
         }),
-        "contents" => validate_text_option_shape(body_value_at_path(body, "text"), "text", "text"),
+        "contents" => validate_text_option_shape(
+            body_value_at_path(body, "text"),
+            "text",
+            "text",
+            text_input_range(op),
+        ),
         _ => None,
     }
 }
@@ -6666,6 +6678,7 @@ fn validate_text_option_shape(
     value: Option<&serde_json::Value>,
     field: &str,
     flag: &str,
+    range: (u64, u64),
 ) -> Option<serde_json::Value> {
     let value = value?;
     if value.is_null() || value.is_boolean() {
@@ -6684,9 +6697,17 @@ fn validate_text_option_shape(
         field,
         "maxCharacters",
         flag,
-        1,
-        Some(10_000),
+        range.0,
+        Some(range.1),
     )
+}
+
+fn text_input_range(op: &registry::OperationDef) -> (u64, u64) {
+    op.fields
+        .iter()
+        .find(|field| field.flag == "text")
+        .and_then(|field| field.input_range)
+        .unwrap_or((1, MAX_TEXT_MAX_CHARACTERS as u64))
 }
 
 fn validate_highlights_option_shape(
@@ -6747,14 +6768,23 @@ fn validate_positive_integer_field(
         return None;
     }
     let field = format!("{parent_field}.{child_field}");
+    let message = if parent_field == "text" && flag == "text" && max == Some(10_000) {
+        format!(
+            "{parent_field}.{child_field} must be an integer from {min} to 10000 or null; use --text full for uncapped text or --text 10000 for the largest cap"
+        )
+    } else {
+        match max {
+            Some(max) => format!(
+                "{parent_field}.{child_field} must be an integer from {min} to {max} or null"
+            ),
+            None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
+        }
+    };
     let mut issue = serde_json::json!({
         "issue": "invalid_value",
         "field": field,
         "flag": flag,
-        "message": match max {
-            Some(max) => format!("{parent_field}.{child_field} must be an integer from {min} to {max} or null"),
-            None => format!("{parent_field}.{child_field} must be an integer >= {min} or null"),
-        },
+        "message": message,
         "min": min,
         "received": value,
     });
@@ -7786,6 +7816,11 @@ mod tests {
         item_template: None,
         enum_values: &[],
         range: Some((1.0, 5.0)),
+        input_kind: None,
+        input_name: None,
+        value_name: None,
+        arity: None,
+        input_range: None,
     }];
 
     static GENERIC_RANGE_OP: OperationDef = OperationDef {

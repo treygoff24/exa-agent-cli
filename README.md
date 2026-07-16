@@ -40,6 +40,13 @@ During development you can run it through cargo:
 cargo run --bin exa-agent -- search "rust async runtimes" --num-results 5
 ```
 
+The minimum supported Rust version is 1.85. Run the local MSRV gate before
+opening a Rust change:
+
+```sh
+cargo +1.85 clippy --all-features --all-targets
+```
+
 ## Usage
 
 A few real commands (all verified to parse):
@@ -56,7 +63,7 @@ exa-agent answer "what changed in the EU AI Act in 2025?"
 
 # Page contents
 exa-agent contents https://exa.ai --text
-# Bare contents --text is uncapped; use --text N to cap deep reads.
+# Bare contents --text is uncapped; use --text N (1..10000) to cap deep reads.
 
 # Code/docs context for a coding agent
 exa-agent context "how to stream SSE in Rust with ureq"

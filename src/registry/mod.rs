@@ -54,6 +54,30 @@ pub enum FieldKind {
     Json,
 }
 
+/// How a request field is supplied at the CLI boundary. `None` means the
+/// older registry entry has API metadata only; the contents pilot uses this
+/// to keep CLI-facing metadata with its request mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    Flag,
+    Argument,
+}
+
+impl InputKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Argument => "argument",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputArity {
+    pub min: usize,
+    pub max: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConstValue {
     Str(&'static str),
@@ -101,6 +125,7 @@ pub enum ValidatorId {}
 /// One named flag ⇄ request-body-field mapping (arch §4).
 #[derive(Debug, Clone, Copy)]
 pub struct FieldDef {
+    /// Legacy schema key; retain for one compatibility release.
     pub flag: &'static str,
     pub body_path: &'static str,
     pub kind: FieldKind,
@@ -109,6 +134,37 @@ pub struct FieldDef {
     pub item_template: Option<&'static str>,
     pub enum_values: &'static [&'static str],
     pub range: Option<(f64, f64)>,
+    pub input_kind: Option<InputKind>,
+    /// User-facing input spelling, e.g. `--text` or `URLS`.
+    pub input_name: Option<&'static str>,
+    pub value_name: Option<&'static str>,
+    pub arity: Option<InputArity>,
+    /// Numeric range for a CLI value. This is distinct from `range`, which
+    /// validates a numeric JSON request-body field.
+    pub input_range: Option<(u64, u64)>,
+}
+
+pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
+    let field = lookup_by_command(command)?
+        .fields
+        .iter()
+        .find(|field| field.flag == flag)?;
+    let (name, min, max) = (
+        field.input_name?,
+        field.input_range?.0,
+        field.input_range?.1,
+    );
+    Some(format!(
+        "Optional character cap: {name} accepts {min}..={max}; omit its value, or use `full`/`0`, for uncapped text."
+    ))
+}
+
+pub fn field_value_name(command: &str, flag: &str) -> Option<&'static str> {
+    let field = lookup_by_command(command)?
+        .fields
+        .iter()
+        .find(|field| field.flag == flag)?;
+    field.value_name.or(field.input_name)
 }
 
 /// One Exa operation. Carries exactly what the contracts surface plus the internal

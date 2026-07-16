@@ -1,6 +1,8 @@
 //! Registry-consistency invariants (arch §3). These pin the generated table against the
 //! contracts so the hand-written surface and the codegen can't silently drift.
 
+use clap::CommandFactory;
+use exa_agent_cli::cli::Cli;
 use exa_agent_cli::error::error_code_dictionary;
 use exa_agent_cli::output::envelope::capabilities;
 use exa_agent_cli::registry::{self, Method};
@@ -105,5 +107,49 @@ fn error_code_dictionary_is_well_formed() {
             code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
             "error code {code:?} is not snake_case"
         );
+    }
+}
+
+#[test]
+fn contents_registry_input_metadata_matches_clap() {
+    let op = registry::lookup_by_command("contents").expect("contents registry entry");
+    let command = Cli::command();
+    let contents = command
+        .find_subcommand("contents")
+        .expect("contents clap command");
+
+    for field in op.fields.iter().filter(|field| field.input_kind.is_some()) {
+        let arg = match field.input_kind.expect("filtered above") {
+            registry::InputKind::Flag => contents
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some(field.flag)),
+            registry::InputKind::Argument => contents.get_arguments().find(|arg| {
+                arg.get_long().is_none()
+                    && arg
+                        .get_value_names()
+                        .is_some_and(|names| names == [field.input_name.expect("input name")])
+            }),
+        }
+        .unwrap_or_else(|| panic!("{} missing clap input for {}", op.command(), field.flag));
+
+        let arity = field.arity.expect("input metadata has arity");
+        let clap_arity = arg
+            .get_num_args()
+            .unwrap_or_else(|| panic!("{} has no clap arity", field.flag));
+        assert_eq!(clap_arity.min_values(), arity.min, "{}", field.flag);
+        assert_eq!(
+            clap_arity.max_values(),
+            arity.max.unwrap_or(usize::MAX),
+            "{}",
+            field.flag
+        );
+        if let Some(value_name) = field.value_name.or(field.input_name) {
+            assert_eq!(
+                arg.get_value_names().expect("clap value name"),
+                [value_name],
+                "{}",
+                field.flag
+            );
+        }
     }
 }

@@ -1004,11 +1004,26 @@ pub fn primary_count(data: &Value) -> Option<u64> {
 /// `/contents` may return HTTP 200 with per-item failures in `statuses[]` (contracts §11).
 /// A total per-URL failure exits 10 after the success envelope is emitted; mixed success/error
 /// stays exit 0 and is represented by warnings.
-pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> i32 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentsStatusSummary {
+    pub requested_count: usize,
+    pub status_count: usize,
+    pub failed_count: usize,
+    pub results_count: usize,
+    pub exit_code: i32,
+}
+
+pub fn contents_status_summary(data: &Value, requested_count: usize) -> ContentsStatusSummary {
     let Some(statuses) = data.get("statuses").and_then(Value::as_array) else {
-        return 0;
+        return ContentsStatusSummary {
+            requested_count,
+            status_count: 0,
+            failed_count: 0,
+            results_count: 0,
+            exit_code: 0,
+        };
     };
-    let failed = statuses
+    let failed_count = statuses
         .iter()
         .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
         .count();
@@ -1017,15 +1032,26 @@ pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> 
         .or_else(|| data.get("data"))
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    if requested_count > 0
+    let exit_code = if requested_count > 0
         && statuses.len() == requested_count
-        && failed == requested_count
+        && failed_count == requested_count
         && results_count == 0
     {
         10
     } else {
         0
+    };
+    ContentsStatusSummary {
+        requested_count,
+        status_count: statuses.len(),
+        failed_count,
+        results_count,
+        exit_code,
     }
+}
+
+pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> i32 {
+    contents_status_summary(data, requested_count).exit_code
 }
 
 /// Classify a `/contents` response against the request that produced it.
@@ -1265,6 +1291,7 @@ where
     T: Transport,
     F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
 {
+    ensure_network_allowed()?;
     let prepared = prepare_raw_request(&params)?;
     let start = Instant::now();
     let mut body = Vec::new();

@@ -335,12 +335,13 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
             let mut value = serde_json::json!({
                 // `flag` is retained for one compatibility release.
                 "flag": field.flag,
-                "legacyFlagIsCliFlag": field.input_kind != Some(registry::InputKind::Argument),
                 "bodyPath": field.body_path,
                 "kind": field_kind(field.kind),
                 "required": field.required,
             });
             if let Some(input_kind) = field.input_kind {
+                value["legacyFlagIsCliFlag"] =
+                    serde_json::Value::Bool(input_kind != registry::InputKind::Argument);
                 value["inputKind"] = serde_json::Value::String(input_kind.as_str().to_string());
                 value["name"] = serde_json::Value::String(
                     field

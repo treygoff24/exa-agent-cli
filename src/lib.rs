@@ -5523,7 +5523,6 @@ fn execute_typed_live<T: Transport>(
     if let Some((field, _, _)) = spec.op.secret_capture() {
         redaction::redact_named_field(&mut data, field);
     }
-    append_response_warnings(spec.op, &body, &data, &mut warnings);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
     let requested_contents_count = spec.op.mixed_status_exit.then(|| {
@@ -5532,8 +5531,15 @@ fn execute_typed_live<T: Transport>(
             .1
             .len()
     });
+    append_response_warnings(
+        spec.op,
+        &body,
+        &data,
+        requested_contents_count,
+        &mut warnings,
+    );
     let exit_code = if let Some(requested_count) = requested_contents_count {
-        transport::contents_mixed_status_exit_code(&data, requested_count)
+        transport::contents_status_summary(&data, requested_count).exit_code
     } else {
         0
     };
@@ -6017,10 +6023,13 @@ fn append_response_warnings(
     op: &'static registry::OperationDef,
     request_body: &serde_json::Value,
     data: &serde_json::Value,
+    requested_contents_count: Option<usize>,
     warnings: &mut Vec<serde_json::Value>,
 ) {
     if op.command() == "contents" {
-        append_contents_status_warnings(data, warnings);
+        if let Some(requested_count) = requested_contents_count {
+            append_contents_status_warnings(data, requested_count, warnings);
+        }
         return;
     }
     if op.command() != "search" {
@@ -6055,63 +6064,69 @@ fn append_response_warnings(
 
 fn append_contents_status_warnings(
     data: &serde_json::Value,
+    requested_count: usize,
     warnings: &mut Vec<serde_json::Value>,
 ) {
-    let Some(statuses) = data.get("statuses").and_then(serde_json::Value::as_array) else {
-        return;
-    };
+    let statuses = data.get("statuses").and_then(serde_json::Value::as_array);
     let failed: Vec<&serde_json::Value> = statuses
-        .iter()
+        .into_iter()
+        .flatten()
         .filter(|entry| entry.get("status").and_then(serde_json::Value::as_str) == Some("error"))
         .collect();
-    if failed.is_empty() {
-        return;
-    }
-    let tags: Vec<String> = failed
-        .iter()
-        .map(|entry| contents_status_tag(entry))
-        .collect();
-    let suggested_command = failed
-        .iter()
-        .find_map(|entry| contents_status_suggested_command(entry));
-    let results_count = data
-        .get("results")
-        .or_else(|| data.get("data"))
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    if failed.len() == statuses.len() && results_count == 0 {
-        let mut warning = serde_json::json!({
-            "code": "all_urls_failed",
-            "message": format!("all requested URLs failed: {}", tags.join(", ")),
-            "statuses": tags,
-        });
-        if let Some(command) = suggested_command {
-            warning["suggestedCommand"] = serde_json::Value::String(command);
-        }
-        if failed
+    let summary = transport::contents_status_summary(data, requested_count);
+    if !failed.is_empty() {
+        let tags: Vec<String> = failed
             .iter()
-            .any(|entry| contents_status_reason(entry).is_none())
-        {
-            warning["reason"] =
-                serde_json::Value::String("upstream_reason_unavailable".to_string());
+            .map(|entry| contents_status_tag(entry))
+            .collect();
+        let suggested_command = failed
+            .iter()
+            .find_map(|entry| contents_status_suggested_command(entry));
+        if summary.exit_code == 10 {
+            let mut warning = serde_json::json!({
+                "code": "all_urls_failed",
+                "message": format!("all requested URLs failed: {}", tags.join(", ")),
+                "statuses": tags,
+            });
+            if let Some(command) = suggested_command {
+                warning["suggestedCommand"] = serde_json::Value::String(command);
+            }
+            if failed
+                .iter()
+                .any(|entry| contents_status_reason(entry).is_none())
+            {
+                warning["reason"] =
+                    serde_json::Value::String("upstream_reason_unavailable".to_string());
+            }
+            warnings.push(warning);
+            return;
         }
-        warnings.push(warning);
-        return;
+        for (entry, tag) in failed.into_iter().zip(tags) {
+            let mut warning = serde_json::json!({
+                "code": "url_failed",
+                "message": format!("requested URL failed: {tag}"),
+                "url": entry.get("id").or_else(|| entry.get("url")).cloned().unwrap_or(serde_json::Value::Null),
+                "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
+                "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
+            });
+            if let Some(command) = contents_status_suggested_command(entry) {
+                warning["suggestedCommand"] = serde_json::Value::String(command);
+                warning["reason"] =
+                    serde_json::Value::String("upstream_reason_unavailable".to_string());
+            }
+            warnings.push(warning);
+        }
     }
-    for (entry, tag) in failed.into_iter().zip(tags) {
-        let mut warning = serde_json::json!({
-            "code": "url_failed",
-            "message": format!("requested URL failed: {tag}"),
-            "url": entry.get("id").or_else(|| entry.get("url")).cloned().unwrap_or(serde_json::Value::Null),
-            "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
-            "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
-        });
-        if let Some(command) = contents_status_suggested_command(entry) {
-            warning["suggestedCommand"] = serde_json::Value::String(command);
-            warning["reason"] =
-                serde_json::Value::String("upstream_reason_unavailable".to_string());
-        }
-        warnings.push(warning);
+    if summary.status_count != summary.requested_count {
+        warnings.push(serde_json::json!({
+            "code": "incomplete_statuses",
+            "message": format!(
+                "upstream returned {} status entries for {} requested items",
+                summary.status_count, summary.requested_count
+            ),
+            "requested": summary.requested_count,
+            "statuses": summary.status_count,
+        }));
     }
 }
 

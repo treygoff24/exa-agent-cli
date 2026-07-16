@@ -48,10 +48,12 @@
     "warnings": [
       {
         "code": "all_urls_failed",
-        "message": "all requested URLs failed: https://opaque.test=error",
+        "message": "all requested URLs failed: https://opaque.test=upstream_reason_unavailable",
         "statuses": [
-          "https://opaque.test=error"
-        ]
+          "https://opaque.test=upstream_reason_unavailable"
+        ],
+        "suggestedCommand": "exa-agent contents 'https://opaque.test' --text full",
+        "reason": "upstream_reason_unavailable"
       }
     ],
     "diagnostics": {

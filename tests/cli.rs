@@ -1375,9 +1375,53 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
     assert_eq!(urls["inputKind"], "argument");
     assert_eq!(urls["name"], "URLS");
     assert_eq!(urls["legacyFlagIsCliFlag"], false);
+    let search = run_ok_json(&["capabilities", "search", "--compact"]);
+    for field in search["command"]["fields"].as_array().unwrap() {
+        assert!(
+            field.get("inputKind").is_none(),
+            "search field unexpectedly claims explicit input metadata: {field}"
+        );
+        assert!(
+            field.get("legacyFlagIsCliFlag").is_none(),
+            "unannotated search field must not claim a CLI flag: {field}"
+        );
+    }
     assert!(contents["command"]["contentDefaults"]["text"]
         .get("zero")
         .is_none());
+}
+
+#[test]
+fn search_and_similar_text_share_normalization_boundaries() {
+    for command in ["search", "similar"] {
+        let mut valid = vec![command, "https://example.com", "--text"];
+        if command == "search" {
+            valid[1] = "rust async";
+        }
+        for raw in ["full", "1", "10000"] {
+            let mut args = valid.clone();
+            args.push(raw);
+            args.extend(["--dry-run", "--compact"]);
+            let json = run_ok_json(&args);
+            let body = &json["data"]["request"]["body"];
+            let text = &body["contents"]["text"];
+            let expected = if raw == "full" {
+                serde_json::json!(true)
+            } else {
+                serde_json::json!({"maxCharacters": raw.parse::<u64>().unwrap()})
+            };
+            assert_eq!(text, &expected, "{command} {raw}");
+        }
+        for raw in ["0", "false", "-1", "10001"] {
+            let mut args = valid.clone();
+            args.push(raw);
+            args.extend(["--compact"]);
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(1), "{command} {raw}");
+            let error = stderr_json(&output);
+            assert_eq!(error["error"]["code"], "invalid_value", "{command} {raw}");
+        }
+    }
 }
 
 #[test]
@@ -1646,17 +1690,59 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
     envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
     let mut expected = fixture["legacyEnvelope"].clone();
     expected["outcome"] = fixture["expected"]["outcome"].clone();
-    let warning = &mut expected["warnings"][0];
-    warning["message"] = serde_json::json!(
-        "all requested URLs failed: https://opaque.test=upstream_reason_unavailable"
-    );
-    warning["statuses"] = serde_json::json!(["https://opaque.test=upstream_reason_unavailable"]);
-    warning["suggestedCommand"] = fixture["expected"]["suggestedCommand"].clone();
-    warning["reason"] = fixture["expected"]["reason"].clone();
     assert_eq!(
         serde_json::to_string(&envelope).unwrap(),
         serde_json::to_string(&expected).unwrap()
     );
+}
+
+#[test]
+fn fetch_undercounted_statuses_keep_per_url_warning_and_correlation() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/contents/undercounted-fetch.json")).unwrap();
+    let upstream = Box::leak(
+        serde_json::to_vec(&fixture["upstream"])
+            .unwrap()
+            .into_boxed_slice(),
+    );
+    let (base_url, server) = local_json_server(|_| {}, upstream);
+    let mut args: Vec<String> = fixture["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    args.extend([
+        "--api-key".to_string(),
+        "test-key-abcdef12".to_string(),
+        "--base-url".to_string(),
+        base_url,
+        "--compact".to_string(),
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&args);
+    server.join().expect("local test server panicked");
+    assert_eq!(
+        output.status.code(),
+        Some(fixture["expected"]["exit"].as_i64().unwrap() as i32)
+    );
+    assert!(output.stderr.is_empty());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["command"], fixture["expected"]["command"]);
+    assert_eq!(
+        envelope["request"]["correlationId"],
+        fixture["expected"]["correlationId"]
+    );
+    let warning_codes: Vec<&str> = envelope["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|warning| warning["code"].as_str().unwrap())
+        .collect();
+    for code in fixture["expected"]["warnings"].as_array().unwrap() {
+        assert!(warning_codes.contains(&code.as_str().unwrap()));
+    }
+    assert!(!warning_codes.contains(&"all_urls_failed"));
 }
 
 #[test]

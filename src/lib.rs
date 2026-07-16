@@ -17,6 +17,7 @@ pub mod stream;
 pub mod transport;
 
 use clap::{CommandFactory, Parser};
+use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
 use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
@@ -6098,7 +6099,11 @@ fn append_response_warnings(
 ) {
     if op.command() == "contents" {
         if let Some(requested_count) = requested_contents_count {
-            append_contents_status_warnings(data, requested_count, warnings);
+            let uses_ids = request_body
+                .get("ids")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ids| !ids.is_empty());
+            append_contents_status_warnings(data, requested_count, uses_ids, warnings);
         }
         return;
     }
@@ -6135,6 +6140,7 @@ fn append_response_warnings(
 fn append_contents_status_warnings(
     data: &serde_json::Value,
     requested_count: usize,
+    uses_ids: bool,
     warnings: &mut Vec<serde_json::Value>,
 ) {
     let statuses = data.get("statuses").and_then(serde_json::Value::as_array);
@@ -6151,7 +6157,7 @@ fn append_contents_status_warnings(
             .collect();
         let suggested_command = failed
             .iter()
-            .find_map(|entry| contents_status_suggested_command(entry));
+            .find_map(|entry| contents_status_suggested_command(entry, uses_ids));
         if summary.exit_code == 10 {
             let mut warning = serde_json::json!({
                 "code": "all_urls_failed",
@@ -6179,7 +6185,7 @@ fn append_contents_status_warnings(
                 "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
                 "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
             });
-            if let Some(command) = contents_status_suggested_command(entry) {
+            if let Some(command) = contents_status_suggested_command(entry, uses_ids) {
                 warning["suggestedCommand"] = serde_json::Value::String(command);
                 warning["reason"] =
                     serde_json::Value::String("upstream_reason_unavailable".to_string());
@@ -6213,7 +6219,7 @@ fn contents_status_reason(entry: &serde_json::Value) -> Option<&str> {
     reason.map(str::trim).filter(|reason| !reason.is_empty())
 }
 
-fn contents_status_suggested_command(entry: &serde_json::Value) -> Option<String> {
+fn contents_status_suggested_command(entry: &serde_json::Value, uses_ids: bool) -> Option<String> {
     if contents_status_reason(entry).is_some() {
         return None;
     }
@@ -6222,7 +6228,8 @@ fn contents_status_suggested_command(entry: &serde_json::Value) -> Option<String
         .or_else(|| entry.get("url"))
         .and_then(serde_json::Value::as_str)?;
     Some(format!(
-        "exa-agent contents {} --text full",
+        "exa-agent contents {}{} --text full",
+        if uses_ids { "--ids " } else { "" },
         shell_quote(target)
     ))
 }
@@ -6493,17 +6500,42 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
         }
         SchemaCmd::Refresh(args) => {
             transport::ensure_network_allowed()?;
+            let spec_url = globals
+                .base_url
+                .as_deref()
+                .map(|base| transport::build_url(base, "/docs/exa-spec.json", &[]))
+                .transpose()?
+                .unwrap_or_else(|| registry::SPEC_URL.to_string());
+            let request = transport::HttpRequest {
+                method: "GET".to_string(),
+                url: spec_url.clone(),
+                headers: Vec::new(),
+                body: None,
+            };
+            let (response, _) = transport::send_with_retry(
+                &UreqTransport::with_defaults(),
+                &request,
+                &transport::SendOptions {
+                    retry: globals.retry,
+                    retry_after: globals.retry_after,
+                    idempotency_key: None,
+                },
+            )?;
+            let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
+            let current = live_spec_sha256 == registry::EMBEDDED_SPEC_SHA256;
             emit_stdout(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
                     "ok": true,
                     "check": args.check,
-                    "status": "current",
+                    "status": if current { "current" } else { "drift" },
+                    "specUrl": spec_url,
                     "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
+                    "liveSpecSha256": live_spec_sha256,
                 }),
                 pretty,
             );
-            Ok(0)
+            Ok(i32::from(args.check && !current))
         }
     }
 }

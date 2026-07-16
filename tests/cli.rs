@@ -575,10 +575,60 @@ fn schema_commands_work_offline() {
         .as_str()
         .unwrap()
         .contains("unsupported"));
+}
 
-    let refresh = run_ok_json(&["schema", "refresh", "--check", "--compact"]);
+#[test]
+fn schema_refresh_check_fetches_and_compares_live_spec() {
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(
+                request_text.starts_with("GET /docs/exa-spec.json "),
+                "unexpected request:\n{request_text}"
+            );
+            assert!(!request_text.to_ascii_lowercase().contains("x-api-key:"));
+        },
+        br#"{"openapi":"stale"}"#,
+    );
+    let output = run(&[
+        "schema",
+        "refresh",
+        "--check",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().expect("local test server panicked");
+    assert!(output.stderr.is_empty());
+    let refresh: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(refresh["schema"], "exa.cli.schema_refresh.v1");
-    assert_eq!(refresh["status"], "current");
+    assert_eq!(refresh["status"], "drift");
+    assert_ne!(refresh["liveSpecSha256"], refresh["embeddedSpecSha256"]);
+}
+
+#[test]
+fn schema_refresh_check_reports_network_failure_instead_of_current() {
+    let base_url = closed_local_base_url();
+    let output = run(&[
+        "schema",
+        "refresh",
+        "--check",
+        "--base-url",
+        base_url.as_str(),
+        "--retry",
+        "0",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr_json(&output)["error"]["code"], "network_error");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("\"status\":\"current\""));
 }
 
 #[test]
@@ -1779,6 +1829,47 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
         serde_json::to_string(&envelope).unwrap(),
         serde_json::to_string(&expected).unwrap()
     );
+}
+
+#[test]
+fn contents_id_recovery_command_preserves_ids_request_shape() {
+    let upstream = br#"{
+        "results":[],
+        "statuses":[{"id":"doc_opaque_123","status":"error","error":{}}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, upstream);
+    let output = run(&[
+        "contents",
+        "--ids",
+        "doc_opaque_123",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(10));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        envelope["warnings"][0]["suggestedCommand"],
+        "exa-agent contents --ids 'doc_opaque_123' --text full"
+    );
+
+    let recovery = run_ok_json(&[
+        "contents",
+        "--ids",
+        "doc_opaque_123",
+        "--text",
+        "full",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        recovery["data"]["request"]["body"]["ids"],
+        serde_json::json!(["doc_opaque_123"])
+    );
+    assert!(recovery["data"]["request"]["body"].get("urls").is_none());
 }
 
 #[test]

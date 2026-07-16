@@ -463,7 +463,11 @@ pub struct SearchArgs {
     /// Result category.
     ///
     /// Valid values: company, people, research paper, news, personal site, financial report.
-    #[arg(long, value_name = "CATEGORY", value_parser = clap::builder::PossibleValuesParser::new(SEARCH_CATEGORY_VALUES))]
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        value_parser = crate::registry::enum_string_value_parser("search", "category")
+    )]
     pub category: Option<String>,
     /// Restrict results to matching domains.
     #[arg(long, value_name = "DOMAIN")]

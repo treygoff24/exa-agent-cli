@@ -2885,6 +2885,26 @@ fn clap_unknown_flag_includes_did_you_mean() {
 }
 
 #[test]
+fn search_num_results_does_not_hijack_other_clap_value_errors() {
+    let output = run(&[
+        "search",
+        "rust async",
+        "--num-results",
+        "5",
+        "--format",
+        "bogus",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--format"));
+}
+
+#[test]
 fn contents_urls_flag_is_rejected_with_a_positional_url_suggestion() {
     let output = run(&["contents", "--urls", "https://exa.ai"]);
     assert_eq!(output.status.code(), Some(1));

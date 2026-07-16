@@ -149,6 +149,44 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 }
             }
 
+            let invalid_search_num_results =
+                matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation)
+                    && clap_ctx_strings(&e, ContextKind::InvalidArg)
+                        .iter()
+                        .any(|arg| arg.contains("--num-results"));
+            if invalid_search_num_results {
+                if let Some((query, raw)) = search_num_results_args() {
+                    let err = validate_search_num_results(&query, &raw)
+                        .expect_err("clap rejected an invalid search num-results value");
+                    let op = registry::lookup_by_segments(&["search"])
+                        .expect("search is in the registry");
+                    let argv: Vec<String> = std::env::args().collect();
+                    let request_id = if argv
+                        .iter()
+                        .any(|arg| arg == "--dry-run" || arg == "--print-request")
+                    {
+                        "req_dry_run".to_string()
+                    } else {
+                        transport::new_request_id()
+                    };
+                    let correlation_id = argv
+                        .windows(2)
+                        .find(|pair| pair[0] == "--correlation-id")
+                        .map(|pair| pair[1].clone());
+                    let env = ErrorEnvelope::from_error(&err).with_context(
+                        op.method.as_str(),
+                        op.api_path,
+                        request_id,
+                        correlation_id,
+                    );
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+                    );
+                    return err.category() as i32;
+                }
+            }
+
             let code = match kind {
                 ErrorKind::UnknownArgument => "unknown_flag",
                 ErrorKind::InvalidSubcommand => "unknown_subcommand",
@@ -230,6 +268,21 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             err.category() as i32
         }
     }
+}
+
+fn search_num_results_args() -> Option<(String, String)> {
+    let argv: Vec<String> = std::env::args().collect();
+    let search = argv.iter().position(|arg| arg == "search")?;
+    let query = argv.get(search + 1)?.clone();
+    for (index, arg) in argv.iter().enumerate().skip(search + 2) {
+        if arg == "--num-results" || arg == "-n" {
+            return argv.get(index + 1).cloned().map(|raw| (query, raw));
+        }
+        if let Some(raw) = arg.strip_prefix("--num-results=") {
+            return Some((query, raw.to_string()));
+        }
+    }
+    None
 }
 
 fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Option<CliError> {

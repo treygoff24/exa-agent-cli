@@ -233,6 +233,44 @@ pub fn ranged_u32_value_parser(
     }
 }
 
+pub fn enum_string_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = String> + Clone {
+    #[derive(Clone)]
+    struct Parser(&'static [&'static str]);
+
+    impl clap::builder::TypedValueParser for Parser {
+        type Value = String;
+
+        fn parse_ref(
+            &self,
+            _command: &clap::Command,
+            _arg: Option<&clap::Arg>,
+            value: &std::ffi::OsStr,
+        ) -> Result<Self::Value, clap::Error> {
+            Ok(value.to_string_lossy().into_owned())
+        }
+
+        fn possible_values(
+            &self,
+        ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+            Some(Box::new(
+                self.0
+                    .iter()
+                    .map(|value| clap::builder::PossibleValue::new(*value)),
+            ))
+        }
+    }
+
+    let values = lookup_by_command(command)
+        .and_then(|op| op.fields.iter().find(|field| field.flag == flag))
+        .map(|field| field.enum_values)
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| panic!("{command} --{flag} requires registry enum metadata"));
+    Parser(values)
+}
+
 /// One Exa operation. Carries exactly what the contracts surface plus the internal
 /// metadata commands route on (arch §3).
 #[derive(Debug, Clone, Copy)]

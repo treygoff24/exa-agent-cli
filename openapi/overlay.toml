@@ -472,6 +472,9 @@ arity = { min = 1, max = 1 }
 flag = "text"
 body_path = "text"
 kind = "json"
+input_kind = "flag"
+input_name = "--text"
+arity = { min = 0, max = 0 }
 
 [[operations."answer".fields]]
 flag = "stream"
@@ -511,6 +514,7 @@ kind = "str"
 flag = "text"
 body_path = "contents.text"
 kind = "json"
+arity = { min = 0, max = 1 }
 
 [[operations."search".fields]]
 flag = "query"
@@ -526,6 +530,7 @@ flag = "num-results"
 body_path = "numResults"
 kind = "int"
 range = [1, 100]
+arity = { min = 0, max = 1 }
 
 [[operations."search".fields]]
 flag = "type"
@@ -543,16 +548,19 @@ enum_values = ["company", "people", "research paper", "news", "personal site", "
 flag = "text"
 body_path = "contents.text"
 kind = "json"
+arity = { min = 0, max = 1 }
 
 [[operations."search".fields]]
 flag = "highlights"
 body_path = "contents.highlights"
 kind = "json"
+arity = { min = 0, max = 1 }
 
 [[operations."search".fields]]
 flag = "no-highlights"
 body_path = "contents.highlights"
 kind = "json"
+arity = { min = 0, max = 0 }
 
 [[operations."search".fields]]
 flag = "include-domain"
@@ -680,6 +688,9 @@ flag = "query"
 body_path = "query"
 kind = "str"
 required = true
+input_kind = "argument"
+input_name = "QUERY"
+arity = { min = 1, max = 1 }
 
 [[operations."createAgentRun".fields]]
 flag = "output-schema"
@@ -726,3 +737,6 @@ flag = "query"
 body_path = "instructions"
 kind = "str"
 required = true
+input_kind = "argument"
+input_name = "QUERY"
+arity = { min = 1, max = 1 }

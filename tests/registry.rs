@@ -133,7 +133,9 @@ fn assert_registry_inputs_match_clap(command_path: &str) {
                 let arg = leaf
                     .get_arguments()
                     .find(|arg| arg.get_long() == Some(field.flag));
-                let long = arg.and_then(|arg| arg.get_long()).expect("clap long flag");
+                let long = arg.and_then(|arg| arg.get_long()).unwrap_or_else(|| {
+                    panic!("{} missing clap long flag for {}", op.command(), field.flag)
+                });
                 assert!(flag_input_name_matches_clap_long(
                     field.input_name.expect("flag input name"),
                     long
@@ -149,18 +151,30 @@ fn assert_registry_inputs_match_clap(command_path: &str) {
         }
         .unwrap_or_else(|| panic!("{} missing clap input for {}", op.command(), field.flag));
 
-        if let Some(arity) = field.arity {
-            let clap_arity = arg
-                .get_num_args()
-                .unwrap_or(clap::builder::ValueRange::SINGLE);
-            assert_eq!(clap_arity.min_values(), arity.min, "{}", field.flag);
-            assert_eq!(
-                clap_arity.max_values(),
-                arity.max.unwrap_or(usize::MAX),
-                "{}",
-                field.flag
-            );
-        }
+        let arity = field
+            .arity
+            .unwrap_or_else(|| panic!("{} field {} lacks arity", op.command(), field.flag));
+        let clap_arity = arg.get_num_args().unwrap_or_else(|| {
+            if arg.get_action().takes_values() {
+                clap::builder::ValueRange::SINGLE
+            } else {
+                clap::builder::ValueRange::EMPTY
+            }
+        });
+        assert_eq!(
+            clap_arity.min_values(),
+            arity.min,
+            "{} {}",
+            op.command(),
+            field.flag
+        );
+        assert_eq!(
+            clap_arity.max_values(),
+            arity.max.unwrap_or(usize::MAX),
+            "{} {}",
+            op.command(),
+            field.flag
+        );
         if let Some(value_name) = field.value_name.or_else(|| {
             (input_kind == registry::InputKind::Argument)
                 .then_some(field.input_name.expect("argument input name"))
@@ -193,8 +207,8 @@ fn contents_registry_input_metadata_matches_clap() {
 
 #[test]
 fn modeled_core_inputs_are_non_vacuously_parity_checked_against_clap() {
-    for command in ["search", "answer", "context", "similar", "contents"] {
-        assert_registry_inputs_match_clap(command);
+    for op in registry::REGISTRY.iter().filter(|op| !op.fields.is_empty()) {
+        assert_registry_inputs_match_clap(&op.command());
     }
 }
 

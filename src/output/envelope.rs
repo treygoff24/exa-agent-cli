@@ -357,6 +357,8 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
                 }
                 if let Some((min, max)) = field.input_range {
                     value["range"] = serde_json::json!({ "min": min, "max": max });
+                } else if let Some((min, max)) = field.range {
+                    value["range"] = serde_json::json!({ "min": min, "max": max });
                 }
             }
             value

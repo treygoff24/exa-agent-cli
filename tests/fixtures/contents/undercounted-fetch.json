@@ -20,11 +20,10 @@
   },
   "expected": {
     "command": "contents",
-    "exit": 0,
+    "exit": 10,
     "correlationId": "fetch-undercount",
     "warnings": [
-      "url_failed",
-      "incomplete_statuses"
+      "all_urls_failed"
     ]
   }
 }

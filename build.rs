@@ -362,23 +362,18 @@ fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
         return Err(anyhow!("{}: co_fields paths cannot be empty", who()));
     }
 
-    let has_input_metadata = field.input_kind.is_some()
-        || field.input_name.is_some()
-        || field.value_name.is_some()
-        || field.arity.is_some()
-        || field.input_range.is_some();
-    if has_input_metadata {
-        match field.input_kind.as_deref() {
-            Some("flag" | "argument") => {}
-            Some(other) => return Err(anyhow!("{}: unknown input_kind {other:?}", who())),
-            None => return Err(anyhow!("{}: input metadata requires input_kind", who())),
+    if let Some(input_kind) = field.input_kind.as_deref() {
+        if !matches!(input_kind, "flag" | "argument") {
+            return Err(anyhow!("{}: unknown input_kind {input_kind:?}", who()));
         }
-        if field.input_name.as_deref().is_none_or(str::is_empty) {
-            return Err(anyhow!("{}: input metadata requires input_name", who()));
-        }
-        let Some(arity) = &field.arity else {
-            return Err(anyhow!("{}: input metadata requires arity", who()));
-        };
+    }
+    if field.input_name.as_deref().is_some_and(str::is_empty) {
+        return Err(anyhow!("{}: input_name cannot be empty", who()));
+    }
+    if field.value_name.as_deref().is_some_and(str::is_empty) {
+        return Err(anyhow!("{}: value_name cannot be empty", who()));
+    }
+    if let Some(arity) = &field.arity {
         if arity.max.is_some_and(|max| arity.min > max) {
             return Err(anyhow!("{}: arity min must be <= max", who()));
         }
@@ -423,7 +418,11 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
             .map(|name| option_string_literal(&Some(name.clone())))
             .unwrap_or_else(|| format!("Some({:?})", format!("--{}", f.flag)));
         let value_name = option_string_literal(&f.value_name);
-        let arity = arity_literal(f.arity.as_ref())?;
+        let default_arity = ArityMeta {
+            min: usize::from(f.kind != "bool"),
+            max: Some(usize::from(f.kind != "bool")),
+        };
+        let arity = arity_literal(Some(f.arity.as_ref().unwrap_or(&default_arity)))?;
         let input_range = input_range_literal(f.input_range)?;
         write!(
             fields,

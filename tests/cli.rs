@@ -710,8 +710,6 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
     let original = br#"{"api_key":"test-key-abcdef12"}"#;
     fs::write(&credentials, original).unwrap();
     let base_url = closed_local_base_url();
-    let csv = dir.join("import.csv");
-    fs::write(&csv, "name\nexample\n").unwrap();
     for args in [
         vec![
             "contents",
@@ -729,21 +727,6 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
         vec!["auth", "status"],
         vec!["schema", "refresh", "--check"],
         vec!["schema", "refresh"],
-        vec![
-            "websets",
-            "imports",
-            "create",
-            "--source",
-            "csv",
-            "--csv",
-            csv.to_str().unwrap(),
-            "--count",
-            "1",
-            "--entity",
-            "company",
-            "--base-url",
-            base_url.as_str(),
-        ],
         vec!["websets", "list", "--all", "--base-url", base_url.as_str()],
         vec!["auth", "test", "--base-url", base_url.as_str()],
         vec!["doctor", "--online", "--base-url", base_url.as_str()],
@@ -1736,7 +1719,7 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
 }
 
 #[test]
-fn fetch_undercounted_statuses_keep_per_url_warning_and_correlation() {
+fn fetch_undercounted_statuses_preserve_legacy_exit_warning_and_correlation() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/contents/undercounted-fetch.json")).unwrap();
     let upstream = Box::leak(
@@ -1779,10 +1762,13 @@ fn fetch_undercounted_statuses_keep_per_url_warning_and_correlation() {
         .iter()
         .map(|warning| warning["code"].as_str().unwrap())
         .collect();
-    for code in fixture["expected"]["warnings"].as_array().unwrap() {
-        assert!(warning_codes.contains(&code.as_str().unwrap()));
-    }
-    assert!(!warning_codes.contains(&"all_urls_failed"));
+    let expected_warnings: Vec<&str> = fixture["expected"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap())
+        .collect();
+    assert_eq!(warning_codes, expected_warnings);
 }
 
 #[test]

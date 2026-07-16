@@ -6135,17 +6135,6 @@ fn append_contents_status_warnings(
             warnings.push(warning);
         }
     }
-    if summary.status_count != summary.requested_count {
-        warnings.push(serde_json::json!({
-            "code": "incomplete_statuses",
-            "message": format!(
-                "upstream returned {} status entries for {} requested items",
-                summary.status_count, summary.requested_count
-            ),
-            "requested": summary.requested_count,
-            "statuses": summary.status_count,
-        }));
-    }
 }
 
 fn contents_status_tag(entry: &serde_json::Value) -> String {
@@ -6451,6 +6440,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             Ok(0)
         }
         SchemaCmd::Refresh(args) => {
+            transport::ensure_network_allowed()?;
             emit_stdout(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
@@ -6481,6 +6471,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
+                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[.data.results[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
                     "Contents/fetch success envelopes add outcome no_content (no failures and no returned rows), partial, or full (one results row per requested item with no failure evidence); missing statuses do not downgrade full coverage, and all-URL failures remain outcome partial with exit 10.",

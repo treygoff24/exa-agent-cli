@@ -1014,15 +1014,11 @@ pub struct ContentsStatusSummary {
 }
 
 pub fn contents_status_summary(data: &Value, requested_count: usize) -> ContentsStatusSummary {
-    let Some(statuses) = data.get("statuses").and_then(Value::as_array) else {
-        return ContentsStatusSummary {
-            requested_count,
-            status_count: 0,
-            failed_count: 0,
-            results_count: 0,
-            exit_code: 0,
-        };
-    };
+    let statuses = data
+        .get("statuses")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let failed_count = statuses
         .iter()
         .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
@@ -1032,10 +1028,7 @@ pub fn contents_status_summary(data: &Value, requested_count: usize) -> Contents
         .or_else(|| data.get("data"))
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let exit_code = if requested_count > 0
-        && statuses.len() == requested_count
-        && failed_count == requested_count
-        && results_count == 0
+    let exit_code = if !statuses.is_empty() && failed_count == statuses.len() && results_count == 0
     {
         10
     } else {
@@ -1058,26 +1051,12 @@ pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> 
 /// `full` means one `results[]` row per requested item and no failure evidence; statuses are
 /// optional metadata and their absence does not downgrade complete row coverage.
 pub fn contents_outcome(data: &Value, requested_count: usize) -> &'static str {
-    let results_count = data
-        .get("results")
-        .or_else(|| data.get("data"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let statuses = data
-        .get("statuses")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice);
-    let failed = statuses.map_or(0, |statuses| {
-        statuses
-            .iter()
-            .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
-            .count()
-    });
-    if failed > 0 {
+    let summary = contents_status_summary(data, requested_count);
+    if summary.failed_count > 0 {
         "partial"
-    } else if results_count == 0 {
+    } else if summary.results_count == 0 {
         "no_content"
-    } else if results_count == requested_count {
+    } else if summary.results_count == requested_count {
         "full"
     } else {
         "partial"

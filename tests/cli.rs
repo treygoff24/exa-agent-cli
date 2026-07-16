@@ -2905,6 +2905,26 @@ fn search_num_results_does_not_hijack_other_clap_value_errors() {
 }
 
 #[test]
+fn search_num_results_error_context_is_argument_order_independent() {
+    let output = run(&[
+        "search",
+        "--num-results",
+        "0",
+        "rust async",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["operation"]["path"], "/search");
+    assert_eq!(error["error"]["details"]["received"], "0");
+    assert!(error["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("'rust async' --num-results 1"));
+}
+
+#[test]
 fn contents_urls_flag_is_rejected_with_a_positional_url_suggestion() {
     let output = run(&["contents", "--urls", "https://exa.ai"]);
     assert_eq!(output.status.code(), Some(1));

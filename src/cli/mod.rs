@@ -466,7 +466,7 @@ pub struct SearchArgs {
     #[arg(
         long,
         value_name = "CATEGORY",
-        value_parser = crate::registry::enum_string_value_parser("search", "category")
+        value_parser = crate::registry::permissive_enum_string_value_parser(SEARCH_CATEGORY_VALUES)
     )]
     pub category: Option<String>,
     /// Restrict results to matching domains.

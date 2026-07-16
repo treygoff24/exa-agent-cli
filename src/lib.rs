@@ -16,7 +16,7 @@ pub mod request;
 pub mod stream;
 pub mod transport;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
 use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
@@ -271,18 +271,17 @@ fn handle_clap_error(e: clap::Error) -> i32 {
 }
 
 fn search_num_results_args() -> Option<(String, String)> {
-    let argv: Vec<String> = std::env::args().collect();
-    let search = argv.iter().position(|arg| arg == "search")?;
-    let query = argv.get(search + 1)?.clone();
-    for (index, arg) in argv.iter().enumerate().skip(search + 2) {
-        if arg == "--num-results" || arg == "-n" {
-            return argv.get(index + 1).cloned().map(|raw| (query, raw));
-        }
-        if let Some(raw) = arg.strip_prefix("--num-results=") {
-            return Some((query, raw.to_string()));
-        }
-    }
-    None
+    let command = Cli::command().mut_subcommand("search", |search| {
+        search.mut_arg("num_results", |arg| {
+            arg.value_parser(clap::builder::StringValueParser::new())
+        })
+    });
+    let matches = command.try_get_matches_from(std::env::args()).ok()?;
+    let search = matches.subcommand_matches("search")?;
+    Some((
+        search.get_one::<String>("query")?.clone(),
+        search.get_one::<String>("num_results")?.clone(),
+    ))
 }
 
 fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Option<CliError> {
@@ -6913,9 +6912,10 @@ fn validate_positive_integer_field(
         return None;
     }
     let field = format!("{parent_field}.{child_field}");
-    let message = if parent_field == "text" && flag == "text" && max == Some(10_000) {
+    let message = if parent_field == "text" && flag == "text" && max.is_some() {
+        let max = max.expect("checked above");
         format!(
-            "{parent_field}.{child_field} must be an integer from {min} to 10000 or null; use --text full for uncapped text or --text 10000 for the largest cap"
+            "{parent_field}.{child_field} must be an integer from {min} to {max} or null; use --text full for uncapped text or --text {max} for the largest cap"
         )
     } else {
         match max {

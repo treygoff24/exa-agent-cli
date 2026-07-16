@@ -127,6 +127,7 @@ The contract is what makes this usable from code. Highlights:
 - **One JSON envelope per call.** Success is `exa.cli.response.v1`; errors are `exa.cli.error.v1` carrying a stable `error.code` and a category.
 - **stdout is data, stderr is diagnostics.** Errors and trace output go to stderr; the parseable result goes to stdout.
 - **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass the upstream JSON through untouched.
+- **Contents coverage is explicit.** Live `contents` and `fetch` result envelopes carry `outcome: "full"`, `"partial"`, or `"no_content"`, independent of the exit code.
 - **Exit codes are stable and meaningful** — `0` ok, `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
 - **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it.
 - **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).

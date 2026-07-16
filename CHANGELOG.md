@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.4.0 — 2026-07-16
 
 ### Changed
 
@@ -10,6 +10,9 @@ All notable changes to this project are documented here.
   integer from 1 through 10000. The legacy `--text 0`, `--text true`, and
   `--text false` forms from 0.2-era recipes are intentionally removed; use
   bare `--text` for the command default or `--text full` for uncapped text.
+- Live `contents` and `fetch` result envelopes add a required `outcome` field:
+  `full`, `partial`, or `no_content`. This is additive and independent of the
+  command's exit classification.
 
 ### Fixed
 

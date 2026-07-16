@@ -66,7 +66,7 @@ self-description commands still work.
 
 ## Reading the output
 
-Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
+Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. Live `contents` and `fetch` result envelopes carry `outcome` (`full`, `partial`, or `no_content`) independently of exit classification. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
 
 Error envelope (`exa.cli.error.v1`, stderr): `error.code` (from the published dictionary below), `error.message`, and often `suggestedCommand`. Stdout stays empty on error.
 

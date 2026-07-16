@@ -3034,6 +3034,21 @@ fn search_num_results_error_context_is_argument_order_independent() {
 
 #[test]
 fn search_num_results_parse_error_preserves_all_correlation_id_forms() {
+    let separated = run(&[
+        "--correlation-id",
+        "corr-separated",
+        "search",
+        "rust async",
+        "--num-results",
+        "101",
+        "--compact",
+    ]);
+    assert_eq!(separated.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&separated)["request"]["correlationId"],
+        "corr-separated"
+    );
+
     let equals = run(&[
         "--correlation-id=corr-equals",
         "search",

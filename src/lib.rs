@@ -156,7 +156,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                         .iter()
                         .any(|arg| arg.contains("--num-results"));
             if invalid_search_num_results {
-                if let Some((query, raw)) = search_num_results_args() {
+                if let Some((query, raw, correlation_id)) = search_num_results_args() {
                     let err = validate_search_num_results(&query, &raw)
                         .expect_err("clap rejected an invalid search num-results value");
                     let op = registry::lookup_by_segments(&["search"])
@@ -170,7 +170,6 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     } else {
                         transport::new_request_id()
                     };
-                    let correlation_id = process_correlation_id();
                     let env = ErrorEnvelope::from_error(&err).with_context(
                         op.method.as_str(),
                         op.api_path,
@@ -268,30 +267,19 @@ fn handle_clap_error(e: clap::Error) -> i32 {
     }
 }
 
-fn process_correlation_id() -> Option<String> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--correlation-id" {
-            return args.next();
-        }
-        if let Some(value) = arg.strip_prefix("--correlation-id=") {
-            return Some(value.to_string());
-        }
-    }
-    std::env::var("EXA_CORRELATION_ID").ok()
-}
-
-fn search_num_results_args() -> Option<(String, String)> {
+fn search_num_results_args() -> Option<(String, String, Option<String>)> {
     let command = Cli::command().mut_subcommand("search", |search| {
         search.mut_arg("num_results", |arg| {
             arg.value_parser(clap::builder::StringValueParser::new())
         })
     });
     let matches = command.try_get_matches_from(std::env::args()).ok()?;
+    let correlation_id = matches.get_one::<String>("correlation_id").cloned();
     let search = matches.subcommand_matches("search")?;
     Some((
         search.get_one::<String>("query")?.clone(),
         search.get_one::<String>("num_results")?.clone(),
+        correlation_id,
     ))
 }
 

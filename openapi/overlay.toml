@@ -449,6 +449,9 @@ flag = "query"
 body_path = "query"
 kind = "str"
 required = true
+input_kind = "argument"
+input_name = "QUERY"
+arity = { min = 1, max = 1 }
 
 [[operations."context".fields]]
 flag = "tokens"
@@ -461,6 +464,9 @@ flag = "question"
 body_path = "query"
 kind = "str"
 required = true
+input_kind = "argument"
+input_name = "QUESTION"
+arity = { min = 1, max = 1 }
 
 [[operations."answer".fields]]
 flag = "text"
@@ -482,6 +488,9 @@ flag = "url"
 body_path = "url"
 kind = "str"
 required = true
+input_kind = "argument"
+input_name = "URL"
+arity = { min = 1, max = 1 }
 
 [[operations."findSimilar".fields]]
 flag = "num-results"
@@ -508,6 +517,9 @@ flag = "query"
 body_path = "query"
 kind = "str"
 required = true
+input_kind = "argument"
+input_name = "QUERY"
+arity = { min = 1, max = 1 }
 
 [[operations."search".fields]]
 flag = "num-results"

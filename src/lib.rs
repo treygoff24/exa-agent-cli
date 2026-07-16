@@ -161,6 +161,22 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             let mut message = first_line(&e.to_string());
             let mut suggestion = None;
 
+            if kind == ErrorKind::UnknownArgument
+                && message.contains("--urls")
+                && e.to_string().contains("contents")
+            {
+                message = "contents URLs are positional, not a named flag".to_string();
+                details.insert(
+                    "inputKind".to_string(),
+                    serde_json::Value::String("argument".to_string()),
+                );
+                details.insert(
+                    "name".to_string(),
+                    serde_json::Value::String("URLS".to_string()),
+                );
+                suggestion = Some("exa-agent contents https://exa.ai [URL...]".to_string());
+            }
+
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
                 let missing = clap_ctx_strings(&e, ContextKind::InvalidArg);
                 if !missing.is_empty() {
@@ -177,18 +193,20 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 }
                 _ => None,
             };
-            if let Some(kind) = suggested_kind {
-                // clap orders suggestions by ascending similarity (most similar LAST)
-                // and emits none when there is no good match. Trust it rather than
-                // re-deriving a suggestion ourselves — an ad-hoc edit-distance pass
-                // invents false matches for nonsense input and can point an agent at a
-                // destructive command (`websets event` → `delete`).
-                if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
-                    details.insert(
-                        "didYouMean".to_string(),
-                        serde_json::Value::String(did_you_mean.clone()),
-                    );
-                    suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
+            if suggestion.is_none() {
+                if let Some(kind) = suggested_kind {
+                    // clap orders suggestions by ascending similarity (most similar LAST)
+                    // and emits none when there is no good match. Trust it rather than
+                    // re-deriving a suggestion ourselves — an ad-hoc edit-distance pass
+                    // invents false matches for nonsense input and can point an agent at a
+                    // destructive command (`websets event` → `delete`).
+                    if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
+                        details.insert(
+                            "didYouMean".to_string(),
+                            serde_json::Value::String(did_you_mean.clone()),
+                        );
+                        suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
+                    }
                 }
             }
 
@@ -6463,11 +6481,11 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
-                    "Contents URLs are positional, never `--urls`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
+                    "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
-                    "Contents/fetch success envelopes add outcome no_content (no failures and no returned content), partial, or full (content for every requested item); all-URL failures retain exit 10 and warning code all_urls_failed, while partial URL failures retain exit 0.",
+                    "Contents/fetch success envelopes add outcome no_content (no failures and no returned rows), partial, or full (one results row per requested item with no failure evidence); missing statuses do not downgrade full coverage, and all-URL failures remain outcome partial with exit 10.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
-                    "Set EXA_AGENT_NO_NETWORK=1 to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; dry-run and self-description remain available.",
+                    "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],

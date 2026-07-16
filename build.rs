@@ -413,8 +413,15 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         };
         let enum_values = enum_values_literal(&f.enum_values);
         let range = range_literal(f.range)?;
-        let input_kind = input_kind_literal(f.input_kind.as_deref())?;
-        let input_name = option_string_literal(&f.input_name);
+        // Body fields are flags unless the overlay explicitly records a positional input.
+        // This keeps self-description authoritative for every modeled flag without pretending
+        // that unmodeled/local-only Clap arguments belong to the request registry.
+        let input_kind = input_kind_literal(Some(f.input_kind.as_deref().unwrap_or("flag")))?;
+        let input_name = f
+            .input_name
+            .as_ref()
+            .map(|name| option_string_literal(&Some(name.clone())))
+            .unwrap_or_else(|| format!("Some({:?})", format!("--{}", f.flag)));
         let value_name = option_string_literal(&f.value_name);
         let arity = arity_literal(f.arity.as_ref())?;
         let input_range = input_range_literal(f.input_range)?;

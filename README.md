@@ -44,7 +44,7 @@ The minimum supported Rust version is 1.85. Run the local MSRV gate before
 opening a Rust change:
 
 ```sh
-cargo +1.85 clippy --all-features --all-targets -- -D warnings
+cargo +1.85 clippy --locked --all-features --all-targets -- -D warnings
 ```
 
 ## Usage
@@ -63,7 +63,7 @@ exa-agent answer "what changed in the EU AI Act in 2025?"
 
 # Page contents
 exa-agent contents https://exa.ai https://docs.exa.ai --text
-# URLs are positional (not --urls). Text accepts bare, full, or N (1..10000).
+# Contents accepts positional URLS or `--ids`. Text accepts bare, full, or N (1..10000).
 
 # Code/docs context for a coding agent
 exa-agent context "how to stream SSE in Rust with ureq"
@@ -97,7 +97,8 @@ exa-agent doctor                # read-only health checks (add --online for a li
 
 `capabilities` lists all 68 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
 
-For a hard local-only boundary, set `EXA_AGENT_NO_NETWORK=1`. Live typed, raw,
+For a hard local-only boundary, set `EXA_AGENT_NO_NETWORK` to any value (including empty).
+Its presence enables the guard; unsetting it is the only off state. Live typed, raw,
 streaming, `auth test`, and `doctor --online` paths then return a structured
 `usage_error` on stderr with exit 1 before credential resolution or transport;
 `auth status` and `schema refresh --check` are also refused before credential

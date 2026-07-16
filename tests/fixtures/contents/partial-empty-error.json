@@ -1,0 +1,9 @@
+{
+  "upstream": {
+    "results": [{"url": "https://partial-a.test", "text": "ok"}],
+    "statuses": [
+      {"id": "https://partial-a.test", "status": "success"},
+      {"id": "https://partial-b.test", "status": "error", "error": {}}
+    ]
+  }
+}

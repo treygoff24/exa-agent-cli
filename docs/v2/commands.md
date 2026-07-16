@@ -148,7 +148,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | Official operation | Canonical command | Notes |
 |---|---|---|
 | `POST /search` | `exa-agent search QUERY` | `type`: `auto`(default)`,fast,instant,deep-lite,deep,deep-reasoning`. Content extraction nested under `contents.*`. Streaming only when `--output-schema` is set. Uses `--num-results` (1..100), **not** `--limit`. |
-| `POST /contents` | `exa-agent contents URL...` | URLs are positional; `urls` in self-description is a one-release legacy body-field key, **not** `--urls` (`legacyFlagIsCliFlag: false`). `inputKind: argument` and `name: URLS` are authoritative. Accepts `--ids` as alternative to URLs (mutually exclusive). 1..100 urls/ids; >100 needs `--chunk-size`. Top-level `text/highlights/summary` upstream. |
+| `POST /contents` | `exa-agent contents URL...` | URLs are positional. The legacy `urls` self-description body-field key is not a CLI spelling (`legacyFlagIsCliFlag: false`); `inputKind: argument` and `name: URLS` are authoritative. Accepts positional URLS or `--ids` (mutually exclusive). 1..100 urls/ids; >100 needs `--chunk-size`. Top-level `text/highlights/summary` upstream. |
 | `POST /findSimilar` | `exa-agent similar URL` | **Deprecated upstream**; warns on stderr, suggests `exa-agent search --similar-to URL`. Kept for breadth. |
 | `POST /answer` | `exa-agent answer QUESTION` | `--text`, `--output-schema`, `--stream`. Returns `data.answer` + `data.citations`. |
 | `POST /context` | `exa-agent context QUERY` | Exa Code. **Docs-only** — not in the OpenAPI, so it is an **overlay-defined** op (D22). `--tokens dynamic|N` (50..100000). Returns `data.response` + counts. |
@@ -362,7 +362,7 @@ exa-agent contents --ids ID...                 # alternative to URLs (mutually e
 ```
 
 Guards:
-- `--urls` (positional) and `--ids` both supplied → exit 1 (choose one).
+- positional URLS and `--ids` both supplied → exit 1 (choose one).
 - >100 urls/ids without `--chunk-size` → exit 1 with the exact `--chunk-size 100` command.
 - `--stream` → exit 1 (contents does not stream).
 - `--livecrawl` + `--max-age-hours` → exit 1.
@@ -585,7 +585,7 @@ exa-agent raw METHOD PATH [--body @file] [--query k=v]
 ```
 
 Notes:
-- `capabilities`, `schema show/list`, and default `doctor` never touch the network (D8/D9). Set `EXA_AGENT_NO_NETWORK=1` for generated docs and local probes: it refuses every networked path before credentials/transport, while dry-run and self-description remain available.
+- `capabilities`, `schema show/list`, and default `doctor` never touch the network (D8/D9). Set `EXA_AGENT_NO_NETWORK` to any value for generated docs and local probes: presence refuses every networked path before credentials/transport, while dry-run and self-description remain available; unset it to allow live calls.
 - `doctor` is diagnose-and-suggest only — no `--fix`/undo/backup machinery in v1 (D8). Every `fail`/`warn` finding names its exact fix command. Output is `exa.cli.doctor.v1` (contracts §15) with the **linter-style exit dictionary 0 = healthy / 1 = findings / 4 = refused-unsafe** — deliberately *not* the §6 categories, so a `doctor` exit can't be confused with a real `auth`(2)/`config`(3) failure. The detector ids + exit dictionary are published in `capabilities.doctor`.
 - `auth logout` clears the keyring entry for the active profile (best-effort; no error if absent).
 - Config stores profile metadata and env-var names, never plaintext keys by default (D11).

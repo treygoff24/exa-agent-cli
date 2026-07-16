@@ -20,11 +20,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Refuse every live network path when the caller explicitly requested a local-only run.
 pub fn ensure_network_allowed() -> Result<(), CliError> {
-    if std::env::var("EXA_AGENT_NO_NETWORK").ok().as_deref() == Some("1") {
+    if std::env::var_os("EXA_AGENT_NO_NETWORK").is_some() {
         return Err(CliError::Usage(
             Diag::new(
                 "usage_error",
-                "network access is disabled by EXA_AGENT_NO_NETWORK=1",
+                "network access is disabled because EXA_AGENT_NO_NETWORK is set",
             )
             .with_suggestion(
                 "unset EXA_AGENT_NO_NETWORK or use --dry-run for an offline request preview",
@@ -1055,7 +1055,8 @@ pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> 
 }
 
 /// Classify a `/contents` response against the request that produced it.
-/// `full` means every requested item has both a successful status and returned content.
+/// `full` means one `results[]` row per requested item and no failure evidence; statuses are
+/// optional metadata and their absence does not downgrade complete row coverage.
 pub fn contents_outcome(data: &Value, requested_count: usize) -> &'static str {
     let results_count = data
         .get("results")
@@ -1072,21 +1073,11 @@ pub fn contents_outcome(data: &Value, requested_count: usize) -> &'static str {
             .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
             .count()
     });
-    let successful = statuses.map_or(0, |statuses| {
-        statuses
-            .iter()
-            .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("success"))
-            .count()
-    });
     if failed > 0 {
         "partial"
     } else if results_count == 0 {
         "no_content"
-    } else if results_count == requested_count
-        && statuses.is_none_or(|statuses| {
-            statuses.len() == requested_count && successful == requested_count
-        })
-    {
+    } else if results_count == requested_count {
         "full"
     } else {
         "partial"

@@ -6,8 +6,9 @@ use exa_agent_cli::auth::{self, NoopKeyring};
 use exa_agent_cli::cli::Cli;
 use exa_agent_cli::error::{CliError, Diag};
 use exa_agent_cli::transport::{
-    execute_raw_stream_with_request_id, send_with_retry, FakeTransport, HttpRequest,
-    RawExecuteParams, SendOptions, StreamItem, StreamOutcome, Transport, UreqTransport,
+    ensure_network_allowed, execute_raw_stream_with_request_id, send_with_retry, FakeTransport,
+    HttpRequest, RawExecuteParams, SendOptions, StreamItem, StreamOutcome, Transport,
+    UreqTransport,
 };
 use std::cell::Cell;
 use std::sync::Mutex;
@@ -40,30 +41,35 @@ impl Transport for NeverReachedTransport {
 }
 
 #[test]
-fn no_network_guard_stops_before_fake_and_live_transport_send() {
+fn no_network_guard_stops_before_fake_and_live_transport_send_for_any_present_value() {
     let _lock = ENV_LOCK.lock().unwrap();
     let previous = std::env::var("EXA_AGENT_NO_NETWORK").ok();
-    unsafe { std::env::set_var("EXA_AGENT_NO_NETWORK", "1") };
-
-    let fake = FakeTransport::default();
-    fake.push_ok_json(200, "{}");
-    let request = HttpRequest {
-        method: "GET".to_string(),
-        url: "http://127.0.0.1:1/never-sent".to_string(),
-        headers: Vec::new(),
-        body: None,
-    };
-    let options = SendOptions {
-        retry: 0,
-        retry_after: false,
-        idempotency_key: None,
-    };
-    let result = send_with_retry(&fake, &request, &options).unwrap_err();
-    assert_eq!(result.diag().code, "usage_error");
-    assert!(fake.recorded_requests().is_empty());
-
-    let result = UreqTransport::with_defaults().send(&request).unwrap_err();
-    assert_eq!(result.diag().code, "usage_error");
+    for value in ["1", "true", "TRUE", "yes", "01", ""] {
+        unsafe { std::env::set_var("EXA_AGENT_NO_NETWORK", value) };
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, "{}");
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            url: "http://127.0.0.1:1/never-sent".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        let options = SendOptions {
+            retry: 0,
+            retry_after: false,
+            idempotency_key: None,
+        };
+        let result = send_with_retry(&fake, &request, &options).unwrap_err();
+        assert_eq!(result.diag().code, "usage_error", "value {value:?}");
+        assert!(fake.recorded_requests().is_empty(), "value {value:?}");
+        let result = UreqTransport::with_defaults().send(&request).unwrap_err();
+        assert_eq!(result.diag().code, "usage_error", "value {value:?}");
+    }
+    unsafe { std::env::remove_var("EXA_AGENT_NO_NETWORK") };
+    assert!(
+        ensure_network_allowed().is_ok(),
+        "absence is the only off state"
+    );
 
     match previous {
         Some(value) => unsafe { std::env::set_var("EXA_AGENT_NO_NETWORK", value) },

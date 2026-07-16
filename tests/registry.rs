@@ -111,18 +111,26 @@ fn error_code_dictionary_is_well_formed() {
     }
 }
 
-#[test]
-fn contents_registry_input_metadata_matches_clap() {
-    let op = registry::lookup_by_command("contents").expect("contents registry entry");
-    let command = Cli::command();
-    let contents = command
-        .find_subcommand("contents")
-        .expect("contents clap command");
+fn clap_leaf<'a>(command: &'a clap::Command, path: &[&str]) -> &'a clap::Command {
+    path.iter().fold(command, |command, segment| {
+        command
+            .find_subcommand(segment)
+            .unwrap_or_else(|| panic!("missing clap command {segment}"))
+    })
+}
 
-    for field in op.fields.iter().filter(|field| field.input_kind.is_some()) {
-        let arg = match field.input_kind.expect("filtered above") {
+fn assert_registry_inputs_match_clap(command_path: &str) {
+    let op = registry::lookup_by_command(command_path).expect("registry entry");
+    let command = Cli::command();
+    let segments: Vec<_> = command_path.split(' ').collect();
+    let leaf = clap_leaf(&command, &segments);
+    for field in op.fields {
+        let input_kind = field.input_kind.unwrap_or_else(|| {
+            panic!("{} field {} lacks input metadata", op.command(), field.flag)
+        });
+        let arg = match input_kind {
             registry::InputKind::Flag => {
-                let arg = contents
+                let arg = leaf
                     .get_arguments()
                     .find(|arg| arg.get_long() == Some(field.flag));
                 let long = arg.and_then(|arg| arg.get_long()).expect("clap long flag");
@@ -132,7 +140,7 @@ fn contents_registry_input_metadata_matches_clap() {
                 ));
                 arg
             }
-            registry::InputKind::Argument => contents.get_arguments().find(|arg| {
+            registry::InputKind::Argument => leaf.get_arguments().find(|arg| {
                 arg.get_long().is_none()
                     && arg
                         .get_value_names()
@@ -141,18 +149,22 @@ fn contents_registry_input_metadata_matches_clap() {
         }
         .unwrap_or_else(|| panic!("{} missing clap input for {}", op.command(), field.flag));
 
-        let arity = field.arity.expect("input metadata has arity");
-        let clap_arity = arg
-            .get_num_args()
-            .unwrap_or_else(|| panic!("{} has no clap arity", field.flag));
-        assert_eq!(clap_arity.min_values(), arity.min, "{}", field.flag);
-        assert_eq!(
-            clap_arity.max_values(),
-            arity.max.unwrap_or(usize::MAX),
-            "{}",
-            field.flag
-        );
-        if let Some(value_name) = field.value_name.or(field.input_name) {
+        if let Some(arity) = field.arity {
+            let clap_arity = arg
+                .get_num_args()
+                .unwrap_or(clap::builder::ValueRange::SINGLE);
+            assert_eq!(clap_arity.min_values(), arity.min, "{}", field.flag);
+            assert_eq!(
+                clap_arity.max_values(),
+                arity.max.unwrap_or(usize::MAX),
+                "{}",
+                field.flag
+            );
+        }
+        if let Some(value_name) = field.value_name.or_else(|| {
+            (input_kind == registry::InputKind::Argument)
+                .then_some(field.input_name.expect("argument input name"))
+        }) {
             assert_eq!(
                 arg.get_value_names().expect("clap value name"),
                 [value_name],
@@ -163,11 +175,44 @@ fn contents_registry_input_metadata_matches_clap() {
     }
 }
 
+#[test]
+fn contents_registry_input_metadata_matches_clap() {
+    let op = registry::lookup_by_command("contents").expect("contents registry entry");
+    assert!(op.fields.iter().all(|field| field.input_kind.is_some()));
+    assert!(op.fields.iter().all(|field| field.input_name.is_some()));
+    assert!(op.fields.iter().all(|field| field.arity.is_some()));
+    assert_eq!(
+        op.fields
+            .iter()
+            .find(|field| field.flag == "text")
+            .and_then(|field| field.input_range),
+        Some((1, 10_000))
+    );
+    assert_registry_inputs_match_clap("contents");
+}
+
+#[test]
+fn modeled_core_inputs_are_non_vacuously_parity_checked_against_clap() {
+    for command in ["search", "answer", "context", "similar", "contents"] {
+        assert_registry_inputs_match_clap(command);
+    }
+}
+
 fn flag_input_name_matches_clap_long(input_name: &str, long: &str) -> bool {
     input_name == format!("--{long}")
 }
 
 #[test]
 fn flag_input_name_parity_detects_deliberate_registry_drift() {
+    let search = registry::lookup_by_command("search").expect("search registry entry");
+    let text = search
+        .fields
+        .iter()
+        .find(|field| field.flag == "text")
+        .expect("search text field");
+    assert!(flag_input_name_matches_clap_long(
+        text.input_name.expect("generator flag name"),
+        "text"
+    ));
     assert!(!flag_input_name_matches_clap_long("--wrong", "text"));
 }

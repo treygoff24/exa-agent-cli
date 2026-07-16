@@ -55,6 +55,7 @@ fn command(args: &[&str]) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(env!("CARGO_BIN_EXE_exa-agent"));
     cmd.args(args)
         .env_remove("EXA_OUTPUT")
+        .env_remove("EXA_AGENT_NO_NETWORK")
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")
         .env_remove("EXA_ADMIN_BASE_URL")
@@ -709,6 +710,8 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
     let original = br#"{"api_key":"test-key-abcdef12"}"#;
     fs::write(&credentials, original).unwrap();
     let base_url = closed_local_base_url();
+    let csv = dir.join("import.csv");
+    fs::write(&csv, "name\nexample\n").unwrap();
     for args in [
         vec![
             "contents",
@@ -725,6 +728,23 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
         vec!["raw", "POST", "/search", "--base-url", base_url.as_str()],
         vec!["auth", "status"],
         vec!["schema", "refresh", "--check"],
+        vec!["schema", "refresh"],
+        vec![
+            "websets",
+            "imports",
+            "create",
+            "--source",
+            "csv",
+            "--csv",
+            csv.to_str().unwrap(),
+            "--count",
+            "1",
+            "--entity",
+            "company",
+            "--base-url",
+            base_url.as_str(),
+        ],
+        vec!["websets", "list", "--all", "--base-url", base_url.as_str()],
         vec!["auth", "test", "--base-url", base_url.as_str()],
         vec!["doctor", "--online", "--base-url", base_url.as_str()],
         vec![
@@ -749,7 +769,7 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
         assert!(error["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("EXA_AGENT_NO_NETWORK=1"));
+            .contains("EXA_AGENT_NO_NETWORK is set"));
         assert!(error["error"]["suggestedCommand"]
             .as_str()
             .unwrap()
@@ -778,6 +798,21 @@ fn no_network_keeps_dry_run_request_building_credential_free() {
         10000
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn no_network_cli_guard_uses_presence_not_a_truthy_value() {
+    for value in ["1", "true", "TRUE", "yes", "01", ""] {
+        let output = run_with_env(
+            &["raw", "POST", "/search"],
+            &[("EXA_AGENT_NO_NETWORK", value)],
+        );
+        assert_eq!(output.status.code(), Some(1), "value {value:?}");
+        assert_eq!(stderr_json(&output)["error"]["code"], "usage_error");
+    }
+    let absent = run(&["raw", "POST", "/search"]);
+    assert_eq!(absent.status.code(), Some(2));
+    assert_eq!(stderr_json(&absent)["error"]["code"], "not_authenticated");
 }
 
 #[test]
@@ -1378,12 +1413,12 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
     let search = run_ok_json(&["capabilities", "search", "--compact"]);
     for field in search["command"]["fields"].as_array().unwrap() {
         assert!(
-            field.get("inputKind").is_none(),
-            "search field unexpectedly claims explicit input metadata: {field}"
+            field.get("inputKind").is_some(),
+            "modeled search field lacks input metadata: {field}"
         );
         assert!(
-            field.get("legacyFlagIsCliFlag").is_none(),
-            "unannotated search field must not claim a CLI flag: {field}"
+            field.get("name").is_some(),
+            "modeled search field lacks an authoritative input name: {field}"
         );
     }
     assert!(contents["command"]["contentDefaults"]["text"]
@@ -1502,25 +1537,25 @@ fn contents_text_forms_match_help_and_reject_legacy_boolean_spellings() {
 
 #[test]
 fn contents_partial_url_failures_warn_and_exit_zero() {
-    let response = br#"{
-        "results":[{"url":"https://a.test","text":"ok"}],
-        "statuses":[
-            {"id":"https://a.test","status":"success"},
-            {"id":"https://b.test","status":"error","error":{"tag":"NOT_FOUND"}}
-        ]
-    }"#;
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/contents/partial-empty-error.json")).unwrap();
+    let response = Box::leak(
+        serde_json::to_vec(&fixture["upstream"])
+            .unwrap()
+            .into_boxed_slice(),
+    );
     let (base_url, server) = local_json_server(
         |request_text| {
             assert!(request_text.starts_with("POST /contents "));
-            assert!(request_text.contains(r#""https://a.test""#));
-            assert!(request_text.contains(r#""https://b.test""#));
+            assert!(request_text.contains(r#""https://partial-a.test""#));
+            assert!(request_text.contains(r#""https://partial-b.test""#));
         },
         response,
     );
     let output = run(&[
         "contents",
-        "https://a.test",
-        "https://b.test",
+        "https://partial-a.test",
+        "https://partial-b.test",
         "--api-key",
         "test-key-abcdef12",
         "--base-url",
@@ -1539,7 +1574,10 @@ fn contents_partial_url_failures_warn_and_exit_zero() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|warning| warning["code"] == "url_failed" && warning["url"] == "https://b.test"));
+        .any(|warning| warning["code"] == "url_failed"
+            && warning["url"] == "https://partial-b.test"
+            && warning["error"] == serde_json::json!({})));
+    assert_eq!(json["outcome"], "partial");
 }
 
 #[test]
@@ -1576,6 +1614,7 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "partial");
     let warning = json["warnings"]
         .as_array()
         .unwrap()
@@ -1729,6 +1768,7 @@ fn fetch_undercounted_statuses_keep_per_url_warning_and_correlation() {
     assert!(output.stderr.is_empty());
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["command"], fixture["expected"]["command"]);
+    assert_eq!(envelope["outcome"], "partial");
     assert_eq!(
         envelope["request"]["correlationId"],
         fixture["expected"]["correlationId"]
@@ -2793,6 +2833,20 @@ fn clap_unknown_flag_includes_did_you_mean() {
         .as_str()
         .unwrap()
         .contains("--num-results"));
+}
+
+#[test]
+fn contents_urls_flag_is_rejected_with_a_positional_url_suggestion() {
+    let output = run(&["contents", "--urls", "https://exa.ai"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "unknown_flag");
+    assert_eq!(error["error"]["details"]["inputKind"], "argument");
+    assert_eq!(error["error"]["details"]["name"], "URLS");
+    assert!(error["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .contains("exa-agent contents https://exa.ai"));
 }
 
 #[test]

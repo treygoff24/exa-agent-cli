@@ -100,6 +100,14 @@ fn contents_outcome_distinguishes_empty_complete_partial_and_full() {
         ),
         "full"
     );
+    assert_eq!(
+        contents_outcome(
+            &serde_json::json!({"results": [{"url": "https://ok.test"}]}),
+            1
+        ),
+        "full",
+        "complete result rows do not require optional statuses"
+    );
 }
 
 #[test]

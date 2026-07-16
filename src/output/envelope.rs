@@ -349,8 +349,9 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
                         .expect("input metadata has a name")
                         .to_string(),
                 );
-                let arity = field.arity.expect("input metadata has arity");
-                value["arity"] = serde_json::json!({ "min": arity.min, "max": arity.max });
+                if let Some(arity) = field.arity {
+                    value["arity"] = serde_json::json!({ "min": arity.min, "max": arity.max });
+                }
                 if let Some(value_name) = field.value_name {
                     value["valueName"] = serde_json::Value::String(value_name.to_string());
                 }

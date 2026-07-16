@@ -7,7 +7,8 @@ All notable changes to this project are documented here.
 ### Fixed
 
 - Wave 5 contract hardening: contents metadata distinguishes positional URLs,
-  contents/fetch envelopes report outcomes, and repo probes can forbid network.
+  contents/fetch outcomes require one result row per requested item, and repo
+  probes can forbid network.
 
 ## 0.3.0 — 2026-07-07
 

@@ -35,6 +35,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Generated skill
         run: EXA_AGENT_NO_NETWORK=1 cargo xtask generate-skill --check
+      - name: Generated registry
+        run: EXA_AGENT_NO_NETWORK=1 cargo xtask generate-registry --check
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Tests

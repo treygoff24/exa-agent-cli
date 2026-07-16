@@ -94,8 +94,8 @@ than serialized as `null` — an agent should check for key presence, not compar
 
 Rules:
 - `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`.
-- `/contents` and the `fetch` macro add required `outcome`: `full` only when every requested item has a successful status and returned content; `partial` when any item fails or a non-empty response under-returns content; and `no_content` when there are no failures and no returned content. This field is additive; the existing `ok`, warning, and exit-code behavior is unchanged (`url_failed` remains exit 0, `all_urls_failed` remains exit 10).
-- Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs; agents must never infer a `--urls` flag.
+- `/contents` and the `fetch` macro add required `outcome`: returned content means one `results[]` row per requested item, without inspecting text or summary fields. `full` is complete row coverage with no failure evidence; missing statuses do not downgrade it. `partial` means any failure evidence or a non-empty response that under-returns rows; `no_content` means no failures and no returned rows. This field is additive and independent of exit classification: `url_failed` remains exit 0, and `all_urls_failed` remains exit 10 while its outcome is `partial`.
+- Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs or `--ids`; agents must never infer a named URL flag.
 - `count` is the number of primary items in this response (results, items, citations — whichever the command's `data` is a list of), or `null` for single-object responses. It is **always populated even when `data` is spilled** (`dataTruncated: true`, §9) so an agent can size a spilled result without reading the file.
 - `dataHash` is a sha256 over the serialized `data` (or `null` when spilled-without-hashing). For the offline/registry-derived surfaces it is deterministic; for live-index results it is a change-fingerprint for cheap dedup/drift detection, **not** a determinism guarantee (§12).
 - `nextActions[]` carries paste-ready follow-ups (`{ "description": "...", "command": "exa-agent agent runs events <id> --stream" }`) — populated on async-create and cursor-paginated commands (e.g. after `agent run`, the obvious `runs get`/`runs events`). Empty `[]` when there is no obvious next step. This is the success-path analogue of the error envelope's `suggestedCommand`.
@@ -177,7 +177,7 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 | Exit | category | Meaning | Example |
 |---:|---|---|---|
 | 0 | success | Completed; empty results are success. | `results: []` |
-| 1 | usage | Invalid command/flag/JSON body/schema, or local validation. | `--all` on search; `--urls`+`--ids`; bad category filter |
+| 1 | usage | Invalid command/flag/JSON body/schema, or local validation. | `--all` on search; positional URLS plus `--ids`; bad category filter |
 | 2 | auth | Missing/invalid API key or team context (upstream 401/403). | no key; revoked key |
 | 3 | config | Config/profile/env problem. | malformed TOML; unknown profile |
 | 4 | network | DNS/connect/TLS/timeout *before* an upstream response. | offline; connect timeout |
@@ -329,7 +329,7 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
 }
 ```
 
-`EXA_AGENT_NO_NETWORK=1` is an execution guard, not a `capabilities` field: it refuses all
+The presence of `EXA_AGENT_NO_NETWORK` is an execution guard, not a `capabilities` field: it refuses all
 networked paths before credential resolution or transport creation while preserving dry-run and
 self-description commands.
 
@@ -356,4 +356,4 @@ These outputs are frozen with insta snapshots (see implementation plan); any dri
 }
 ```
 
-`status` is `healthy` (exit 0) when no finding is `fail`, else `findings` (exit 1). Each finding mirrors the error envelope's `suggestedCommand` so the fix is one paste-ready line (every `fail`/`warn` finding MUST name one). Read-only and offline by default; `--online` adds the networked detectors (D8). Setting `EXA_AGENT_NO_NETWORK=1` refuses every live typed, raw, stream, `auth test`, `auth status`, `schema refresh --check`, and `doctor --online` path with `usage_error` on stderr and exit 1 before credential resolution, transport construction, or sending. Dry-run request previews and offline description/help/schema/capabilities/robot-docs remain available.
+`status` is `healthy` (exit 0) when no finding is `fail`, else `findings` (exit 1). Each finding mirrors the error envelope's `suggestedCommand` so the fix is one paste-ready line (every `fail`/`warn` finding MUST name one). Read-only and offline by default; `--online` adds the networked detectors (D8). The presence of `EXA_AGENT_NO_NETWORK` (any value, including empty) refuses every live typed, raw, stream, `auth test`, `auth status`, `schema refresh --check`, and `doctor --online` path with `usage_error` on stderr and exit 1 before credential resolution, transport construction, or sending; unset it to allow live paths. Dry-run request previews and offline description/help/schema/capabilities/robot-docs remain available.

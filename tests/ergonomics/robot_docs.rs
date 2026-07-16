@@ -60,7 +60,7 @@ fn robot_docs_guide_mentions_core_agent_surfaces() {
         ".data.results[]",
         "--include-domain",
         "contents \\\"https://exa.ai\\\" \\\"https://docs.exa.ai\\\" --text 10000",
-        "EXA_AGENT_NO_NETWORK=1",
+        "EXA_AGENT_NO_NETWORK to any value",
         "schema refresh --check",
     ] {
         assert!(text.contains(needle), "guide missing {needle}: {text}");

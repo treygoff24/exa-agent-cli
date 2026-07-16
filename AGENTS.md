@@ -60,7 +60,7 @@ exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --prin
 ```
 
 For generated docs, examples, and local probes that must not touch credentials or the network,
-set `EXA_AGENT_NO_NETWORK=1`. It refuses live typed, raw, streaming, `auth test`/`status`,
+set `EXA_AGENT_NO_NETWORK` (any value, including empty; unset it to turn the guard off). It refuses live typed, raw, streaming, `auth test`/`status`,
 `schema refresh --check`, and `doctor --online` before credential resolution; dry-run and
 self-description commands still work.
 

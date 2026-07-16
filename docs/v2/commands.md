@@ -366,7 +366,7 @@ Guards:
 - >100 urls/ids without `--chunk-size` → exit 1 with the exact `--chunk-size 100` command.
 - `--stream` → exit 1 (contents does not stream).
 - `--livecrawl` + `--max-age-hours` → exit 1.
-- Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; batch with mixed outcomes exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
+- Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; a batch with mixed outcomes exits 0 with `url_failed` warnings and `outcome: "partial"`, while a batch where every item fails exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
 
 ### `similar` — `POST /findSimilar` (deprecated upstream)
 

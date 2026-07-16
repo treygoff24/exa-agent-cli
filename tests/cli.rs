@@ -703,6 +703,84 @@ fn auth_test_dry_run_previews_without_touching_network() {
 }
 
 #[test]
+fn no_network_refuses_live_paths_before_credentials_or_transport() {
+    let dir = temp_path("no-network-guard");
+    let credentials = dir.join("credentials.json");
+    let original = br#"{"api_key":"test-key-abcdef12"}"#;
+    fs::write(&credentials, original).unwrap();
+    let base_url = closed_local_base_url();
+    for args in [
+        vec![
+            "contents",
+            "https://example.test",
+            "--base-url",
+            base_url.as_str(),
+        ],
+        vec![
+            "fetch",
+            "https://example.test",
+            "--base-url",
+            base_url.as_str(),
+        ],
+        vec!["raw", "POST", "/search", "--base-url", base_url.as_str()],
+        vec!["auth", "status"],
+        vec!["schema", "refresh", "--check"],
+        vec!["auth", "test", "--base-url", base_url.as_str()],
+        vec!["doctor", "--online", "--base-url", base_url.as_str()],
+        vec![
+            "answer",
+            "network guard",
+            "--stream",
+            "--base-url",
+            base_url.as_str(),
+        ],
+    ] {
+        let output = run_with_env(
+            &args,
+            &[
+                ("EXA_AGENT_NO_NETWORK", "1"),
+                ("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        assert!(output.stdout.is_empty(), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "usage_error", "args: {args:?}");
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("EXA_AGENT_NO_NETWORK=1"));
+        assert!(error["error"]["suggestedCommand"]
+            .as_str()
+            .unwrap()
+            .contains("--dry-run"));
+        assert_eq!(fs::read(&credentials).unwrap(), original);
+    }
+}
+
+#[test]
+fn no_network_keeps_dry_run_request_building_credential_free() {
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://example.test/path?q=rust&sort=new",
+            "--text",
+            "10000",
+            "--dry-run",
+            "--compact",
+        ],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        envelope["data"]["request"]["body"]["text"]["maxCharacters"],
+        10000
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn validate_input_rejects_wrong_type_and_out_of_range() {
     // Registry FieldKind type check: numResults is Int, a string fails.
     let wrong_type = run(&[
@@ -1413,6 +1491,109 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         .as_str()
         .unwrap()
         .contains("https://a.test=NOT_FOUND"));
+}
+
+#[test]
+fn contents_compatibility_fixtures_preserve_warnings_and_add_outcome() {
+    for (fixture_name, command_name, url) in [
+        ("no-content", "contents", "https://empty.test"),
+        ("partial", "contents", "https://bad.test"),
+        ("all-failed", "fetch", "https://missing-a.test"),
+        ("full", "fetch", "https://full.test"),
+    ] {
+        let fixture: serde_json::Value = serde_json::from_str(match fixture_name {
+            "no-content" => include_str!("fixtures/contents/no-content.json"),
+            "partial" => include_str!("fixtures/contents/partial.json"),
+            "all-failed" => include_str!("fixtures/contents/all-failed.json"),
+            "full" => include_str!("fixtures/contents/full.json"),
+            _ => unreachable!(),
+        })
+        .expect("contents fixture JSON");
+        let upstream = Box::leak(
+            serde_json::to_vec(&fixture["upstream"])
+                .expect("serialize contents fixture")
+                .into_boxed_slice(),
+        );
+        let (base_url, server) = local_json_server(|_| {}, upstream);
+        let output = run(&[
+            command_name,
+            url,
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            base_url.as_str(),
+            "--compact",
+        ]);
+        server.join().expect("local test server panicked");
+
+        let expected = &fixture["expected"];
+        assert_eq!(
+            output.status.code(),
+            Some(expected["exit"].as_i64().unwrap() as i32)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["schema"], "exa.cli.response.v1");
+        assert_eq!(envelope["ok"], true);
+        assert_eq!(envelope["command"], "contents");
+        assert_eq!(envelope["operation"]["method"], "POST");
+        assert_eq!(envelope["operation"]["path"], "/contents");
+        assert_eq!(envelope["data"], fixture["upstream"]);
+        assert_eq!(envelope["outcome"], expected["outcome"]);
+        assert_eq!(envelope["warnings"], expected["warnings"]);
+        for key in [
+            "count",
+            "dataHash",
+            "costDollars",
+            "nextActions",
+            "diagnostics",
+            "dataTruncated",
+        ] {
+            assert!(
+                envelope.get(key).is_some(),
+                "compatibility envelope missing {key}"
+            );
+        }
+    }
+}
+
+#[test]
+fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/contents/empty-reason.json")).unwrap();
+    let upstream = Box::leak(
+        serde_json::to_vec(&fixture["upstream"])
+            .unwrap()
+            .into_boxed_slice(),
+    );
+    let (base_url, server) = local_json_server(|_| {}, upstream);
+    let output = run(&[
+        "fetch",
+        "https://opaque.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(10));
+    assert!(output.stderr.is_empty());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warning = &envelope["warnings"][0];
+    assert_eq!(warning["reason"], fixture["expected"]["reason"]);
+    assert_eq!(
+        warning["statuses"][0],
+        "https://opaque.test=upstream_reason_unavailable"
+    );
+    assert_eq!(
+        warning["suggestedCommand"],
+        fixture["expected"]["suggestedCommand"]
+    );
 }
 
 #[test]

@@ -381,6 +381,9 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 online: args.online,
                 checks,
             };
+            if options.online {
+                transport::ensure_network_allowed()?;
+            }
             let mut ctx = doctor::DoctorCtx::from_process();
             if options.online {
                 ctx.online_probes = Some(run_doctor_online_probes(&cli.globals));
@@ -4885,6 +4888,7 @@ fn dispatch_typed_inner(
         );
         return Ok(0);
     }
+    transport::ensure_network_allowed()?;
     live_typed_preflight(spec, globals)?;
 
     let effective_globals = options
@@ -4932,6 +4936,7 @@ fn dispatch_paginated_typed_command(
             .with_suggestion("exa-agent research list --all --ndjson"),
         ));
     }
+    transport::ensure_network_allowed()?;
     parse_user_headers(&globals.headers)?;
     let credential = resolve_operation_credential(spec.op, globals)?;
     let cfg = config::Config::load()?;
@@ -5333,6 +5338,7 @@ fn dispatch_typed_chunks_inner(
         }
         return Ok(0);
     }
+    transport::ensure_network_allowed()?;
     for spec in &specs {
         live_typed_preflight(spec, globals)?;
     }
@@ -6055,27 +6061,47 @@ fn append_contents_status_warnings(
         .iter()
         .map(|entry| contents_status_tag(entry))
         .collect();
+    let suggested_command = failed
+        .iter()
+        .find_map(|entry| contents_status_suggested_command(entry));
     let results_count = data
         .get("results")
         .or_else(|| data.get("data"))
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
     if failed.len() == statuses.len() && results_count == 0 {
-        warnings.push(serde_json::json!({
+        let mut warning = serde_json::json!({
             "code": "all_urls_failed",
             "message": format!("all requested URLs failed: {}", tags.join(", ")),
             "statuses": tags,
-        }));
+        });
+        if let Some(command) = suggested_command {
+            warning["suggestedCommand"] = serde_json::Value::String(command);
+        }
+        if failed
+            .iter()
+            .any(|entry| contents_status_reason(entry).is_none())
+        {
+            warning["reason"] =
+                serde_json::Value::String("upstream_reason_unavailable".to_string());
+        }
+        warnings.push(warning);
         return;
     }
     for (entry, tag) in failed.into_iter().zip(tags) {
-        warnings.push(serde_json::json!({
+        let mut warning = serde_json::json!({
             "code": "url_failed",
             "message": format!("requested URL failed: {tag}"),
             "url": entry.get("id").or_else(|| entry.get("url")).cloned().unwrap_or(serde_json::Value::Null),
             "status": entry.get("status").cloned().unwrap_or(serde_json::Value::String("error".to_string())),
             "error": entry.get("error").cloned().unwrap_or(serde_json::Value::Null),
-        }));
+        });
+        if let Some(command) = contents_status_suggested_command(entry) {
+            warning["suggestedCommand"] = serde_json::Value::String(command);
+            warning["reason"] =
+                serde_json::Value::String("upstream_reason_unavailable".to_string());
+        }
+        warnings.push(warning);
     }
 }
 
@@ -6085,22 +6111,42 @@ fn contents_status_tag(entry: &serde_json::Value) -> String {
         .or_else(|| entry.get("url"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<unknown>");
-    let error = entry
+    let error = contents_status_reason(entry).unwrap_or("upstream_reason_unavailable");
+    format!("{id}={error}")
+}
+
+fn contents_status_reason(entry: &serde_json::Value) -> Option<&str> {
+    let reason = entry
         .get("error")
         .and_then(|error| {
             error
                 .as_str()
                 .or_else(|| error.get("tag").and_then(serde_json::Value::as_str))
                 .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
+                .or_else(|| error.get("reason").and_then(serde_json::Value::as_str))
         })
-        .or_else(|| entry.get("tag").and_then(serde_json::Value::as_str))
-        .unwrap_or("error");
-    format!("{id}={error}")
+        .or_else(|| entry.get("tag").and_then(serde_json::Value::as_str));
+    reason.map(str::trim).filter(|reason| !reason.is_empty())
+}
+
+fn contents_status_suggested_command(entry: &serde_json::Value) -> Option<String> {
+    if contents_status_reason(entry).is_some() {
+        return None;
+    }
+    let target = entry
+        .get("id")
+        .or_else(|| entry.get("url"))
+        .and_then(serde_json::Value::as_str)?;
+    Some(format!(
+        "exa-agent contents {} --text full",
+        shell_quote(target)
+    ))
 }
 
 fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         AuthCmd::Status => {
+            transport::ensure_network_allowed()?;
             let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
             let service_input = credential_input(auth::CredentialNamespace::Service, globals)?;
             let api = auth::resolve_api_credential(&api_input, &auth::NoopKeyring);
@@ -6236,6 +6282,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
         );
         return Ok(0);
     }
+    transport::ensure_network_allowed()?;
     let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;
@@ -6389,8 +6436,13 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
+                    "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
+                    "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
+                    "Quote URLs: `exa-agent contents \"https://exa.ai\" --text 10000 --json`; numeric contents text caps are 1..10000, while `--text full` requests uncapped text.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
-                    "Contents/fetch all-URL failures return exit 10 with warning code all_urls_failed; partial URL failures warn and exit 0.",
+                    "Contents/fetch success envelopes add outcome no_content, partial, or full; all-URL failures retain exit 10 and warning code all_urls_failed, while partial URL failures retain exit 0.",
+                    "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
+                    "Set EXA_AGENT_NO_NETWORK=1 to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
@@ -6425,7 +6477,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                         "code": "all_urls_failed",
                         "exit": 10,
                         "description": "contents/fetch returned zero results and every requested URL failed; inspect warnings.statuses for per-URL status tags"
-                    }
+                    },
                 ],
             }),
             pretty,
@@ -6439,7 +6491,8 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "examples": [
                     "exa-agent capabilities --compact",
                     "exa-agent capabilities search --compact",
-                    "exa-agent search \"AI infrastructure news\" --dry-run --print-request --compact",
+                    "exa-agent search \"AI infrastructure news\" --include-domain \"exa.ai\" --num-results 5 --dry-run --print-request --compact",
+                    "exa-agent contents \"https://exa.ai\" --text 10000 --dry-run --print-request --compact",
                     "exa-agent team info --dry-run --print-request --compact"
                 ],
             }),
@@ -7463,6 +7516,7 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
+    transport::ensure_network_allowed()?;
     let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
     let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
         .map_err(|missing| auth::not_authenticated_error(&missing))?;

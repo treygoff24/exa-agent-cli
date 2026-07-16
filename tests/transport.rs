@@ -5,7 +5,7 @@ use exa_agent_cli::auth::{self, CredentialInput, NoopKeyring, Secret};
 use exa_agent_cli::cli::GlobalArgs;
 use exa_agent_cli::error::{CliError, Diag};
 use exa_agent_cli::transport::{
-    build_url, classify_http_status, execute_raw, parse_user_headers, probe_auth,
+    build_url, classify_http_status, contents_outcome, execute_raw, parse_user_headers, probe_auth,
     probe_connectivity, send_with_retry, AuthProbe, FakeTransport, HttpRequest, SendOptions,
 };
 
@@ -56,6 +56,38 @@ fn probe_connectivity_ok_on_any_status_fails_only_on_transport_error() {
     let down = FakeTransport::default();
     down.push_err(CliError::Network(Diag::new("network", "dns failure")));
     assert!(probe_connectivity(&down, "https://api.exa.ai").is_err());
+}
+
+#[test]
+fn contents_outcome_distinguishes_empty_complete_partial_and_full() {
+    assert_eq!(
+        contents_outcome(&serde_json::json!({
+            "results": [],
+            "statuses": [{"status": "success"}]
+        })),
+        "no_content"
+    );
+    assert_eq!(
+        contents_outcome(&serde_json::json!({
+            "results": [{"url": "https://ok.test"}],
+            "statuses": [{"status": "error"}]
+        })),
+        "partial"
+    );
+    assert_eq!(
+        contents_outcome(&serde_json::json!({
+            "results": [],
+            "statuses": [{"status": "error"}]
+        })),
+        "partial"
+    );
+    assert_eq!(
+        contents_outcome(&serde_json::json!({
+            "results": [{"url": "https://ok.test"}],
+            "statuses": [{"status": "success"}]
+        })),
+        "full"
+    );
 }
 
 #[test]

@@ -1,0 +1,14 @@
+{
+  "upstream": {
+    "results": [],
+    "statuses": [
+      { "id": "https://opaque.test", "status": "error", "error": {} }
+    ]
+  },
+  "expected": {
+    "outcome": "partial",
+    "exit": 10,
+    "reason": "upstream_reason_unavailable",
+    "suggestedCommand": "exa-agent contents 'https://opaque.test' --text full"
+  }
+}

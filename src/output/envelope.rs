@@ -241,6 +241,13 @@ pub fn response_envelope(args: ResponseEnvelopeArgs<'_>) -> serde_json::Value {
         envelope["request"]["correlationId"] =
             serde_json::Value::String(correlation_id.to_string());
     }
+    if args.operation.is_some_and(|op| op.command() == "contents")
+        && envelope["data"].get("request").is_none()
+    {
+        envelope["outcome"] = serde_json::Value::String(
+            crate::transport::contents_outcome(&envelope["data"]).to_string(),
+        );
+    }
     envelope
 }
 

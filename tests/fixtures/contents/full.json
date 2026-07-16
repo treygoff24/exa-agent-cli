@@ -1,0 +1,15 @@
+{
+  "upstream": {
+    "results": [
+      { "url": "https://full.test", "text": "complete" }
+    ],
+    "statuses": [
+      { "id": "https://full.test", "status": "success" }
+    ]
+  },
+  "expected": {
+    "outcome": "full",
+    "exit": 0,
+    "warnings": []
+  }
+}

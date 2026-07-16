@@ -18,6 +18,22 @@ use crate::redaction;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Refuse every live network path when the caller explicitly requested a local-only run.
+pub fn ensure_network_allowed() -> Result<(), CliError> {
+    if std::env::var("EXA_AGENT_NO_NETWORK").ok().as_deref() == Some("1") {
+        return Err(CliError::Usage(
+            Diag::new(
+                "usage_error",
+                "network access is disabled by EXA_AGENT_NO_NETWORK=1",
+            )
+            .with_suggestion(
+                "unset EXA_AGENT_NO_NETWORK or use --dry-run for an offline request preview",
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// A fully-resolved outbound HTTP call (after auth/header validation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
@@ -128,6 +144,7 @@ impl UreqTransport {
 
 impl Transport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
+        ensure_network_allowed()?;
         let response = send_ureq_request(&self.agent, req)?;
 
         let status = response.status().as_u16();
@@ -149,6 +166,7 @@ impl Transport for UreqTransport {
     where
         F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
     {
+        ensure_network_allowed()?;
         crate::stream::install_sigint_handler()?;
         crate::stream::reset_interrupt();
         let max_retries = options.retry;
@@ -657,6 +675,7 @@ pub fn probe_auth<T: Transport>(
     base_url: &str,
     secret: &Secret,
 ) -> Result<AuthProbe, CliError> {
+    ensure_network_allowed()?;
     let url = build_url(base_url, "/search", &[])?;
     let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
     inject_auth_headers(&mut headers, secret);
@@ -684,6 +703,7 @@ pub fn probe_auth<T: Transport>(
 /// Any status counts (the unrouted `GET /search` returns 404 and that is fine); only a
 /// transport-level failure — DNS, TLS, timeout, connection refused — is a connectivity failure.
 pub fn probe_connectivity<T: Transport>(transport: &T, base_url: &str) -> Result<u16, CliError> {
+    ensure_network_allowed()?;
     let url = build_url(base_url, "/search", &[])?;
     let req = HttpRequest {
         method: "GET".to_string(),
@@ -752,6 +772,7 @@ pub fn send_with_retry<T: Transport>(
     req: &HttpRequest,
     options: &SendOptions,
 ) -> Result<(HttpResponse, u32), CliError> {
+    ensure_network_allowed()?;
     let max_retries = options.retry;
     let mut attempt = 0u32;
     loop {
@@ -1000,6 +1021,33 @@ pub fn contents_mixed_status_exit_code(data: &Value) -> i32 {
         10
     } else {
         0
+    }
+}
+
+/// Classify the successful `/contents` payload once, independently of its exit code.
+/// A failed URL is partial even when every URL failed (that case still exits 10 below).
+pub fn contents_outcome(data: &Value) -> &'static str {
+    let results_count = data
+        .get("results")
+        .or_else(|| data.get("data"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let failed = data
+        .get("statuses")
+        .and_then(Value::as_array)
+        .map(|statuses| {
+            statuses
+                .iter()
+                .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("error"))
+                .count()
+        })
+        .unwrap_or(0);
+    if failed > 0 {
+        "partial"
+    } else if results_count == 0 {
+        "no_content"
+    } else {
+        "full"
     }
 }
 

@@ -1,0 +1,13 @@
+{
+  "upstream": {
+    "results": [],
+    "statuses": [
+      { "id": "https://empty.test", "status": "success" }
+    ]
+  },
+  "expected": {
+    "outcome": "no_content",
+    "exit": 0,
+    "warnings": []
+  }
+}

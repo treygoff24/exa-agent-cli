@@ -97,6 +97,13 @@ exa-agent doctor                # read-only health checks (add --online for a li
 
 `capabilities` lists all 68 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
 
+For a hard local-only boundary, set `EXA_AGENT_NO_NETWORK=1`. Live typed, raw,
+streaming, `auth test`, and `doctor --online` paths then return a structured
+`usage_error` on stderr with exit 1 before credential resolution or transport;
+`auth status` and `schema refresh --check` are also refused before credential
+resolution or network access; dry-run request previews and self-description
+commands still work.
+
 ### Command surface
 
 - **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream).

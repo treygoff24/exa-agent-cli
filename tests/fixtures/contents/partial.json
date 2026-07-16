@@ -1,0 +1,24 @@
+{
+  "upstream": {
+    "results": [
+      { "url": "https://ok.test", "text": "ok" }
+    ],
+    "statuses": [
+      { "id": "https://ok.test", "status": "success" },
+      { "id": "https://bad.test", "status": "error", "error": { "tag": "NOT_FOUND" } }
+    ]
+  },
+  "expected": {
+    "outcome": "partial",
+    "exit": 0,
+    "warnings": [
+      {
+        "code": "url_failed",
+        "message": "requested URL failed: https://bad.test=NOT_FOUND",
+        "url": "https://bad.test",
+        "status": "error",
+        "error": { "tag": "NOT_FOUND" }
+      }
+    ]
+  }
+}

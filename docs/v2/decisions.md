@@ -77,6 +77,13 @@ This is the ADR-style record of the decisions that gate everything else. Each en
 
 **Upgrade path.** If `doctor --fix` is ever added, the only legitimate targets are config-file rewrites — and *only then* do we adopt the full chokepoint + backup + `undo` discipline. That boundary is written down so it is not over-built early.
 
+**Post-v1 activation (2026-07-17).** The upgrade path is now active. Bare `doctor` remains
+read-only and offline; `--fix` repairs canonical config formatting and permission bits after one
+timestamped config backup, and `--undo` restores the latest backup only. Credential-file permission
+repairs require `--allow-auth` because they touch authentication data. Removing spill files older
+than seven days requires `--allow-delete` because it deletes local data. Network probes remain
+opt-in behind `--online`.
+
 ## D9 — Operation registry generated from OpenAPI at build time
 
 **Call.** A `build.rs` step parses the embedded Exa OpenAPI snapshot into a static operation registry (operation id, method, path, request fields, pagination style, streaming support, deprecation, safety metadata). Commands, `capabilities`, `schema`, and local validation read from it. The embedded spec's SHA-256 is surfaced in `capabilities --json`. We commit the build **inputs** (the vendored JSON spec(s) + `overlay.toml`); the registry is generated into `OUT_DIR` at build time and is **not** committed — it is regenerated reproducibly from the committed inputs, and a CI gate diffs a fresh re-generation. Drift is detected by `schema refresh --check` and a CI job — never on the hot path.
@@ -100,6 +107,12 @@ This is the ADR-style record of the decisions that gate everything else. Each en
 **Call.** v1 ships: `EXA_API_KEY` env-first auth, a minimal config file (base-url, default format, timeout, retry), `--profile` selecting a `[profiles.X]` block, and two thin macros (`ask`, `fetch`). The full configurable **preset/macro registry** (`preset show`, presets-in-TOML, `macro show`) is deferred to a later phase.
 
 **Why.** The contracts (envelope, exit codes, capabilities, raw) earn their rigor — that's load-bearing. The preset/profile *system* is surface we don't need to ship to be useful. Macros stay because they're cheap expansions that serve first-try inevitability; the configurable engine behind them can wait.
+
+**Post-v1 activation (2026-07-17).** Presets now load from
+`~/.config/exa-agent/presets.toml`, with `.exa-agent/presets.toml` at the Git root overriding names
+from the user file. `preset list|show` exposes the merged registry; `search --preset NAME` applies
+the preset body before explicit flags, `--body`, and `--set`. `macro list|show` exposes the
+transparent built-in `ask` and `fetch` expansions.
 
 ## D13 — Parser: `clap` (derive), lean on its suggestion engine
 

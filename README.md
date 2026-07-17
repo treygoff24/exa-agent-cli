@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 `exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, research, monitors, the whole Websets tree, and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, prints one JSON envelope, has a stable exit code, and can describe itself offline. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
-The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.3.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
+The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.4.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
 ## Install
 
@@ -95,7 +95,7 @@ The CLI describes itself, which is the point of the agent-first design. These ru
 exa-agent capabilities          # machine-readable inventory of all commands + exit/error codes
 exa-agent robot-docs guide      # a short, paste-ready playbook for agents
 exa-agent schema --help         # embedded API/CLI schema
-exa-agent doctor                # read-only health checks (add --online for a live probe)
+exa-agent doctor                # offline health checks (add --online for a live probe)
 ```
 
 `capabilities` lists all 68 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
@@ -117,7 +117,51 @@ commands still work.
 - **Websets** — the full tree: websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling.
-- **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, plus `auth` and `config`, and the `ask`/`fetch` convenience macros.
+- **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.
+
+### Presets and macros
+
+Request presets live in `~/.config/exa-agent/presets.toml`. A repo can override them with
+`.exa-agent/presets.toml` at its Git root. The local definition wins when both files define the
+same name.
+
+```toml
+[presets.news-fresh]
+command = "search"
+
+[presets.news-fresh.body]
+category = "news"
+numResults = 10
+```
+
+```sh
+exa-agent preset list
+exa-agent preset show news-fresh
+exa-agent search "AI policy" --preset news-fresh --dry-run --print-request
+exa-agent macro show ask
+exa-agent macro show fetch
+```
+
+Preset values are defaults: explicit flags, `--body`, and `--set` win. `macro show` exposes the
+canonical expansion for the built-in `ask` and `fetch` macros.
+
+### Doctor repair and undo
+
+Bare `doctor` remains read-only and offline. `doctor --fix` creates one timestamped, byte-preserving
+config backup before changing canonical TOML formatting or config permission bits. It reports every
+planned, fixed, skipped, or refused action in the existing `exa.cli.doctor.v1` envelope.
+
+```sh
+exa-agent doctor --fix --dry-run       # plan only
+exa-agent doctor --fix                 # safe config repairs
+exa-agent doctor --fix --allow-auth    # may secure credential-file permissions
+exa-agent doctor --fix --allow-delete  # may delete spill files older than seven days
+exa-agent doctor --undo                # restore the latest config backup
+```
+
+Auth-file changes require `--allow-auth` because they touch credential storage. Stale spill cleanup
+requires `--allow-delete` because it deletes local data. `doctor --undo` restores only the latest
+recorded backup; there is no selectable history stack. Network checks still require `--online`.
 
 ## Output contract
 

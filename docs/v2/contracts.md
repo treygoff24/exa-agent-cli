@@ -357,3 +357,11 @@ These outputs are frozen with insta snapshots (see implementation plan); any dri
 ```
 
 `status` is `healthy` (exit 0) when no finding is `fail`, else `findings` (exit 1). Each finding mirrors the error envelope's `suggestedCommand` so the fix is one paste-ready line (every `fail`/`warn` finding MUST name one). Read-only and offline by default; `--online` adds the networked detectors (D8). The presence of `EXA_AGENT_NO_NETWORK` (any value, including empty) refuses every live typed, raw, stream, `auth test`, `auth status`, `schema refresh --check`, and `doctor --online` path with `usage_error` on stderr and exit 1 before credential resolution, transport construction, or sending; unset it to allow live paths. Dry-run request previews and offline description/help/schema/capabilities/robot-docs remain available.
+
+Post-v1 repair is additive to this schema: `doctor --fix` may add `actions[]` (`id`, `status`,
+`path`, optional `reason`/`requiredFlag`) and `backupPath`. `--fix --dry-run` emits `planned` actions
+without mutation. Formatting and config permission repairs need no extra flag; credential permission
+repairs require `--allow-auth`, and deleting spill files older than seven days requires
+`--allow-delete`. `doctor --undo` restores the latest timestamped config backup and consumes the
+latest-backup marker; it does not expose a history selector. All repair and undo paths remain offline
+unless `--online` is also explicit.

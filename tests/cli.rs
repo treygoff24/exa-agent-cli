@@ -1334,6 +1334,52 @@ fn doctor_fix_requires_explicit_flags_for_auth_and_deletion() {
     );
     assert_eq!(fs::metadata(&credentials).unwrap().mode() & 0o777, 0o600);
     assert!(!spill.exists());
+    assert!(!state.join("spill").join(".doctor-quarantine").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fix_sweeps_quarantine_leftovers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_path("doctor-fix-quarantine");
+    let config = dir.join("config.toml");
+    let credentials = dir.join("credentials.json");
+    let state = dir.join("state");
+    let spill = state.join("spill");
+    let quarantine = spill.join(".doctor-quarantine");
+    let leftover = quarantine.join("leftover.json");
+    fs::create_dir_all(quarantine.parent().unwrap()).unwrap();
+    fs::create_dir_all(&quarantine).unwrap();
+    fs::write(&leftover, "{}\n").unwrap();
+    fs::write(&config, "base_url = \"https://api.exa.ai\"\n").unwrap();
+    fs::write(&credentials, r#"{"api_key":"secret"}"#).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();
+    let envs = [
+        ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+        ("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap()),
+        ("EXA_AGENT_STATE", state.to_str().unwrap()),
+        ("EXA_API_KEY", "exa-test-key"),
+    ];
+
+    let report = run_with_env(&["doctor", "--compact"], &envs);
+    assert_eq!(report.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert!(report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| { finding["id"] == "state.stale-cache" && finding["status"] == "warn" }));
+
+    let fixed = run_with_env(&["doctor", "--fix", "--allow-delete", "--compact"], &envs);
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert!(!leftover.exists());
+    assert!(!quarantine.exists());
 }
 
 #[cfg(unix)]
@@ -1404,10 +1450,11 @@ fn doctor_backup_uses_wall_clock_not_source_date_epoch() {
     fs::create_dir_all(&state).unwrap();
     fs::write(&config, "retry=2\nbase_url=\"https://api.exa.ai\"\n").unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+    let source_epoch = "2000000000";
     let envs = [
         ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
         ("EXA_AGENT_STATE", state.to_str().unwrap()),
-        ("SOURCE_DATE_EPOCH", "2000000000"),
+        ("SOURCE_DATE_EPOCH", source_epoch),
         ("EXA_API_KEY", "exa-test-key"),
     ];
 
@@ -1419,14 +1466,35 @@ fn doctor_backup_uses_wall_clock_not_source_date_epoch() {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let backup = report["backupPath"].as_str().unwrap();
-    assert!(PathBuf::from(backup).exists());
+    let backup_path = PathBuf::from(backup);
+    assert!(backup_path.exists());
+
+    let file_name = backup_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap();
+    let rest = file_name
+        .strip_prefix("config.toml.doctor-backup-")
+        .expect("backup name should use the doctor-backup prefix");
+    let (secs, nanos) = rest
+        .split_once('-')
+        .expect("backup name should contain seconds-nanos");
     assert!(
-        !backup.contains("2000000000"),
-        "backup name must not use SOURCE_DATE_EPOCH"
+        secs.chars().all(|c| c.is_ascii_digit()),
+        "backup seconds should be a decimal timestamp"
+    );
+    assert_eq!(
+        nanos.len(),
+        9,
+        "backup nanoseconds should be a fixed 9-digit suffix"
     );
     assert!(
-        backup.contains("doctor-backup-"),
-        "backup name should use a wall-clock timestamp"
+        nanos.chars().all(|c| c.is_ascii_digit()),
+        "backup nanoseconds should be decimal"
+    );
+    assert_ne!(
+        secs, source_epoch,
+        "backup seconds must not equal SOURCE_DATE_EPOCH"
     );
 }
 
@@ -7084,6 +7152,145 @@ extraDanger = "injected"
         .as_str()
         .unwrap()
         .contains("unknown field"));
+}
+
+#[test]
+fn preset_accepts_openapi_body_keys_before_merge() {
+    let dir = temp_path("preset-validation-openapi");
+    let presets = dir.join("presets.toml");
+    fs::write(
+        &presets,
+        r#"
+[presets.openapi]
+command = "search"
+
+[presets.openapi.body]
+query = "ignored by validation"
+userLocation = "US"
+moderation = true
+additionalQueries = ["AI"]
+contents = { summary = { query = "tl;dr" } }
+outputSchema = { type = "text", description = "plain" }
+"#,
+    )
+    .unwrap();
+    let envs = [("EXA_AGENT_PRESETS", presets.to_str().unwrap())];
+    let output = run_with_env(
+        &[
+            "search",
+            "topic",
+            "--preset",
+            "openapi",
+            "--dry-run",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["data"]["preset"], "openapi");
+    assert_eq!(body["data"]["request"]["body"]["userLocation"], "US");
+    assert_eq!(body["data"]["request"]["body"]["moderation"], true);
+}
+
+#[test]
+fn preset_accepts_array_of_object_body_keys() {
+    // Pins the round-3 fix: allowlist paths for array-of-object fields are emitted index-free
+    // from the schema's `items`, and the runtime walker matches elements index-free.
+    let dir = temp_path("preset-validation-array-items");
+    let presets = dir.join("presets.toml");
+    fs::write(
+        &presets,
+        r#"
+[presets.enriched]
+command = "websets create"
+
+[[presets.enriched.body.enrichments]]
+description = "Company HQ city"
+format = "text"
+
+[[presets.enriched.body.enrichments]]
+description = "Employee count"
+format = "number"
+"#,
+    )
+    .unwrap();
+    let envs = [("EXA_AGENT_PRESETS", presets.to_str().unwrap())];
+    let output = run_with_env(
+        &[
+            "websets",
+            "create",
+            "--preset",
+            "enriched",
+            "--body",
+            r#"{"search":{"query":"test"}}"#,
+            "--dry-run",
+        ],
+        &envs,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        body["data"]["request"]["body"]["enrichments"][0]["description"],
+        "Company HQ city"
+    );
+    assert_eq!(
+        body["data"]["request"]["body"]["enrichments"][1]["format"],
+        "number"
+    );
+}
+
+#[test]
+fn preset_applies_to_second_registry_backed_operation() {
+    let dir = temp_path("preset-generated-operation");
+    let presets = dir.join("presets.toml");
+    fs::write(
+        &presets,
+        r#"
+[presets.csv-import]
+command = "websets imports create"
+
+[presets.csv-import.body]
+format = "csv"
+size = 1024
+count = 10
+entity = { type = "company" }
+"#,
+    )
+    .unwrap();
+    let envs = [("EXA_AGENT_PRESETS", presets.to_str().unwrap())];
+    let output = run_with_env(
+        &[
+            "websets",
+            "imports",
+            "create",
+            "--preset",
+            "csv-import",
+            "--set",
+            "count=11",
+            "--dry-run",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["data"]["preset"], "csv-import");
+    assert_eq!(body["data"]["request"]["body"]["format"], "csv");
+    assert_eq!(body["data"]["request"]["body"]["count"], 11);
+    assert_eq!(body["data"]["request"]["body"]["entity"]["type"], "company");
 }
 
 #[test]

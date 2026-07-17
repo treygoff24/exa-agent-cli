@@ -9,7 +9,7 @@
 //! No YAML parser and no async runtime ship in the binary (D14/D21); this build script reads
 //! the already-normalized JSON.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -133,12 +133,14 @@ struct SpecOp {
     method: String,
     api_path: String,
     deprecated: bool,
+    body_schema: Option<serde_json::Value>,
 }
 
 struct SpecInfo {
     title: String,
     version: String,
     ops: BTreeMap<String, SpecOp>,
+    schemas: BTreeMap<String, serde_json::Value>,
 }
 
 fn main() -> Result<()> {
@@ -238,6 +240,8 @@ struct OpRow {
     source_version: String,
     fields: Vec<FieldMeta>,
     body_builder: Option<String>,
+    schema_fields: Vec<String>,
+    schema_free_paths: Vec<String>,
 }
 
 fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result<OpRow> {
@@ -247,42 +251,63 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         other => return Err(anyhow!("op {oid}: unknown namespace {other:?}")),
     };
 
-    let (method, api_path, deprecated, source, source_version) = if meta.defined_by_overlay {
-        (
-            meta.method
-                .clone()
-                .ok_or_else(|| anyhow!("overlay-defined op {oid} needs `method`"))?,
-            meta.api_path
-                .clone()
-                .ok_or_else(|| anyhow!("overlay-defined op {oid} needs `api_path`"))?,
-            false,
-            meta.source.clone().unwrap_or_else(|| "overlay".into()),
-            meta.source_version
-                .clone()
-                .unwrap_or_else(|| "overlay".into()),
-        )
-    } else {
-        let (spec, default_source, default_version) = if namespace == "Service" {
-            (admin, "team-management.json", admin.version.clone())
+    let (method, api_path, deprecated, source, source_version, body_schema, schemas) =
+        if meta.defined_by_overlay {
+            (
+                meta.method
+                    .clone()
+                    .ok_or_else(|| anyhow!("overlay-defined op {oid} needs `method`"))?,
+                meta.api_path
+                    .clone()
+                    .ok_or_else(|| anyhow!("overlay-defined op {oid} needs `api_path`"))?,
+                false,
+                meta.source.clone().unwrap_or_else(|| "overlay".into()),
+                meta.source_version
+                    .clone()
+                    .unwrap_or_else(|| "overlay".into()),
+                None,
+                &BTreeMap::new(),
+            )
         } else {
-            (exa, "exa-spec.json", exa.version.clone())
+            let (spec, default_source, default_version) = if namespace == "Service" {
+                (admin, "team-management.json", admin.version.clone())
+            } else {
+                (exa, "exa-spec.json", exa.version.clone())
+            };
+            let spec_op = spec
+                .ops
+                .get(oid)
+                .ok_or_else(|| anyhow!("op {oid} not found in its spec ({default_source})"))?;
+            (
+                spec_op.method.clone(),
+                websets_runtime_path(&spec_op.api_path),
+                spec_op.deprecated,
+                default_source.to_string(),
+                default_version,
+                spec_op.body_schema.as_ref(),
+                &spec.schemas,
+            )
         };
-        let spec_op = spec
-            .ops
-            .get(oid)
-            .ok_or_else(|| anyhow!("op {oid} not found in its spec ({default_source})"))?;
-        (
-            spec_op.method.clone(),
-            websets_runtime_path(&spec_op.api_path),
-            spec_op.deprecated,
-            default_source.to_string(),
-            default_version,
-        )
-    };
 
     let read_only = method == "GET";
     for field in &meta.fields {
         validate_field(oid, field)?;
+    }
+
+    let mut concrete: BTreeSet<String> = BTreeSet::new();
+    let mut free: BTreeSet<String> = BTreeSet::new();
+    if let Some(schema) = body_schema {
+        let mut visited = BTreeSet::new();
+        collect_schema_paths(schema, schemas, "", &mut concrete, &mut free, &mut visited);
+    }
+    for field in &meta.fields {
+        concrete.insert(field.body_path.clone());
+        for (co_path, _) in &field.co_fields {
+            concrete.insert(co_path.clone());
+        }
+        if field.kind == "json" {
+            free.insert(field.body_path.clone());
+        }
     }
 
     Ok(OpRow {
@@ -308,6 +333,8 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
         source_version,
         fields: meta.fields.to_vec(),
         body_builder: meta.body_builder.clone(),
+        schema_fields: concrete.into_iter().collect(),
+        schema_free_paths: free.into_iter().collect(),
     })
 }
 
@@ -325,6 +352,142 @@ fn websets_runtime_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+fn resolve_schema(
+    schema: &serde_json::Value,
+    components: &BTreeMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut resolved = if let Some(ref_path) = schema.get("$ref").and_then(|x| x.as_str()) {
+        if let Some(name) = ref_path.strip_prefix("#/components/schemas/") {
+            components
+                .get(name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            schema.clone()
+        }
+    } else {
+        schema.clone()
+    };
+    if let serde_json::Value::Object(ref_map) = schema {
+        if let serde_json::Value::Object(ref mut out_map) = resolved {
+            for (k, v) in ref_map {
+                if k == "$ref" {
+                    continue;
+                }
+                out_map.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    resolved
+}
+
+fn is_open_schema(
+    schema: &serde_json::Value,
+    components: &BTreeMap<String, serde_json::Value>,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    if let Some(ref_path) = schema.get("$ref").and_then(|x| x.as_str()) {
+        if let Some(name) = ref_path.strip_prefix("#/components/schemas/") {
+            if name == "JsonValue" {
+                return true;
+            }
+            if !visited.insert(name.to_string()) {
+                return false;
+            }
+            if let Some(resolved) = components.get(name) {
+                return is_open_schema(resolved, components, visited);
+            }
+            return false;
+        }
+    }
+    let resolved = resolve_schema(schema, components);
+    if let Some(alternatives) = resolved
+        .get("oneOf")
+        .or_else(|| resolved.get("anyOf"))
+        .and_then(|x| x.as_array())
+    {
+        return alternatives
+            .iter()
+            .any(|s| is_open_schema(s, components, visited));
+    }
+    if let Some(all_of) = resolved.get("allOf").and_then(|x| x.as_array()) {
+        return all_of
+            .iter()
+            .any(|s| is_open_schema(s, components, visited));
+    }
+    if let Some(items) = resolved.get("items") {
+        if is_open_schema(items, components, visited) {
+            return true;
+        }
+    }
+    let type_value = resolved.get("type");
+    let is_object = type_value
+        .and_then(|x| x.as_str())
+        .is_some_and(|t| t == "object")
+        || type_value
+            .and_then(|x| x.as_array())
+            .is_some_and(|arr| arr.iter().any(|x| x.as_str() == Some("object")));
+    if is_object {
+        let has_properties = resolved
+            .get("properties")
+            .and_then(|x| x.as_object())
+            .is_some_and(|m| !m.is_empty());
+        match resolved.get("additionalProperties") {
+            Some(serde_json::Value::Bool(false)) => return false,
+            Some(_) => return true,
+            None if has_properties => return false,
+            None => return true,
+        }
+    }
+    false
+}
+
+fn collect_schema_paths(
+    schema: &serde_json::Value,
+    components: &BTreeMap<String, serde_json::Value>,
+    prefix: &str,
+    concrete: &mut BTreeSet<String>,
+    free: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+) {
+    if !prefix.is_empty() {
+        let mut local_visited = visited.clone();
+        if is_open_schema(schema, components, &mut local_visited) {
+            free.insert(prefix.to_string());
+            concrete.insert(prefix.to_string());
+            return;
+        }
+        concrete.insert(prefix.to_string());
+    }
+    let resolved = resolve_schema(schema, components);
+    if let Some(alternatives) = resolved
+        .get("allOf")
+        .or_else(|| resolved.get("oneOf"))
+        .or_else(|| resolved.get("anyOf"))
+        .and_then(|x| x.as_array())
+    {
+        for sub in alternatives {
+            collect_schema_paths(sub, components, prefix, concrete, free, visited);
+        }
+        return;
+    }
+    if let Some(properties) = resolved.get("properties").and_then(|x| x.as_object()) {
+        for (key, sub) in properties {
+            let new_prefix = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            collect_schema_paths(sub, components, &new_prefix, concrete, free, visited);
+        }
+    }
+    // Array-of-object fields: walk `items` under the SAME prefix — the runtime walker matches
+    // array element keys index-free (`enrichments.title`, not `enrichments[0].title`).
+    if let Some(items) = resolved.get("items") {
+        collect_schema_paths(items, components, prefix, concrete, free, visited);
+    }
 }
 
 fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
@@ -440,13 +603,16 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         Some(name) => format!("Some({})", builder_variant(&r.operation_id, name)?),
         None => "None".to_string(),
     };
+    let schema_fields = strings_literal(&r.schema_fields);
+    let schema_free_paths = strings_literal(&r.schema_free_paths);
     writeln!(
         out,
         "    OperationDef {{ cli_path: &[{cli_path}], operation_id: {oid:?}, method: {method}, \
          api_path: {api_path:?}, read_only: {read_only}, streaming: {streaming}, pagination: {pagination}, \
          dangerous: {dangerous}, namespace: Namespace::{ns}, idempotency_sensitive: {idem}, \
          deprecated: {dep}, source: {source:?}, source_version: {sver:?}, fields: &[{fields}], \
-         capabilities: &[{capabilities}], body_builder: {body_builder}, validators: &[], mixed_status_exit: {mixed} }},",
+         capabilities: &[{capabilities}], body_builder: {body_builder}, validators: &[], \
+         mixed_status_exit: {mixed}, schema_fields: {schema_fields}, schema_free_paths: {schema_free_paths} }},",
         oid = r.operation_id,
         api_path = r.api_path,
         read_only = r.read_only,
@@ -519,6 +685,19 @@ fn co_fields_literal(fields: &[(String, ConstMeta)]) -> String {
 }
 
 fn enum_values_literal(values: &[String]) -> String {
+    if values.is_empty() {
+        return "&[]".to_string();
+    }
+
+    let mut out = String::from("&[");
+    for value in values {
+        let _ = write!(out, "{value:?}, ");
+    }
+    out.push(']');
+    out
+}
+
+fn strings_literal(values: &[String]) -> String {
     if values.is_empty() {
         return "&[]".to_string();
     }
@@ -657,6 +836,12 @@ fn parse_spec(bytes: &[u8]) -> Result<SpecInfo> {
             let Some(oid) = op.get("operationId").and_then(|x| x.as_str()) else {
                 continue;
             };
+            let body_schema = op
+                .get("requestBody")
+                .and_then(|r| r.get("content"))
+                .and_then(|c| c.get("application/json"))
+                .and_then(|c| c.get("schema"))
+                .cloned();
             ops.insert(
                 oid.to_string(),
                 SpecOp {
@@ -666,14 +851,26 @@ fn parse_spec(bytes: &[u8]) -> Result<SpecInfo> {
                         .get("deprecated")
                         .and_then(|x| x.as_bool())
                         .unwrap_or(false),
+                    body_schema,
                 },
             );
         }
     }
+    let schemas = v
+        .get("components")
+        .and_then(|c| c.get("schemas"))
+        .and_then(|s| s.as_object())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     Ok(SpecInfo {
         title,
         version,
         ops,
+        schemas,
     })
 }
 

@@ -75,7 +75,6 @@ struct TypedDispatchOptions<'a> {
     sse_accept: bool,
     extra_headers: Option<&'a [(String, String)]>,
     command_override: Option<&'a str>,
-    preset_name: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,7 +84,6 @@ struct TypedPreviewOptions<'a> {
     expands_to: Option<&'a str>,
     extra_headers: Option<&'a [(String, String)]>,
     command_override: Option<&'a str>,
-    preset_name: Option<&'a str>,
     globals: Option<&'a GlobalArgs>,
     warnings: &'a [serde_json::Value],
 }
@@ -545,15 +543,7 @@ fn dispatch_search(args: &SearchArgs, globals: &GlobalArgs, pretty: bool) -> Res
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     with_typed_error_context(op, globals, || {
         let spec = build_search_spec(args, globals)?;
-        dispatch_typed_command_with_options(
-            spec,
-            globals,
-            pretty,
-            TypedDispatchOptions {
-                preset_name: args.preset.as_deref(),
-                ..TypedDispatchOptions::default()
-            },
-        )
+        dispatch_typed_command(spec, globals, pretty)
     })
 }
 
@@ -565,16 +555,6 @@ fn build_search_spec(
     validate_search_intent_args(args)?;
     let flag_values = normalize_content_flag_values(op, args.into_flag_values(), &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
-    if let Some(name) = args.preset.as_deref() {
-        let preset = presets::get_preset(name, "search")?;
-        let preset_validation = validate_registry_body(op, &preset.body, false, true);
-        if preset_validation.valid == serde_json::Value::Bool(false) {
-            return Err(registry_validation_error(preset_validation));
-        }
-        let mut body = preset.body;
-        request::deep_merge(&mut body, spec.body);
-        spec.body = body;
-    }
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
@@ -4387,7 +4367,6 @@ fn dispatch_typed_preview_with_warnings(
                 expands_to: options.expands_to,
                 extra_headers: options.extra_headers,
                 command_override: options.command_override,
-                preset_name: options.preset_name,
                 globals: Some(globals),
                 warnings: &warnings,
             },
@@ -4695,7 +4674,7 @@ fn build_typed_spec(
     flag_values: &[(&str, Option<String>)],
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
-    request::build_request(
+    let mut spec = request::build_request(
         op,
         flag_values,
         RequestOverrides {
@@ -4706,7 +4685,18 @@ fn build_typed_spec(
                 .transpose()?,
             sets: &globals.set,
         },
-    )
+    )?;
+    if let Some(name) = globals.preset.as_deref() {
+        let preset = presets::get_preset(name, &op.command())?;
+        let validation = validate_registry_body(op, &preset.body, false, true);
+        if validation.valid == serde_json::Value::Bool(false) {
+            return Err(registry_validation_error(validation));
+        }
+        let mut body = preset.body;
+        request::deep_merge(&mut body, spec.body);
+        spec.body = body;
+    }
+    Ok(spec)
 }
 
 fn with_typed_error_context<F>(
@@ -4983,7 +4973,6 @@ fn dispatch_typed_inner(
                     expands_to: options.expands_to,
                     extra_headers: options.extra_headers,
                     command_override: options.command_override,
-                    preset_name: options.preset_name,
                     globals: Some(globals),
                     warnings: &warnings,
                 },
@@ -6897,9 +6886,17 @@ fn unknown_body_fields_issue(
     if op.fields.is_empty() {
         return None;
     }
-    let known = known_body_paths(op);
+    let concrete_fallback;
+    let free_fallback;
+    let (concrete, free) = if op.schema_fields.is_empty() && op.schema_free_paths.is_empty() {
+        concrete_fallback = known_body_paths(op);
+        free_fallback = Vec::new();
+        (&concrete_fallback[..], &free_fallback[..])
+    } else {
+        (op.schema_fields, op.schema_free_paths)
+    };
     let mut unknown = Vec::new();
-    collect_unknown_body_paths(body, "", op.fields, &known, &mut unknown);
+    collect_unknown_body_paths(body, "", op.fields, concrete, free, &mut unknown);
     if unknown.is_empty() {
         None
     } else {
@@ -6915,9 +6912,13 @@ fn collect_unknown_body_paths(
     value: &serde_json::Value,
     path: &str,
     fields: &[registry::FieldDef],
-    known: &[&str],
+    concrete: &[&str],
+    free: &[&str],
     unknown: &mut Vec<String>,
 ) {
+    if is_free_body_path(path, free) {
+        return;
+    }
     if let Some(field) = fields.iter().find(|field| field.body_path == path) {
         if field.kind == registry::FieldKind::Json {
             return;
@@ -6948,26 +6949,34 @@ fn collect_unknown_body_paths(
                 } else {
                     format!("{path}.{key}")
                 };
-                if !is_known_body_prefix(&child_path, known) {
+                if !is_known_body_path(&child_path, concrete, free) {
                     unknown.push(child_path);
                     continue;
                 }
-                collect_unknown_body_paths(child, &child_path, fields, known, unknown);
+                collect_unknown_body_paths(child, &child_path, fields, concrete, free, unknown);
             }
         }
-        serde_json::Value::Array(arr) if is_known_body_prefix(path, known) => {
-            for (i, item) in arr.iter().enumerate() {
-                collect_unknown_body_paths(item, &format!("{path}[{i}]"), fields, known, unknown);
+        serde_json::Value::Array(arr) if is_known_body_path(path, concrete, free) => {
+            // Elements match index-free: allowlist paths are dotted (`enrichments.title`), so
+            // descending with the parent path keeps both sides of the contract aligned.
+            for item in arr {
+                collect_unknown_body_paths(item, path, fields, concrete, free, unknown);
             }
         }
         _ => {}
     }
 }
 
-fn is_known_body_prefix(path: &str, known: &[&str]) -> bool {
-    known
+fn is_free_body_path(path: &str, free: &[&str]) -> bool {
+    free.iter()
+        .any(|p| *p == path || path.starts_with(&format!("{p}.")))
+}
+
+fn is_known_body_path(path: &str, concrete: &[&str], free: &[&str]) -> bool {
+    concrete
         .iter()
-        .any(|known| *known == path || known.starts_with(&format!("{path}.")))
+        .any(|p| *p == path || p.starts_with(&format!("{path}.")))
+        || is_free_body_path(path, free)
 }
 
 fn content_option_shape_issue(
@@ -7694,7 +7703,6 @@ fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
             expands_to: None,
             extra_headers: None,
             command_override: None,
-            preset_name: None,
             globals: None,
             warnings: &warnings,
         },
@@ -7727,7 +7735,10 @@ fn redacted_preview_expanded(
         }),
         preview.expands_to,
     );
-    if let Some(preset) = preview.preset_name {
+    if let Some(preset) = preview
+        .globals
+        .and_then(|globals| globals.preset.as_deref())
+    {
         data["preset"] = serde_json::Value::String(preset.to_string());
     }
     let count = transport::primary_count(data.get("request").unwrap_or(&data));
@@ -8185,6 +8196,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     static GENERIC_RANGE_FIELDS: &[FieldDef] = &[FieldDef {
@@ -8222,6 +8235,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     struct PendingPathGuard;
@@ -9081,7 +9096,6 @@ mod tests {
         assert_eq!(
             SearchArgs {
                 query: "rust cli".into(),
-                preset: None,
                 num_results: Some("7".into()),
                 text: Some(String::new()),
                 highlights: Some("2".into()),
@@ -9223,7 +9237,6 @@ mod tests {
             flag_keys(
                 &SearchArgs {
                     query: "q".into(),
-                    preset: None,
                     num_results: None,
                     text: None,
                     highlights: None,

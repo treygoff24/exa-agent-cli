@@ -234,6 +234,9 @@ pub struct GlobalArgs {
     /// Merge a JSON object body from inline JSON, `@file`, or `-`.
     #[arg(long, global = true)]
     pub body: Option<String>,
+    /// Apply named request defaults. Explicit flags, --body, and --set win.
+    #[arg(long, global = true)]
+    pub preset: Option<String>,
     /// Reduce diagnostics.
     #[arg(long, global = true)]
     pub quiet: bool,
@@ -317,6 +320,7 @@ impl std::fmt::Debug for GlobalArgs {
                     .collect::<Vec<_>>(),
             )
             .field("body", &self.body.as_ref().map(|_| "<redacted>"))
+            .field("preset", &self.preset)
             .field("quiet", &self.quiet)
             .field("verbose", &self.verbose)
             .field("trace", &self.trace)
@@ -432,9 +436,6 @@ pub struct SearchArgs {
     /// The search query.
     #[arg(value_name = crate::registry::field_value_name("search", "query").expect("search query metadata"))]
     pub query: String,
-    /// Apply named defaults from the preset registry. Explicit flags, --body, and --set win.
-    #[arg(long)]
-    pub preset: Option<String>,
     /// Number of results, 1..=100 (maps `numResults`). Search is not cursor-paginated.
     #[arg(
         short = 'n',

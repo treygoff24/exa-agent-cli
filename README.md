@@ -87,6 +87,8 @@ Before running any mutation for real, preview the exact upstream request it will
 exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
 ```
 
+`--dry-run --print-request` still performs the same local body validation as a live call. If the body is invalid (unknown field, out-of-range value, missing required field, or malformed `--body`/`--set`), the command exits `1` without printing a request; when the body is valid it prints the exact request body and exits `0` without sending it.
+
 ### Discovering the surface (offline, no key, no network)
 
 The CLI describes itself, which is the point of the agent-first design. These run with no credential and no network call:
@@ -142,8 +144,7 @@ exa-agent macro show ask
 exa-agent macro show fetch
 ```
 
-Preset values are defaults: explicit flags, `--body`, and `--set` win. `macro show` exposes the
-canonical expansion for the built-in `ask` and `fetch` macros.
+Preset values are defaults: explicit flags, `--body`, and `--set` win. Preset bodies are validated against the vendored OpenAPI request schema, so only documented body properties are allowed; unknown keys are rejected before the preset is merged with flags, `--body`, or `--set`. `macro show` exposes the canonical expansion for the built-in `ask` and `fetch` macros.
 
 ### Doctor repair and undo
 
@@ -175,8 +176,8 @@ The contract is what makes this usable from code. Highlights:
 - **stdout is data, stderr is diagnostics.** Errors and trace output go to stderr; the parseable result goes to stdout.
 - **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass the upstream JSON through untouched.
 - **Contents coverage is explicit.** Live `contents` and `fetch` result envelopes carry `outcome: "full"`, `"partial"`, or `"no_content"`, independent of the exit code.
-- **Exit codes are stable and meaningful** — `0` ok, `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
-- **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it.
+- **Exit codes are stable and meaningful** — `0` ok, `1` usage (bad invocation or local body validation failure), `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
+- **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it, but invalid bodies still exit `1` before any request is printed.
 - **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).
 - **No surprise double-billing.** `--idempotency-key` is forwarded upstream, and the CLI never auto-retries a non-idempotent create-POST.
 

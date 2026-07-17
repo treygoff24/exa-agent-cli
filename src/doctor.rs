@@ -414,7 +414,7 @@ fn detect_stale_cache(ctx: &DoctorCtx) -> Finding {
             category: "state",
             suggested_command: Some("exa-agent doctor --fix --allow-delete".to_string()),
             message: format!(
-                "{} spill file(s) are older than 7 days under {}",
+                "{} spill file(s) older than 7 days or stranded in quarantine under {}",
                 files.len(),
                 ctx.state_dir.join("spill").display()
             ),
@@ -480,29 +480,53 @@ fn stale_spill_files(ctx: &DoctorCtx) -> Result<Vec<PathBuf>, String> {
         return Ok(Vec::new());
     }
     let now = wall_clock_epoch_seconds();
+    let mut files = Vec::new();
     let entries = fs::read_dir(&dir)
         .map_err(|error| format!("cannot inspect spill directory {}: {error}", dir.display()))?;
-    let mut files = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| format!("cannot inspect spill entry: {error}"))?;
+        let path = entry.path();
         let metadata = entry
             .metadata()
-            .map_err(|error| format!("cannot inspect {}: {error}", entry.path().display()))?;
-        if !metadata.is_file() {
-            continue;
-        }
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(now);
-        if now.saturating_sub(modified) >= STALE_SPILL_SECONDS {
-            files.push(entry.path());
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        if metadata.is_file() {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(now);
+            if now.saturating_sub(modified) >= STALE_SPILL_SECONDS {
+                files.push(path);
+            }
+        } else if metadata.is_dir() && entry.file_name().to_str() == Some(".doctor-quarantine") {
+            collect_quarantine_files(&path, &mut files)?;
         }
     }
     files.sort();
     Ok(files)
+}
+
+fn collect_quarantine_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|error| {
+        format!(
+            "cannot inspect quarantine directory {}: {error}",
+            dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot inspect quarantine entry: {error}"))?;
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        if metadata.is_file() {
+            files.push(path);
+        } else if metadata.is_dir() {
+            collect_quarantine_files(&path, files)?;
+        }
+    }
+    Ok(())
 }
 
 fn quarantine_spill_files(ctx: &DoctorCtx, quarantine_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -869,13 +893,29 @@ fn apply_fixes(
                 || {
                     let quarantine_dir = ctx.state_dir.join("spill").join(".doctor-quarantine");
                     let quarantined = quarantine_spill_files(ctx, &quarantine_dir)?;
+                    let mut failed = Vec::new();
                     for path in quarantined {
-                        fs::remove_file(&path).map_err(|error| {
-                            format!(
-                                "failed to delete quarantined spill {}: {error}",
-                                path.display()
-                            )
-                        })?;
+                        if let Err(error) = fs::remove_file(&path) {
+                            failed.push((path, error.to_string()));
+                        }
+                    }
+                    if !failed.is_empty() {
+                        let names = failed
+                            .iter()
+                            .map(|(path, _)| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(format!(
+                            "failed to delete {} quarantined spill file(s) ({}); remove them from {}",
+                            failed.len(),
+                            names,
+                            quarantine_dir.display()
+                        ));
+                    }
+                    if quarantine_dir.exists() {
+                        // All processed files are gone by here (failures returned Err above), so
+                        // recursive removal only clears empty nested dirs left by quarantining.
+                        let _ = fs::remove_dir_all(&quarantine_dir);
                     }
                     Ok(())
                 },

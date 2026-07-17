@@ -290,6 +290,8 @@ pub struct OperationDef {
     pub body_builder: Option<BuilderId>,
     pub validators: &'static [ValidatorId],
     pub mixed_status_exit: bool,
+    pub schema_fields: &'static [&'static str],
+    pub schema_free_paths: &'static [&'static str],
 }
 
 impl OperationDef {

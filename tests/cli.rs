@@ -1214,7 +1214,6 @@ fn doctor_fix_backs_up_formats_and_undo_restores_latest_config() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
     let envs = [
         ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
-        ("SOURCE_DATE_EPOCH", "2000000000"),
         ("EXA_API_KEY", "exa-test-key"),
     ];
 
@@ -1282,11 +1281,15 @@ fn doctor_fix_requires_explicit_flags_for_auth_and_deletion() {
     fs::write(&spill, "{}\n").unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).unwrap();
+    let status = std::process::Command::new("touch")
+        .args(["-t", "202001010000", spill.to_str().unwrap()])
+        .status()
+        .expect("touch is required to set stale mtime");
+    assert!(status.success(), "touch failed");
     let envs = [
         ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
         ("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap()),
         ("EXA_AGENT_STATE", state.to_str().unwrap()),
-        ("SOURCE_DATE_EPOCH", "4000000000"),
         ("EXA_API_KEY", "exa-test-key"),
     ];
 
@@ -1340,6 +1343,8 @@ fn doctor_fix_dry_run_plans_without_mutation() {
 
     let dir = temp_path("doctor-fix-dry-run");
     let config = dir.join("config.toml");
+    let state = dir.join("state");
+    fs::create_dir_all(&state).unwrap();
     let original = "retry=2\nbase_url=\"https://api.exa.ai\"\n";
     fs::write(&config, original).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
@@ -1347,16 +1352,27 @@ fn doctor_fix_dry_run_plans_without_mutation() {
         &["doctor", "--fix", "--dry-run", "--compact"],
         &[
             ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+            ("EXA_AGENT_STATE", state.to_str().unwrap()),
             ("EXA_API_KEY", "exa-test-key"),
         ],
     );
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "healthy");
     assert!(report["actions"]
         .as_array()
         .unwrap()
         .iter()
         .any(|action| action["status"] == "planned"));
+    assert!(!report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| {
+            finding["status"] == "warn"
+                || finding["status"] == "fail"
+                || finding["status"] == "refused"
+        }));
     assert!(report.get("backupPath").is_none());
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o644);
@@ -1375,6 +1391,94 @@ fn doctor_undo_without_backup_refuses_safely() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "refused");
     assert_eq!(report["actions"][0]["status"], "refused");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_backup_uses_wall_clock_not_source_date_epoch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_path("doctor-backup-clock");
+    let config = dir.join("config.toml");
+    let state = dir.join("state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(&config, "retry=2\nbase_url=\"https://api.exa.ai\"\n").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+    let envs = [
+        ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+        ("EXA_AGENT_STATE", state.to_str().unwrap()),
+        ("SOURCE_DATE_EPOCH", "2000000000"),
+        ("EXA_API_KEY", "exa-test-key"),
+    ];
+
+    let output = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let backup = report["backupPath"].as_str().unwrap();
+    assert!(PathBuf::from(backup).exists());
+    assert!(
+        !backup.contains("2000000000"),
+        "backup name must not use SOURCE_DATE_EPOCH"
+    );
+    assert!(
+        backup.contains("doctor-backup-"),
+        "backup name should use a wall-clock timestamp"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_undo_restores_pre_last_fix_state_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_path("doctor-undo-single-slot");
+    let config = dir.join("config.toml");
+    let state = dir.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let first = "# first\nretry=2\nbase_url=\"https://api.exa.ai\"\n";
+    fs::write(&config, first).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+    let envs = [
+        ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+        ("EXA_AGENT_STATE", state.to_str().unwrap()),
+        ("EXA_API_KEY", "exa-test-key"),
+    ];
+
+    let first_fix = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert!(
+        first_fix.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first_fix.stderr)
+    );
+
+    let second = "# second\nretry=3\nbase_url=\"https://api.exa.ai\"\n";
+    fs::write(&config, second).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let second_fix = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert!(
+        second_fix.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second_fix.stderr)
+    );
+
+    let undone = run_with_env(&["doctor", "--undo", "--compact"], &envs);
+    assert!(
+        undone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&undone.stderr)
+    );
+    let undo_report: serde_json::Value = serde_json::from_slice(&undone.stdout).unwrap();
+    assert_eq!(undo_report["actions"][0]["status"], "restored");
+    assert!(undo_report["actions"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("pre-last-fix"));
+    assert_eq!(fs::read_to_string(&config).unwrap(), second);
 }
 
 #[test]
@@ -6941,6 +7045,45 @@ numResults = 9
     assert_eq!(dry_run["data"]["request"]["body"]["category"], "news");
     assert_eq!(dry_run["data"]["request"]["body"]["numResults"], 7);
     assert_eq!(dry_run["data"]["preset"], "news-fresh");
+}
+
+#[test]
+fn preset_rejects_unknown_body_keys_before_merge() {
+    let dir = temp_path("preset-validation");
+    let presets = dir.join("presets.toml");
+    fs::write(
+        &presets,
+        r#"
+[presets.bad]
+command = "search"
+
+[presets.bad.body]
+query = "this will be overridden"
+extraDanger = "injected"
+"#,
+    )
+    .unwrap();
+    let envs = [("EXA_AGENT_PRESETS", presets.to_str().unwrap())];
+    let output = run_with_env(
+        &[
+            "search",
+            "topic",
+            "--preset",
+            "bad",
+            "--dry-run",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["ok"], false);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert_eq!(error["error"]["details"]["field"], "extraDanger");
+    assert!(error["error"]["details"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown field"));
 }
 
 #[test]

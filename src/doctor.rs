@@ -108,6 +108,7 @@ pub enum FindingStatus {
     Fail,
     Skip,
     Refused,
+    Planned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -478,7 +479,7 @@ fn stale_spill_files(ctx: &DoctorCtx) -> Result<Vec<PathBuf>, String> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let now = now_epoch_seconds();
+    let now = wall_clock_epoch_seconds();
     let entries = fs::read_dir(&dir)
         .map_err(|error| format!("cannot inspect spill directory {}: {error}", dir.display()))?;
     let mut files = Vec::new();
@@ -502,6 +503,45 @@ fn stale_spill_files(ctx: &DoctorCtx) -> Result<Vec<PathBuf>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+fn quarantine_spill_files(ctx: &DoctorCtx, quarantine_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let files = stale_spill_files(ctx)?;
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(quarantine_dir).map_err(|error| {
+        format!(
+            "failed to create quarantine directory {}: {error}",
+            quarantine_dir.display()
+        )
+    })?;
+
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for path in files {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("spill");
+        let mut quarantine = quarantine_dir.join(name);
+        let mut counter = 1;
+        while quarantine.exists() {
+            quarantine = quarantine_dir.join(format!("{name}.{counter}"));
+            counter += 1;
+        }
+        fs::rename(&path, &quarantine).map_err(|error| {
+            for (original, moved_to) in moved.iter().rev() {
+                let _ = fs::rename(moved_to, original);
+            }
+            format!(
+                "failed to quarantine spill {} to {}: {error}",
+                path.display(),
+                quarantine.display()
+            )
+        })?;
+        moved.push((path, quarantine));
+    }
+    Ok(moved.into_iter().map(|(_, moved_to)| moved_to).collect())
 }
 
 fn detect_key_present(ctx: &DoctorCtx) -> Finding {
@@ -753,12 +793,7 @@ fn apply_fixes(
 ) {
     let needs_backup = findings.iter().any(|finding| {
         matches!(finding.status, FindingStatus::Warn | FindingStatus::Fail)
-            && match finding.id {
-                "config.format" | "permissions.config" => true,
-                "permissions.credentials" => options.allow_auth,
-                "state.stale-cache" => options.allow_delete,
-                _ => false,
-            }
+            && matches!(finding.id, "config.format" | "permissions.config")
     });
 
     if needs_backup && !options.dry_run && ctx.config_path.exists() {
@@ -832,9 +867,14 @@ fn apply_fixes(
                 findings,
                 actions,
                 || {
-                    for path in stale_spill_files(ctx)? {
+                    let quarantine_dir = ctx.state_dir.join("spill").join(".doctor-quarantine");
+                    let quarantined = quarantine_spill_files(ctx, &quarantine_dir)?;
+                    for path in quarantined {
                         fs::remove_file(&path).map_err(|error| {
-                            format!("failed to delete stale spill {}: {error}", path.display())
+                            format!(
+                                "failed to delete quarantined spill {}: {error}",
+                                path.display()
+                            )
                         })?;
                     }
                     Ok(())
@@ -875,6 +915,11 @@ fn run_fix<F>(
     F: FnOnce() -> Result<(), String>,
 {
     if dry_run {
+        if let Some(finding) = findings.iter_mut().find(|finding| finding.id == id) {
+            finding.status = FindingStatus::Planned;
+            finding.suggested_command = None;
+            finding.message = format!("{} fix planned in dry-run", path.display());
+        }
         actions.push(FixAction {
             id,
             status: FixStatus::Planned,
@@ -916,22 +961,60 @@ fn run_fix<F>(
 }
 
 fn backup_config(config_path: &Path) -> Result<PathBuf, String> {
-    let timestamp = now_epoch_seconds();
+    let (secs, nanos) = wall_clock_epoch_nanos();
     let file_name = config_path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml");
-    let backup = config_path.with_file_name(format!("{file_name}.doctor-backup-{timestamp}"));
-    fs::copy(config_path, &backup).map_err(|error| {
-        format!(
-            "failed to back up config {} to {}: {error}",
-            config_path.display(),
+    let backup = config_path.with_file_name(format!("{file_name}.doctor-backup-{secs}-{nanos:09}"));
+    if backup.exists() {
+        return Err(format!(
+            "refusing to overwrite existing doctor backup {}",
             backup.display()
+        ));
+    }
+    let bytes = fs::read(config_path).map_err(|error| {
+        format!(
+            "failed to read config {} for backup: {error}",
+            config_path.display()
         )
     })?;
+    write_atomic(&backup, &bytes)?;
     let marker = latest_backup_marker(config_path);
     write_atomic(&marker, backup.display().to_string().as_bytes())?;
+    cleanup_old_backups(config_path, &backup, &marker)?;
     Ok(backup)
+}
+
+fn cleanup_old_backups(config_path: &Path, keep: &Path, marker: &Path) -> Result<(), String> {
+    let Some(parent) = keep.parent() else {
+        return Ok(());
+    };
+    let file_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let prefix = format!("{file_name}.doctor-backup-");
+    let entries = fs::read_dir(parent).map_err(|error| {
+        format!(
+            "cannot clean up old backups in {}: {error}",
+            parent.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read backup dir entry: {error}"))?;
+        let path = entry.path();
+        if path == *keep || path == *marker {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with(&prefix) && !name.ends_with("-latest") {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
@@ -972,7 +1055,9 @@ fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
                 id: "config.undo",
                 status: FixStatus::Restored,
                 path: ctx.config_path.display().to_string(),
-                reason: None,
+                reason: Some(
+                    "restored config to pre-last-fix state (undo is config-only)".to_string(),
+                ),
                 required_flag: None,
             }],
             backup_path: Some(backup.display().to_string()),
@@ -1025,12 +1110,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let tmp = path.with_file_name(format!(
-        ".{}.doctor-tmp-{}",
+        ".{}.doctor-tmp-{}-{}",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("file"),
-        std::process::id()
+        std::process::id(),
+        nanos
     ));
     let mut file = fs::File::create(&tmp)
         .map_err(|error| format!("failed to create {}: {error}", tmp.display()))?;
@@ -1056,16 +1146,18 @@ fn latest_backup_marker(config_path: &Path) -> PathBuf {
     config_path.with_file_name(format!("{file_name}.doctor-backup-latest"))
 }
 
-fn now_epoch_seconds() -> u64 {
-    std::env::var("SOURCE_DATE_EPOCH")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0)
-        })
+fn wall_clock_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn wall_clock_epoch_nanos() -> (u64, u64) {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    (duration.as_secs(), duration.subsec_nanos() as u64)
 }
 
 #[cfg(test)]

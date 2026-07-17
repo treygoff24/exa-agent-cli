@@ -154,8 +154,8 @@ pub fn capabilities() -> serde_json::Value {
                 { "id": "permissions.credentials", "requiredFlag": "--allow-auth" },
                 { "id": "state.stale-cache", "requiredFlag": "--allow-delete" },
             ],
-            "backup": "one timestamped config backup per fix run",
-            "undo": "doctor --undo restores the latest backup",
+            "backup": "one wall-clock-timestamped config backup per fix run; older backups are removed",
+            "undo": "doctor --undo restores the latest config backup (single-slot, pre-last-fix state only)",
         },
         "presets": {
             "userPath": "~/.config/exa-agent/presets.toml",

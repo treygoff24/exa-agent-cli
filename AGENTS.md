@@ -110,6 +110,14 @@ exa-agent schema --help           # embedded API/CLI schema
 exa-agent doctor                  # read-only health checks (add --online for a live probe)
 ```
 
+`doctor --fix` is an explicit, opt-in mutation: it repairs only canonical TOML formatting and
+config-file permission bits (0600) after creating one wall-clock-timestamped config backup plus a
+`*-latest` marker. `--fix --allow-auth` may also secure the credential-file permissions;
+`--fix --allow-delete` may delete spill files older than seven days. `--undo` restores only the
+latest marker backup (single-slot, pre-last-fix state only) and is config-only: it does not reverse
+credential-file permission changes or spill deletions. `--fix --dry-run` plans the same actions and
+exits `0` when only planned actions remain.
+
 If anything in this file disagrees with `capabilities` output, trust `capabilities`.
 
 ## Maintainers

@@ -147,12 +147,16 @@ canonical expansion for the built-in `ask` and `fetch` macros.
 
 ### Doctor repair and undo
 
-Bare `doctor` remains read-only and offline. `doctor --fix` creates one timestamped, byte-preserving
-config backup before changing canonical TOML formatting or config permission bits. It reports every
-planned, fixed, skipped, or refused action in the existing `exa.cli.doctor.v1` envelope.
+Bare `doctor` remains read-only and offline. `doctor --fix` is an explicit, opt-in mutation that
+repairs only canonical TOML formatting and config-file permission bits (0600). It creates one
+wall-clock-timestamped, byte-preserving config backup and a `*-latest` marker before writing the
+config. `doctor --undo` restores only the latest marker backup (single-slot, pre-last-fix state
+only). `--fix --dry-run` plans the same actions and exits `0` when every planned finding would be
+fixed. It reports every planned, fixed, skipped, or refused action in the existing
+`exa.cli.doctor.v1` envelope.
 
 ```sh
-exa-agent doctor --fix --dry-run       # plan only
+exa-agent doctor --fix --dry-run       # plan only, exits 0 if only planned actions
 exa-agent doctor --fix                 # safe config repairs
 exa-agent doctor --fix --allow-auth    # may secure credential-file permissions
 exa-agent doctor --fix --allow-delete  # may delete spill files older than seven days
@@ -160,8 +164,8 @@ exa-agent doctor --undo                # restore the latest config backup
 ```
 
 Auth-file changes require `--allow-auth` because they touch credential storage. Stale spill cleanup
-requires `--allow-delete` because it deletes local data. `doctor --undo` restores only the latest
-recorded backup; there is no selectable history stack. Network checks still require `--online`.
+requires `--allow-delete` because it deletes local data. `doctor --undo` is config-only: it does not
+reverse credential-file permission changes or spill deletions. Network checks still require `--online`.
 
 ## Output contract
 

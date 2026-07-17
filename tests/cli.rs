@@ -61,7 +61,13 @@ fn command(args: &[&str]) -> ProcessCommand {
         .env_remove("EXA_ADMIN_BASE_URL")
         .env_remove("EXA_PROFILE")
         .env("EXA_AGENT_CONFIG", isolated.join("config.toml"))
-        .env("EXA_AGENT_CREDENTIALS", isolated.join("credentials.json"));
+        .env("EXA_AGENT_CREDENTIALS", isolated.join("credentials.json"))
+        .env("EXA_AGENT_PRESETS", isolated.join("presets.toml"))
+        .env(
+            "EXA_AGENT_LOCAL_PRESETS",
+            isolated.join("local-presets.toml"),
+        )
+        .env("EXA_AGENT_STATE", isolated.join("state"));
     cmd
 }
 
@@ -909,6 +915,20 @@ fn validate_input_rejects_wrong_type_and_out_of_range() {
 fn parse_doctor() {
     assert_path(&["doctor"], "doctor");
     parses(&["doctor", "--online"]);
+    parses(&["doctor", "--fix"]);
+    parses(&["doctor", "--undo"]);
+    assert!(parse_err(&["doctor", "--fix", "--undo"])
+        .to_string()
+        .contains("cannot be used"));
+}
+
+#[test]
+fn parse_preset_and_macro_registry_commands() {
+    assert_path(&["preset", "list"], "preset list");
+    assert_path(&["preset", "show", "news-fresh"], "preset show");
+    assert_path(&["macro", "list"], "macro list");
+    assert_path(&["macro", "show", "ask"], "macro show");
+    parses(&["search", "topic", "--preset", "news-fresh"]);
 }
 
 #[test]
@@ -1180,6 +1200,181 @@ fn doctor_key_present_detector_uses_credentials_file_without_leaking_secret() {
         .unwrap()
         .iter()
         .any(|finding| finding["id"] == "key.present" && finding["status"] == "ok"));
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fix_backs_up_formats_and_undo_restores_latest_config() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = temp_path("doctor-fix-config");
+    let config = dir.join("config.toml");
+    let original = "# keep this comment\nretry=2 # and this one\nbase_url=\"https://api.exa.ai\"\n";
+    fs::write(&config, original).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+    let envs = [
+        ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+        ("SOURCE_DATE_EPOCH", "2000000000"),
+        ("EXA_API_KEY", "exa-test-key"),
+    ];
+
+    let fixed = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&fixed.stdout).unwrap();
+    assert_eq!(report["status"], "healthy");
+    assert!(report["backupPath"]
+        .as_str()
+        .is_some_and(|path| PathBuf::from(path).exists()));
+    assert!(report["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| { action["id"] == "config.format" && action["status"] == "fixed" }));
+    assert!(report["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| { action["id"] == "permissions.config" && action["status"] == "fixed" }));
+    assert_ne!(fs::read_to_string(&config).unwrap(), original);
+    assert!(fs::read_to_string(&config)
+        .unwrap()
+        .contains("# keep this comment"));
+    assert!(fs::read_to_string(&config)
+        .unwrap()
+        .contains("# and this one"));
+    assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o600);
+
+    let second = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert!(second.status.success());
+    let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert!(second.get("actions").is_none());
+    assert!(second.get("backupPath").is_none());
+
+    let undone = run_with_env(&["doctor", "--undo", "--compact"], &envs);
+    assert!(
+        undone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&undone.stderr)
+    );
+    let undo_report: serde_json::Value = serde_json::from_slice(&undone.stdout).unwrap();
+    assert_eq!(undo_report["actions"][0]["status"], "restored");
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o644);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fix_requires_explicit_flags_for_auth_and_deletion() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = temp_path("doctor-fix-gates");
+    let config = dir.join("config.toml");
+    let credentials = dir.join("credentials.json");
+    let state = dir.join("state");
+    let spill = state.join("spill/old.json");
+    fs::create_dir_all(spill.parent().unwrap()).unwrap();
+    fs::write(&config, "base_url = \"https://api.exa.ai\"\n").unwrap();
+    fs::write(&credentials, r#"{"api_key":"secret"}"#).unwrap();
+    fs::write(&spill, "{}\n").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).unwrap();
+    let envs = [
+        ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+        ("EXA_AGENT_CREDENTIALS", credentials.to_str().unwrap()),
+        ("EXA_AGENT_STATE", state.to_str().unwrap()),
+        ("SOURCE_DATE_EPOCH", "4000000000"),
+        ("EXA_API_KEY", "exa-test-key"),
+    ];
+
+    let gated = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert_eq!(gated.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&gated.stdout).unwrap();
+    assert!(report["actions"].as_array().unwrap().iter().any(|action| {
+        action["id"] == "permissions.credentials"
+            && action["status"] == "skipped"
+            && action["requiredFlag"] == "--allow-auth"
+            && action["reason"]
+                .as_str()
+                .unwrap()
+                .contains("authentication")
+    }));
+    assert!(report["actions"].as_array().unwrap().iter().any(|action| {
+        action["id"] == "state.stale-cache"
+            && action["status"] == "skipped"
+            && action["requiredFlag"] == "--allow-delete"
+            && action["reason"]
+                .as_str()
+                .unwrap()
+                .contains("deletes local data")
+    }));
+    assert_eq!(fs::metadata(&credentials).unwrap().mode() & 0o777, 0o644);
+    assert!(spill.exists());
+
+    let fixed = run_with_env(
+        &[
+            "doctor",
+            "--fix",
+            "--allow-auth",
+            "--allow-delete",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert_eq!(fs::metadata(&credentials).unwrap().mode() & 0o777, 0o600);
+    assert!(!spill.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fix_dry_run_plans_without_mutation() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = temp_path("doctor-fix-dry-run");
+    let config = dir.join("config.toml");
+    let original = "retry=2\nbase_url=\"https://api.exa.ai\"\n";
+    fs::write(&config, original).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+    let output = run_with_env(
+        &["doctor", "--fix", "--dry-run", "--compact"],
+        &[
+            ("EXA_AGENT_CONFIG", config.to_str().unwrap()),
+            ("EXA_API_KEY", "exa-test-key"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["status"] == "planned"));
+    assert!(report.get("backupPath").is_none());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o644);
+}
+
+#[test]
+fn doctor_undo_without_backup_refuses_safely() {
+    let dir = temp_path("doctor-undo-missing");
+    let config = dir.join("config.toml");
+    let output = run_with_env(
+        &["doctor", "--undo", "--compact"],
+        &[("EXA_AGENT_CONFIG", config.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "refused");
+    assert_eq!(report["actions"][0]["status"], "refused");
 }
 
 #[test]
@@ -6682,6 +6877,85 @@ fn parse_macros_ask_and_fetch() {
         parse_err(&["fetch"]).kind(),
         clap::error::ErrorKind::MissingRequiredArgument
     );
+}
+
+#[test]
+fn preset_registry_merges_user_file_and_repo_local_override() {
+    let dir = temp_path("preset-registry");
+    let user = dir.join("presets.toml");
+    let local = dir.join("local-presets.toml");
+    fs::write(
+        &user,
+        r#"
+[presets.news-fresh]
+command = "search"
+
+[presets.news-fresh.body]
+category = "news"
+numResults = 5
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &local,
+        r#"
+[presets.news-fresh]
+
+[presets.news-fresh.body]
+numResults = 9
+"#,
+    )
+    .unwrap();
+    let envs = [
+        ("EXA_AGENT_PRESETS", user.to_str().unwrap()),
+        ("EXA_AGENT_LOCAL_PRESETS", local.to_str().unwrap()),
+    ];
+
+    let shown = run_with_env(&["preset", "show", "news-fresh", "--compact"], &envs);
+    assert!(shown.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["schema"], "exa.cli.preset.v1");
+    assert_eq!(shown["preset"]["command"], "search");
+    assert_eq!(shown["preset"]["body"]["numResults"], 9);
+    assert_eq!(shown["preset"]["source"], local.display().to_string());
+
+    let dry_run = run_with_env(
+        &[
+            "search",
+            "topic",
+            "--preset",
+            "news-fresh",
+            "--num-results",
+            "7",
+            "--dry-run",
+            "--compact",
+        ],
+        &envs,
+    );
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let dry_run: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(dry_run["data"]["request"]["body"]["category"], "news");
+    assert_eq!(dry_run["data"]["request"]["body"]["numResults"], 7);
+    assert_eq!(dry_run["data"]["preset"], "news-fresh");
+}
+
+#[test]
+fn macro_registry_exposes_builtin_expansions() {
+    let listed = run_ok_json(&["macro", "list", "--compact"]);
+    assert_eq!(listed["schema"], "exa.cli.macros.v1");
+    assert_eq!(listed["macros"], serde_json::json!(["ask", "fetch"]));
+
+    let shown = run_ok_json(&["macro", "show", "fetch", "--compact"]);
+    assert_eq!(shown["schema"], "exa.cli.macro.v1");
+    assert_eq!(shown["macro"]["name"], "fetch");
+    assert!(shown["macro"]["expandsTo"]
+        .as_str()
+        .unwrap()
+        .starts_with("contents "));
 }
 
 #[test]

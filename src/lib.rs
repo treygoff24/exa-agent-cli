@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod error;
 pub mod output;
 pub mod pending;
+pub mod presets;
 pub mod redaction;
 pub mod registry;
 pub mod request;
@@ -25,13 +26,14 @@ use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
 use cli::{
     AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentRunArgs, AgentRunsCmd,
     AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
-    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MonitorBatchArgs,
-    MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd, PaginationArgs, ResearchCmd,
-    ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs, TeamCmd,
-    WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
-    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
-    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
-    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
+    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
+    PaginationArgs, PresetCmd, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd,
+    SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
+    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
+    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
+    SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -73,6 +75,7 @@ struct TypedDispatchOptions<'a> {
     sse_accept: bool,
     extra_headers: Option<&'a [(String, String)]>,
     command_override: Option<&'a str>,
+    preset_name: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +85,7 @@ struct TypedPreviewOptions<'a> {
     expands_to: Option<&'a str>,
     extra_headers: Option<&'a [(String, String)]>,
     command_override: Option<&'a str>,
+    preset_name: Option<&'a str>,
     globals: Option<&'a GlobalArgs>,
     warnings: &'a [serde_json::Value],
 }
@@ -394,6 +398,7 @@ fn static_subcommands(parent: &str) -> &'static [&'static str] {
         "auth" => &["status", "test", "login", "logout"],
         "config" => &["list", "get", "set", "unset", "path", "profiles"],
         "config profiles" => &["list", "show", "use", "create", "delete"],
+        "preset" | "macro" => &["list", "show"],
         "agent" => &["run", "runs"],
         "agent runs" => &["create", "list", "get", "events", "cancel", "delete"],
         _ => &[],
@@ -449,6 +454,11 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             let options = doctor::DoctorOptions {
                 online: args.online,
                 checks,
+                fix: args.fix,
+                dry_run: cli.globals.dry_run,
+                undo: args.undo,
+                allow_auth: args.allow_auth,
+                allow_delete: args.allow_delete,
             };
             if options.online {
                 transport::ensure_network_allowed()?;
@@ -463,6 +473,8 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         }
         Command::Auth { sub } => dispatch_auth(sub, &cli.globals, pretty),
         Command::Config { sub } => dispatch_config(sub, pretty),
+        Command::Preset { sub } => dispatch_preset(sub, pretty),
+        Command::Macro { sub } => dispatch_macro(sub, pretty),
         Command::Search(args) => dispatch_search(args, &cli.globals, pretty),
         Command::Contents(args) => dispatch_contents(args, &cli.globals, pretty),
         Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
@@ -533,7 +545,15 @@ fn dispatch_search(args: &SearchArgs, globals: &GlobalArgs, pretty: bool) -> Res
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     with_typed_error_context(op, globals, || {
         let spec = build_search_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
+        dispatch_typed_command_with_options(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions {
+                preset_name: args.preset.as_deref(),
+                ..TypedDispatchOptions::default()
+            },
+        )
     })
 }
 
@@ -545,6 +565,12 @@ fn build_search_spec(
     validate_search_intent_args(args)?;
     let flag_values = normalize_content_flag_values(op, args.into_flag_values(), &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
+    if let Some(name) = args.preset.as_deref() {
+        let preset = presets::get_preset(name, "search")?;
+        let mut body = preset.body;
+        request::deep_merge(&mut body, spec.body);
+        spec.body = body;
+    }
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
@@ -4357,6 +4383,7 @@ fn dispatch_typed_preview_with_warnings(
                 expands_to: options.expands_to,
                 extra_headers: options.extra_headers,
                 command_override: options.command_override,
+                preset_name: options.preset_name,
                 globals: Some(globals),
                 warnings: &warnings,
             },
@@ -4948,6 +4975,7 @@ fn dispatch_typed_inner(
                     expands_to: options.expands_to,
                     extra_headers: options.extra_headers,
                     command_override: options.command_override,
+                    preset_name: options.preset_name,
                     globals: Some(globals),
                     warnings: &warnings,
                 },
@@ -7304,6 +7332,55 @@ fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
     }
 }
 
+fn dispatch_preset(sub: &PresetCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        PresetCmd::List => {
+            let presets = presets::load_presets()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.presets.v1",
+                    "ok": true,
+                    "userPath": presets::user_presets_path().display().to_string(),
+                    "localPath": presets::local_presets_path().display().to_string(),
+                    "presets": presets.keys().collect::<Vec<_>>(),
+                }),
+                pretty,
+            );
+        }
+        PresetCmd::Show { name } => emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.preset.v1",
+                "ok": true,
+                "preset": presets::find_preset(name)?,
+            }),
+            pretty,
+        ),
+    }
+    Ok(0)
+}
+
+fn dispatch_macro(sub: &MacroCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        MacroCmd::List => emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.macros.v1",
+                "ok": true,
+                "macros": presets::MACROS.iter().map(|item| item.name).collect::<Vec<_>>(),
+            }),
+            pretty,
+        ),
+        MacroCmd::Show { name } => emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.macro.v1",
+                "ok": true,
+                "macro": presets::get_macro(name)?,
+            }),
+            pretty,
+        ),
+    }
+    Ok(0)
+}
+
 fn dispatch_config_profiles(sub: &ConfigProfilesCmd, pretty: bool) -> Result<i32, CliError> {
     match sub {
         ConfigProfilesCmd::List => {
@@ -7490,6 +7567,7 @@ fn redacted_preview(spec: &request::RequestSpec) -> serde_json::Value {
             expands_to: None,
             extra_headers: None,
             command_override: None,
+            preset_name: None,
             globals: None,
             warnings: &warnings,
         },
@@ -7515,13 +7593,16 @@ fn redacted_preview_expanded(
     if !headers.is_empty() {
         request["headers"] = serde_json::Value::Array(headers);
     }
-    let data = data_with_expands_to(
+    let mut data = data_with_expands_to(
         serde_json::json!({
             "request": request,
             "dryRun": true,
         }),
         preview.expands_to,
     );
+    if let Some(preset) = preview.preset_name {
+        data["preset"] = serde_json::Value::String(preset.to_string());
+    }
     let count = transport::primary_count(data.get("request").unwrap_or(&data));
     let hash = transport::data_hash(&data);
     response_envelope(ResponseEnvelopeArgs {
@@ -8873,6 +8954,7 @@ mod tests {
         assert_eq!(
             SearchArgs {
                 query: "rust cli".into(),
+                preset: None,
                 num_results: Some("7".into()),
                 text: Some(String::new()),
                 highlights: Some("2".into()),
@@ -9014,6 +9096,7 @@ mod tests {
             flag_keys(
                 &SearchArgs {
                     query: "q".into(),
+                    preset: None,
                     num_results: None,
                     text: None,
                     highlights: None,

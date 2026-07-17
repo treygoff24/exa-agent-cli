@@ -409,6 +409,16 @@ pub enum Command {
         #[command(subcommand)]
         sub: ConfigCmd,
     },
+    /// Inspect named request presets.
+    Preset {
+        #[command(subcommand)]
+        sub: PresetCmd,
+    },
+    /// Inspect built-in macro expansions.
+    Macro {
+        #[command(subcommand)]
+        sub: MacroCmd,
+    },
     /// Macro → `answer QUESTION`.
     Ask(AskArgs),
     /// Macro → `contents URL... --text --summary-query ...`.
@@ -422,6 +432,9 @@ pub struct SearchArgs {
     /// The search query.
     #[arg(value_name = crate::registry::field_value_name("search", "query").expect("search query metadata"))]
     pub query: String,
+    /// Apply named defaults from the preset registry. Explicit flags, --body, and --set win.
+    #[arg(long)]
+    pub preset: Option<String>,
     /// Number of results, 1..=100 (maps `numResults`). Search is not cursor-paginated.
     #[arg(
         short = 'n',
@@ -1369,6 +1382,34 @@ pub struct DoctorArgs {
     pub online: bool,
     #[arg(long)]
     pub check: Vec<String>,
+    /// Repair safe findings after creating a config backup.
+    #[arg(long, conflicts_with = "undo")]
+    pub fix: bool,
+    /// Restore the config from the latest doctor backup.
+    #[arg(long, conflicts_with_all = ["fix", "online", "check"])]
+    pub undo: bool,
+    /// Permit fixes that modify credential-file permission bits.
+    #[arg(long, requires = "fix")]
+    pub allow_auth: bool,
+    /// Permit fixes that delete stale spill files.
+    #[arg(long, requires = "fix")]
+    pub allow_delete: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PresetCmd {
+    /// List merged preset names (repo-local definitions override user definitions).
+    List,
+    /// Show one resolved preset and its source file.
+    Show { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MacroCmd {
+    /// List built-in macro names.
+    List,
+    /// Show one transparent macro expansion.
+    Show { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1522,6 +1563,14 @@ pub fn command_path(command: &Command) -> String {
             AuthCmd::Logout => "auth logout".to_string(),
         },
         Command::Config { sub } => config_command_path(sub),
+        Command::Preset { sub } => match sub {
+            PresetCmd::List => "preset list".to_string(),
+            PresetCmd::Show { .. } => "preset show".to_string(),
+        },
+        Command::Macro { sub } => match sub {
+            MacroCmd::List => "macro list".to_string(),
+            MacroCmd::Show { .. } => "macro show".to_string(),
+        },
         Command::Ask(_) => "ask".to_string(),
         Command::Fetch(_) => "fetch".to_string(),
         Command::Raw(_) => "raw".to_string(),

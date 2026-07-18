@@ -66,7 +66,7 @@ self-description commands still work.
 
 ## Reading the output
 
-Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. Live `contents` and `fetch` result envelopes carry `outcome` (`full`, `partial`, or `no_content`) independently of exit classification. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
+Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. Live `contents`/`fetch` and `answer`/`ask` result envelopes carry text-aware `outcome` (`full`, `partial`, or `no_content`) independently of exit classification. They also carry `contentDiagnostics[]`: contents entries expose exact upstream `crawl_status`, `error_tag`, and `http_status` when present plus honestly inferred `content_type`, `content_status`, `usable`, and `pdf_unextracted`; answer currently emits `[]` because Exa provides no per-citation diagnostics. Empty/binary/PDF/crawl failures always add a warning and fallback action. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
 
 Error envelope (`exa.cli.error.v1`, stderr): `error.code` (from the published dictionary below), `error.message`, and often `suggestedCommand`. Stdout stays empty on error.
 

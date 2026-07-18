@@ -5,8 +5,9 @@ use exa_agent_cli::auth::{self, CredentialInput, NoopKeyring, Secret};
 use exa_agent_cli::cli::GlobalArgs;
 use exa_agent_cli::error::{CliError, Diag};
 use exa_agent_cli::transport::{
-    build_url, classify_http_status, contents_outcome, execute_raw, parse_user_headers, probe_auth,
-    probe_connectivity, send_with_retry, AuthProbe, FakeTransport, HttpRequest, SendOptions,
+    answer_outcome, build_url, classify_http_status, contents_outcome, execute_raw, looks_binary,
+    parse_user_headers, probe_auth, probe_connectivity, row_has_usable_text, send_with_retry,
+    AuthProbe, FakeTransport, HttpRequest, SendOptions,
 };
 
 #[test]
@@ -73,7 +74,7 @@ fn contents_outcome_distinguishes_empty_complete_partial_and_full() {
     assert_eq!(
         contents_outcome(
             &serde_json::json!({
-                "results": [{"url": "https://ok.test"}],
+                "results": [{"url": "https://ok.test", "text": "usable"}],
                 "statuses": [{"status": "error"}]
             }),
             1
@@ -88,12 +89,12 @@ fn contents_outcome_distinguishes_empty_complete_partial_and_full() {
             }),
             1
         ),
-        "partial"
+        "no_content"
     );
     assert_eq!(
         contents_outcome(
             &serde_json::json!({
-                "results": [{"url": "https://ok.test"}],
+                "results": [{"url": "https://ok.test", "text": "usable"}],
                 "statuses": [{"status": "success"}]
             }),
             1
@@ -102,11 +103,79 @@ fn contents_outcome_distinguishes_empty_complete_partial_and_full() {
     );
     assert_eq!(
         contents_outcome(
-            &serde_json::json!({"results": [{"url": "https://ok.test"}]}),
+            &serde_json::json!({"results": [{"url": "https://ok.test", "text": "usable"}]}),
             1
         ),
         "full",
-        "complete result rows do not require optional statuses"
+        "complete usable result rows do not require optional statuses"
+    );
+}
+
+#[test]
+fn content_text_helpers_reject_empty_and_binary_bodies() {
+    assert!(!looks_binary(""));
+    assert!(!looks_binary(
+        "ordinary UTF-8 prose with em dashes — and accents é"
+    ));
+    assert!(looks_binary("\u{1f}\u{8b}\u{8}\0gzip"));
+    assert!(looks_binary("\0\u{1}\u{2}\u{3}printable"));
+
+    assert!(!row_has_usable_text(&serde_json::json!({"text": "   \n"})));
+    assert!(!row_has_usable_text(
+        &serde_json::json!({"text": "\u{1f}\u{8b}\u{8}\0gzip"})
+    ));
+    assert!(row_has_usable_text(
+        &serde_json::json!({"text": "usable text"})
+    ));
+    assert!(row_has_usable_text(
+        &serde_json::json!({"text": "", "summary": "usable summary"})
+    ));
+    assert!(row_has_usable_text(
+        &serde_json::json!({"text": "\u{1f}\u{8b}\u{8}\0gzip", "summary": "usable summary"})
+    ));
+}
+
+#[test]
+fn contents_outcome_counts_only_usable_rows() {
+    assert_eq!(
+        contents_outcome(
+            &serde_json::json!({
+                "results": [{"url": "https://empty.test", "text": ""}],
+                "statuses": [{"id": "https://empty.test", "status": "success"}]
+            }),
+            1
+        ),
+        "no_content"
+    );
+    assert_eq!(
+        contents_outcome(
+            &serde_json::json!({
+                "results": [
+                    {"url": "https://ok.test", "text": "usable"},
+                    {"url": "https://binary.test", "text": "\u{1f}\u{8b}\u{8}\0gzip"}
+                ]
+            }),
+            2
+        ),
+        "partial"
+    );
+}
+
+#[test]
+fn answer_outcome_rejects_silent_empty_answers() {
+    assert_eq!(
+        answer_outcome(&serde_json::json!({"answer": "done"})),
+        "full"
+    );
+    assert_eq!(
+        answer_outcome(
+            &serde_json::json!({"answer": "", "citations": [{"url": "https://a.test"}]})
+        ),
+        "partial"
+    );
+    assert_eq!(
+        answer_outcome(&serde_json::json!({"answer": "", "citations": []})),
+        "no_content"
     );
 }
 

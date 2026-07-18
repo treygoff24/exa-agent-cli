@@ -2052,7 +2052,7 @@ fn contents_partial_url_failures_warn_and_exit_zero() {
 }
 
 #[test]
-fn contents_all_url_failures_warn_and_exit_partial() {
+fn contents_all_url_failures_warn_and_exit_no_content() {
     let response = br#"{
         "results":[],
         "statuses":[
@@ -2085,7 +2085,7 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["outcome"], "partial");
+    assert_eq!(json["outcome"], "no_content");
     let warning = json["warnings"]
         .as_array()
         .unwrap()
@@ -2096,10 +2096,197 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         .as_str()
         .unwrap()
         .contains("https://a.test=NOT_FOUND"));
+    assert_eq!(
+        warning["suggestedCommand"],
+        "exa-agent contents 'https://a.test' --fresh --text full --json"
+    );
 }
 
 #[test]
-fn contents_compatibility_fixtures_preserve_frozen_legacy_envelopes() {
+fn contents_empty_text_is_no_content_with_diagnostics_and_fallback() {
+    let response = br#"{
+        "results":[{"url":"https://uscode.house.gov/empty","text":""}],
+        "statuses":[{"id":"https://uscode.house.gov/empty","status":"success"}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://uscode.house.gov/empty",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    let data_index = rendered.find("\"data\":").unwrap();
+    let outcome_index = rendered.find("\"outcome\":").unwrap();
+    let diagnostics_index = rendered.find("\"contentDiagnostics\":").unwrap();
+    let hash_index = rendered.find("\"dataHash\":").unwrap();
+    assert!(data_index < outcome_index);
+    assert!(outcome_index < diagnostics_index);
+    assert!(diagnostics_index < hash_index);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_status"],
+        "empty_content"
+    );
+    let warning = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "empty_content")
+        .expect("empty_content warning");
+    assert!(warning["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .starts_with("parallel-cli extract "));
+    assert!(json["nextActions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["command"] == warning["suggestedCommand"]));
+}
+
+#[test]
+fn contents_gzip_text_is_binary_with_warning() {
+    let response = serde_json::to_vec(&serde_json::json!({
+        "results": [{"url": "https://ecfr.gov/current", "text": "\u{1f}\u{8b}\u{8}\0gzip"}],
+        "statuses": [{"id": "https://ecfr.gov/current", "status": "success"}]
+    }))
+    .unwrap();
+    let response = Box::leak(response.into_boxed_slice());
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://ecfr.gov/current",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_status"],
+        "binary_content"
+    );
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_type"],
+        "application/gzip"
+    );
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "binary_content"));
+}
+
+#[test]
+fn contents_crawl_unknown_error_surfaces_http_status_and_parallel_fallback() {
+    let response = br#"{
+        "results":[],
+        "statuses":[{"id":"https://congress.gov/bill/1","status":"error","error":{"tag":"CRAWL_UNKNOWN_ERROR","httpStatusCode":502}}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://congress.gov/bill/1",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(10));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(json["contentDiagnostics"][0]["crawl_status"], "error");
+    assert_eq!(
+        json["contentDiagnostics"][0]["error_tag"],
+        "CRAWL_UNKNOWN_ERROR"
+    );
+    assert_eq!(json["contentDiagnostics"][0]["http_status"], 502);
+    assert!(json["warnings"][0]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .starts_with("parallel-cli extract "));
+}
+
+#[test]
+fn contents_empty_pdf_is_explicitly_unextracted() {
+    let response = br#"{
+        "results":[{"url":"https://agency.gov/report.pdf","text":""}],
+        "statuses":[{"id":"https://agency.gov/report.pdf","status":"success"}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "fetch",
+        "https://agency.gov/report.pdf",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_type"],
+        "application/pdf"
+    );
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_type_source"],
+        "inferred_url"
+    );
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_status"],
+        "pdf_unextracted"
+    );
+    assert_eq!(json["contentDiagnostics"][0]["pdf_unextracted"], true);
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "pdf_unextracted"));
+}
+
+#[test]
+fn answer_empty_response_has_no_content_outcome_and_warning() {
+    let response = br#"{"answer":"","citations":[]}"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "ask",
+        "What is the statute?",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(json["contentDiagnostics"], serde_json::json!([]));
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "empty_answer"));
+}
+
+#[test]
+fn contents_compatibility_fixtures_preserve_data_while_adding_honest_metadata() {
     for fixture_name in [
         "no-content",
         "partial",
@@ -2152,8 +2339,43 @@ fn contents_compatibility_fixtures_preserve_frozen_legacy_envelopes() {
         let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         envelope["request"]["requestId"] = serde_json::json!("req_legacy");
         envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
-        let mut expected_envelope = fixture["legacyEnvelope"].clone();
-        expected_envelope["outcome"] = expected["outcome"].clone();
+        assert_eq!(envelope["outcome"], expected["outcome"], "{fixture_name}");
+        assert!(envelope["contentDiagnostics"].is_array(), "{fixture_name}");
+        envelope.as_object_mut().unwrap().shift_remove("outcome");
+        envelope
+            .as_object_mut()
+            .unwrap()
+            .shift_remove("contentDiagnostics");
+        envelope["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|warning| {
+                !matches!(
+                    warning["code"].as_str(),
+                    Some("empty_content" | "binary_content" | "pdf_unextracted")
+                )
+            });
+        envelope["nextActions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|action| action["description"] != "Recover missing upstream content");
+        let expected_envelope = fixture["legacyEnvelope"].clone();
+        for warning in envelope["warnings"].as_array_mut().unwrap() {
+            let code = warning["code"].as_str();
+            let expected_has_suggestion = expected_envelope["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|expected| {
+                    expected["code"].as_str() == code && expected.get("suggestedCommand").is_some()
+                });
+            if !expected_has_suggestion {
+                warning
+                    .as_object_mut()
+                    .unwrap()
+                    .shift_remove("suggestedCommand");
+            }
+        }
         assert_eq!(
             serde_json::to_string(&envelope).unwrap(),
             serde_json::to_string(&expected_envelope).unwrap(),
@@ -2198,8 +2420,17 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
     let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     envelope["request"]["requestId"] = serde_json::json!("req_legacy");
     envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
+    assert_eq!(
+        envelope["outcome"], fixture["expected"]["outcome"],
+        "honest outcome changed"
+    );
+    envelope.as_object_mut().unwrap().shift_remove("outcome");
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .shift_remove("contentDiagnostics");
+    envelope["nextActions"] = serde_json::json!([]);
     let mut expected = fixture["legacyEnvelope"].clone();
-    expected["outcome"] = fixture["expected"]["outcome"].clone();
     // Main labeled a missing upstream reason as "error". Wave 5 changes only that
     // label/action contract in addition to the additive outcome field.
     expected["warnings"][0]["message"] = serde_json::json!(
@@ -2289,7 +2520,7 @@ fn fetch_undercounted_statuses_preserve_legacy_exit_warning_and_correlation() {
     assert!(output.stderr.is_empty());
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["command"], fixture["expected"]["command"]);
-    assert_eq!(envelope["outcome"], "partial");
+    assert_eq!(envelope["outcome"], fixture["expected"]["outcome"]);
     assert_eq!(
         envelope["request"]["correlationId"],
         fixture["expected"]["correlationId"]
@@ -7384,6 +7615,9 @@ fn ask_live_response_does_not_include_macro_metadata() {
     let upstream = serde_json::json!({"answer":"done","citations":[]});
     assert_eq!(json["command"], "answer");
     assert_eq!(json["data"], upstream);
+    assert_eq!(json["outcome"], "full");
+    assert_eq!(json["contentDiagnostics"], serde_json::json!([]));
+    assert_eq!(json["warnings"], serde_json::json!([]));
     assert!(json["data"].get("expandsTo").is_none());
     assert!(json["data"].get("expands_to").is_none());
     assert_eq!(json["dataHash"], transport::data_hash(&upstream).unwrap());

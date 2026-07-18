@@ -5625,17 +5625,26 @@ fn execute_typed_live<T: Transport>(
     }
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let requested_contents_count = spec.op.mixed_status_exit.then(|| {
+    let requested_contents = spec.op.mixed_status_exit.then(|| {
         contents_inputs_from_body(&body)
             .expect("validated contents body")
             .1
-            .len()
     });
+    let requested_contents_count = requested_contents.as_ref().map(Vec::len);
+    let content_diagnostics = if let Some(requested) = requested_contents.as_deref() {
+        Some(transport::contents_diagnostics(&data, requested))
+    } else if spec.op.command() == "answer" {
+        // The AnswerResponse schema exposes no per-citation crawl, HTTP, or MIME metadata.
+        Some(Vec::new())
+    } else {
+        None
+    };
     append_response_warnings(
         spec.op,
         &body,
         &data,
-        requested_contents_count,
+        requested_contents.as_deref(),
+        content_diagnostics.as_deref(),
         &mut warnings,
     );
     let exit_code = if let Some(requested_count) = requested_contents_count {
@@ -5658,11 +5667,13 @@ fn execute_typed_live<T: Transport>(
         duration_ms: result.duration_ms,
         warnings: &warnings,
     });
-    if let Some(requested_count) = requested_contents_count {
-        envelope["outcome"] = serde_json::Value::String(
-            transport::contents_outcome(&envelope["data"], requested_count).to_string(),
-        );
-    }
+    let outcome = requested_contents_count
+        .map(|requested_count| transport::contents_outcome(&envelope["data"], requested_count))
+        .or_else(|| {
+            (spec.op.command() == "answer").then(|| transport::answer_outcome(&envelope["data"]))
+        });
+    attach_content_metadata(&mut envelope, outcome, content_diagnostics);
+    append_warning_next_actions(&mut envelope);
     apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     emit_response_value(&envelope, globals, execution.pretty);
     Ok(exit_code)
@@ -5677,6 +5688,9 @@ fn execute_streaming_live<T: Transport>(
     pretty: bool,
     warnings: &[serde_json::Value],
 ) -> Result<i32, CliError> {
+    let answer_request_body = operation
+        .is_some_and(|op| op.command() == "answer")
+        .then(|| params.body.clone());
     let stream_mode = stream_output_mode(globals, stdout_is_tty());
     let ndjson = !globals.raw && stream_mode == OutputMode::Ndjson;
     let human = !globals.raw && stream_mode == OutputMode::Human;
@@ -5724,6 +5738,10 @@ fn execute_streaming_live<T: Transport>(
                 redaction::redact_named_field(&mut data, field);
             }
         }
+        let mut response_warnings = warnings.to_vec();
+        if let Some(request_body) = answer_request_body.as_ref() {
+            append_answer_warning(request_body, &data, &mut response_warnings);
+        }
         let mut envelope = response_envelope(ResponseEnvelopeArgs {
             command,
             method: &result.method,
@@ -5737,8 +5755,17 @@ fn execute_streaming_live<T: Transport>(
             data,
             retries: result.retries,
             duration_ms: result.duration_ms,
-            warnings,
+            warnings: &response_warnings,
         });
+        let answer_outcome = answer_request_body
+            .as_ref()
+            .map(|_| transport::answer_outcome(&envelope["data"]));
+        attach_content_metadata(
+            &mut envelope,
+            answer_outcome,
+            answer_request_body.as_ref().map(|_| Vec::new()),
+        );
+        append_warning_next_actions(&mut envelope);
         apply_output_ceiling(&mut envelope, globals.max_output_bytes);
         if ndjson {
             write_ndjson(&mut out, &envelope).map_err(|err| stream_write_error(err, None))?;
@@ -5750,6 +5777,10 @@ fn execute_streaming_live<T: Transport>(
     }
 
     let terminal_data = terminal_stream_data(&frames);
+    let mut response_warnings = warnings.to_vec();
+    if let Some(request_body) = answer_request_body.as_ref() {
+        append_answer_warning(request_body, &terminal_data, &mut response_warnings);
+    }
     let count = transport::primary_count(&terminal_data);
     let hash = transport::data_hash(&terminal_data);
     let mut terminal = response_envelope(ResponseEnvelopeArgs {
@@ -5765,8 +5796,17 @@ fn execute_streaming_live<T: Transport>(
         data_hash: hash,
         retries: result.retries,
         duration_ms: result.duration_ms,
-        warnings,
+        warnings: &response_warnings,
     });
+    let answer_outcome = answer_request_body
+        .as_ref()
+        .map(|_| transport::answer_outcome(&terminal["data"]));
+    attach_content_metadata(
+        &mut terminal,
+        answer_outcome,
+        answer_request_body.as_ref().map(|_| Vec::new()),
+    );
+    append_warning_next_actions(&mut terminal);
     apply_output_ceiling(&mut terminal, globals.max_output_bytes);
     if ndjson {
         write_ndjson(&mut out, &terminal)
@@ -6123,17 +6163,27 @@ fn append_response_warnings(
     op: &'static registry::OperationDef,
     request_body: &serde_json::Value,
     data: &serde_json::Value,
-    requested_contents_count: Option<usize>,
+    requested_contents: Option<&[String]>,
+    content_diagnostics: Option<&[serde_json::Value]>,
     warnings: &mut Vec<serde_json::Value>,
 ) {
     if op.command() == "contents" {
-        if let Some(requested_count) = requested_contents_count {
+        if let Some(requested) = requested_contents {
             let uses_ids = request_body
                 .get("ids")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|ids| !ids.is_empty());
-            append_contents_status_warnings(data, requested_count, uses_ids, warnings);
+            append_contents_status_warnings(data, requested.len(), uses_ids, warnings);
+            append_contents_content_warnings(
+                content_diagnostics.unwrap_or_default(),
+                uses_ids,
+                warnings,
+            );
         }
+        return;
+    }
+    if op.command() == "answer" {
+        append_answer_warning(request_body, data, warnings);
         return;
     }
     if op.command() != "search" {
@@ -6164,6 +6214,176 @@ fn append_response_warnings(
         ),
         "suggestedCommand": format!("exa-agent search {} --text 1500", shell_quote(query)),
     }));
+}
+
+fn append_answer_warning(
+    request_body: &serde_json::Value,
+    data: &serde_json::Value,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    let outcome = transport::answer_outcome(data);
+    if outcome == "full" {
+        return;
+    }
+    let query = request_body
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<question>");
+    warnings.push(serde_json::json!({
+        "code": "empty_answer",
+        "message": if outcome == "partial" {
+            "answer text was empty although citations were returned; inspect citations or search directly"
+        } else {
+            "answer and citations were empty; search directly rather than treating this as a sourced answer"
+        },
+        "suggestedCommand": format!(
+            "exa-agent search {} --num-results 10 --json",
+            shell_quote(query)
+        )
+    }));
+}
+
+fn append_contents_content_warnings(
+    diagnostics: &[serde_json::Value],
+    uses_ids: bool,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    for diagnostic in diagnostics {
+        let content_status = diagnostic
+            .get("content_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("empty_content");
+        if matches!(content_status, "usable" | "crawl_error") {
+            continue;
+        }
+        let target = diagnostic
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>");
+        let (message, suggested_command) = match content_status {
+            "binary_content" => (
+                "upstream returned undecoded binary bytes instead of usable text",
+                contents_content_fallback(target, uses_ids),
+            ),
+            "pdf_unextracted" => (
+                "upstream returned a PDF without extracted text; no trustworthy raw PDF bytes were available for local pdftotext recovery",
+                parallel_extract_command(target),
+            ),
+            _ => (
+                "upstream returned an empty content row instead of usable text",
+                contents_content_fallback(target, uses_ids),
+            ),
+        };
+        warnings.push(serde_json::json!({
+            "code": content_status,
+            "message": format!("{message}: {target}"),
+            "url": target,
+            "suggestedCommand": suggested_command,
+        }));
+    }
+}
+
+fn contents_content_fallback(target: &str, uses_ids: bool) -> String {
+    if !uses_ids && is_government_source(target) {
+        parallel_extract_command(target)
+    } else {
+        format!(
+            "exa-agent contents {}{} --fresh --text full --json",
+            if uses_ids { "--ids " } else { "" },
+            shell_quote(target)
+        )
+    }
+}
+
+fn parallel_extract_command(target: &str) -> String {
+    format!(
+        "parallel-cli extract {} --full-content --json",
+        shell_quote(target)
+    )
+}
+
+fn is_government_source(target: &str) -> bool {
+    let host = target
+        .split_once("://")
+        .map_or(target, |(_, remainder)| remainder)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    host == "ecfr.gov"
+        || host == "www.ecfr.gov"
+        || host == "congress.gov"
+        || host == "www.congress.gov"
+        || host == "govinfo.gov"
+        || host == "www.govinfo.gov"
+        || host == "uscode.house.gov"
+        || host.ends_with(".gov")
+}
+
+fn attach_content_metadata(
+    envelope: &mut serde_json::Value,
+    outcome: Option<&str>,
+    content_diagnostics: Option<Vec<serde_json::Value>>,
+) {
+    let Some(object) = envelope.as_object_mut() else {
+        return;
+    };
+    let Some(mut index) = object
+        .keys()
+        .position(|key| key == "data")
+        .map(|index| index + 1)
+    else {
+        return;
+    };
+    if let Some(outcome) = outcome {
+        object.shift_insert(
+            index,
+            "outcome".to_string(),
+            serde_json::Value::String(outcome.to_string()),
+        );
+        index += 1;
+    }
+    if let Some(diagnostics) = content_diagnostics {
+        object.shift_insert(
+            index,
+            "contentDiagnostics".to_string(),
+            serde_json::Value::Array(diagnostics),
+        );
+    }
+}
+
+fn append_warning_next_actions(envelope: &mut serde_json::Value) {
+    let actions: Vec<serde_json::Value> = envelope
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| {
+            let code = warning.get("code").and_then(serde_json::Value::as_str)?;
+            if !matches!(
+                code,
+                "url_failed"
+                    | "all_urls_failed"
+                    | "empty_content"
+                    | "binary_content"
+                    | "pdf_unextracted"
+                    | "empty_answer"
+            ) {
+                return None;
+            }
+            let command = warning
+                .get("suggestedCommand")
+                .and_then(serde_json::Value::as_str)?;
+            Some(serde_json::json!({
+                "description": "Recover missing upstream content",
+                "command": command,
+            }))
+        })
+        .collect();
+    if !actions.is_empty() {
+        envelope["nextActions"] = serde_json::Value::Array(actions);
+    }
 }
 
 fn append_contents_status_warnings(
@@ -6216,8 +6436,10 @@ fn append_contents_status_warnings(
             });
             if let Some(command) = contents_status_suggested_command(entry, uses_ids) {
                 warning["suggestedCommand"] = serde_json::Value::String(command);
-                warning["reason"] =
-                    serde_json::Value::String("upstream_reason_unavailable".to_string());
+                if contents_status_reason(entry).is_none() {
+                    warning["reason"] =
+                        serde_json::Value::String("upstream_reason_unavailable".to_string());
+                }
             }
             warnings.push(warning);
         }
@@ -6249,15 +6471,25 @@ fn contents_status_reason(entry: &serde_json::Value) -> Option<&str> {
 }
 
 fn contents_status_suggested_command(entry: &serde_json::Value, uses_ids: bool) -> Option<String> {
-    if contents_status_reason(entry).is_some() {
-        return None;
-    }
     let target = entry
         .get("id")
         .or_else(|| entry.get("url"))
         .and_then(serde_json::Value::as_str)?;
+    if !uses_ids
+        && (contents_status_reason(entry) == Some("CRAWL_UNKNOWN_ERROR")
+            || is_government_source(target))
+    {
+        return Some(parallel_extract_command(target));
+    }
+    if contents_status_reason(entry).is_none() {
+        return Some(format!(
+            "exa-agent contents {}{} --text full",
+            if uses_ids { "--ids " } else { "" },
+            shell_quote(target)
+        ));
+    }
     Some(format!(
-        "exa-agent contents {}{} --text full",
+        "exa-agent contents {}{} --fresh --text full --json",
         if uses_ids { "--ids " } else { "" },
         shell_quote(target)
     ))
@@ -6583,11 +6815,13 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
+                    "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
                     "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[.data.results[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
-                    "Contents/fetch success envelopes add outcome no_content (no failures and no returned rows), partial, or full (one results row per requested item with no failure evidence); missing statuses do not downgrade full coverage, and all-URL failures remain outcome partial with exit 10.",
+                    "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
+                    "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
@@ -6623,7 +6857,27 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     {
                         "code": "all_urls_failed",
                         "exit": 10,
-                        "description": "contents/fetch returned zero results and every requested URL failed; inspect warnings.statuses for per-URL status tags"
+                        "description": "contents/fetch returned zero usable results and every reported URL status failed; inspect warnings.statuses for per-URL status tags"
+                    },
+                    {
+                        "code": "empty_content",
+                        "exit": 0,
+                        "description": "contents/fetch returned a row with no usable text; inspect contentDiagnostics and follow nextActions"
+                    },
+                    {
+                        "code": "binary_content",
+                        "exit": 0,
+                        "description": "contents/fetch returned undecoded binary bytes instead of usable text"
+                    },
+                    {
+                        "code": "pdf_unextracted",
+                        "exit": 0,
+                        "description": "contents/fetch identified a PDF but received no usable extracted text"
+                    },
+                    {
+                        "code": "empty_answer",
+                        "exit": 0,
+                        "description": "answer/ask returned no usable answer text; inspect citations or follow the search nextAction"
                     },
                 ],
             }),

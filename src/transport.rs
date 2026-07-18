@@ -1008,7 +1008,69 @@ pub struct ContentsStatusSummary {
     pub status_count: usize,
     pub failed_count: usize,
     pub results_count: usize,
+    pub usable_results_count: usize,
     pub exit_code: i32,
+}
+
+/// Reject decoded strings that are actually binary payloads. Tabs and line breaks are valid
+/// text; gzip/PDF signatures, replacement characters, and a high control-character ratio are not.
+pub fn looks_binary(text: &str) -> bool {
+    if text.starts_with("\u{1f}\u{8b}") || text.starts_with("%PDF-") {
+        return true;
+    }
+    let mut total = 0usize;
+    let mut suspicious = 0usize;
+    for character in text.chars() {
+        total += 1;
+        if character == '\u{fffd}'
+            || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            suspicious += 1;
+        }
+    }
+    total > 0 && suspicious * 10 >= total * 3
+}
+
+fn usable_text(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|text| !text.trim().is_empty() && !looks_binary(text))
+}
+
+/// A contents row is usable when at least one requested content-bearing field contains text.
+pub fn row_has_usable_text(row: &Value) -> bool {
+    ["text", "summary", "context"]
+        .iter()
+        .any(|field| row.get(field).is_some_and(usable_text))
+        || row
+            .get("highlights")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(usable_text))
+}
+
+fn answer_has_usable_content(answer: Option<&Value>) -> bool {
+    match answer {
+        Some(Value::String(text)) => !text.trim().is_empty() && !looks_binary(text),
+        Some(Value::Object(object)) => !object.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(value) => !value.is_null(),
+        None => false,
+    }
+}
+
+/// Classify `/answer` independently of exit status so an empty HTTP-200 response is visible.
+pub fn answer_outcome(data: &Value) -> &'static str {
+    if answer_has_usable_content(data.get("answer")) {
+        "full"
+    } else if data
+        .get("citations")
+        .and_then(Value::as_array)
+        .is_some_and(|citations| !citations.is_empty())
+    {
+        "partial"
+    } else {
+        "no_content"
+    }
 }
 
 pub fn contents_status_summary(data: &Value, requested_count: usize) -> ContentsStatusSummary {
@@ -1026,17 +1088,28 @@ pub fn contents_status_summary(data: &Value, requested_count: usize) -> Contents
         .or_else(|| data.get("data"))
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let exit_code = if !statuses.is_empty() && failed_count == statuses.len() && results_count == 0
-    {
-        10
-    } else {
-        0
-    };
+    let usable_results_count = data
+        .get("results")
+        .or_else(|| data.get("data"))
+        .and_then(Value::as_array)
+        .map_or(0, |results| {
+            results
+                .iter()
+                .filter(|row| row_has_usable_text(row))
+                .count()
+        });
+    let exit_code =
+        if !statuses.is_empty() && failed_count == statuses.len() && usable_results_count == 0 {
+            10
+        } else {
+            0
+        };
     ContentsStatusSummary {
         requested_count,
         status_count: statuses.len(),
         failed_count,
         results_count,
+        usable_results_count,
         exit_code,
     }
 }
@@ -1046,19 +1119,153 @@ pub fn contents_mixed_status_exit_code(data: &Value, requested_count: usize) -> 
 }
 
 /// Classify a `/contents` response against the request that produced it.
-/// `full` means one `results[]` row per requested item and no failure evidence; statuses are
-/// optional metadata and their absence does not downgrade complete row coverage.
+/// `full` means one usable `results[]` row per requested item and no failure evidence; statuses
+/// are optional metadata and their absence does not downgrade complete usable coverage.
 pub fn contents_outcome(data: &Value, requested_count: usize) -> &'static str {
     let summary = contents_status_summary(data, requested_count);
-    if summary.failed_count > 0 {
-        "partial"
-    } else if summary.results_count == 0 {
+    if summary.usable_results_count == 0 {
         "no_content"
-    } else if summary.results_count == requested_count {
+    } else if summary.failed_count == 0 && summary.usable_results_count == requested_count {
         "full"
     } else {
         "partial"
     }
+}
+
+fn item_id(item: &Value) -> Option<&str> {
+    item.get("url")
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+}
+
+fn row_contains_signature(row: Option<&Value>, signature: &str) -> bool {
+    ["text", "summary", "context"].iter().any(|field| {
+        row.and_then(|row| row.get(field))
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.starts_with(signature))
+    })
+}
+
+fn inferred_content_type(id: &str, row: Option<&Value>) -> Option<(String, &'static str)> {
+    let path = id.split(['?', '#']).next().unwrap_or(id);
+    if path.to_ascii_lowercase().ends_with(".pdf") {
+        Some(("application/pdf".to_string(), "inferred_url"))
+    } else if row_contains_signature(row, "%PDF-") {
+        Some(("application/pdf".to_string(), "inferred_body"))
+    } else if row_contains_signature(row, "\u{1f}\u{8b}") {
+        Some(("application/gzip".to_string(), "inferred_body"))
+    } else {
+        None
+    }
+}
+
+fn row_contains_binary(row: Option<&Value>) -> bool {
+    row.is_some_and(|row| {
+        ["text", "summary", "context"].iter().any(|field| {
+            row.get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty() && looks_binary(text))
+        }) || row
+            .get("highlights")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|text| !text.trim().is_empty() && looks_binary(text))
+                })
+            })
+    })
+}
+
+/// Summarize per-item crawl and content usability without modifying `data.statuses[]`.
+pub fn contents_diagnostics(data: &Value, requested: &[String]) -> Vec<Value> {
+    let statuses = data
+        .get("statuses")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let results = data
+        .get("results")
+        .or_else(|| data.get("data"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut ids = requested.to_vec();
+    for id in statuses.iter().chain(results).filter_map(|item| {
+        item.get("id")
+            .or_else(|| item.get("url"))
+            .and_then(Value::as_str)
+    }) {
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+
+    ids.into_iter()
+        .map(|id| {
+            let status = statuses.iter().find(|item| item_id(item) == Some(&id));
+            let row = results.iter().find(|item| item_id(item) == Some(&id));
+            let crawl_status = status
+                .and_then(|item| item.get("status"))
+                .and_then(Value::as_str);
+            let error_tag = status
+                .and_then(|item| item.get("error"))
+                .and_then(|error| error.get("tag"))
+                .and_then(Value::as_str);
+            let http_status = status
+                .and_then(|item| item.get("error"))
+                .and_then(|error| error.get("httpStatusCode"))
+                .and_then(Value::as_u64);
+            let content_type = inferred_content_type(&id, row);
+            let pdf = content_type.as_ref().is_some_and(|(value, _)| {
+                value.eq_ignore_ascii_case("application/pdf")
+                    || value.eq_ignore_ascii_case("application/x-pdf")
+            });
+            let row_usable = row.is_some_and(row_has_usable_text);
+            let content_status = if crawl_status == Some("error") {
+                "crawl_error"
+            } else if row_usable {
+                "usable"
+            } else if pdf {
+                "pdf_unextracted"
+            } else if row_contains_binary(row) {
+                "binary_content"
+            } else {
+                "empty_content"
+            };
+
+            let mut diagnostic = serde_json::Map::new();
+            diagnostic.insert("id".to_string(), Value::String(id));
+            if let Some(value) = crawl_status {
+                diagnostic.insert("crawl_status".to_string(), Value::String(value.to_string()));
+            }
+            if let Some(value) = error_tag {
+                diagnostic.insert("error_tag".to_string(), Value::String(value.to_string()));
+            }
+            if let Some(value) = http_status {
+                diagnostic.insert("http_status".to_string(), Value::Number(value.into()));
+            }
+            if let Some((value, source)) = content_type {
+                diagnostic.insert("content_type".to_string(), Value::String(value));
+                diagnostic.insert(
+                    "content_type_source".to_string(),
+                    Value::String(source.to_string()),
+                );
+            }
+            diagnostic.insert(
+                "content_status".to_string(),
+                Value::String(content_status.to_string()),
+            );
+            diagnostic.insert(
+                "usable".to_string(),
+                Value::Bool(content_status == "usable"),
+            );
+            if content_status == "pdf_unextracted" {
+                diagnostic.insert("pdf_unextracted".to_string(), Value::Bool(true));
+            }
+            Value::Object(diagnostic)
+        })
+        .collect()
 }
 
 /// Execute a live `raw` command through the supplied transport.

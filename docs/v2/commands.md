@@ -343,6 +343,11 @@ Guards:
 - `--stream` without `--output-schema` → `warnings[]`: streaming has no effect; falls back to a single JSON envelope.
 - Deprecated knobs (`--livecrawl`, `--context*`) used → non-fatal `warnings[]` with replacement.
 
+Query/domain distinction:
+- `site:agency.gov` is text inside `QUERY`; it participates in Exa's query interpretation and ranking. Use it when the site constraint is part of what the query means, and keep it quoted with the rest of the query: `exa-agent search "site:congress.gov clean air act" ...`.
+- `--include-domain agency.gov` and `--exclude-domain example.com` populate the typed upstream `includeDomains[]`/`excludeDomains[]` filters independently of query wording. Use them for a hard allow/deny domain set, repeat the flag for multiple domains, and do not put `site:` in the flag value.
+- `similar --exclude-source-domain` is narrower: it excludes the source URL's own domain for similarity search. It is not an alias for `search --exclude-domain`.
+
 ### `contents` — `POST /contents`
 
 ```text
@@ -367,6 +372,8 @@ Guards:
 - `--stream` → exit 1 (contents does not stream).
 - `--livecrawl` + `--max-age-hours` → exit 1.
 - Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; a batch with mixed outcomes exits 0 with `url_failed` warnings and `outcome: "partial"`, while a batch where every item fails exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
+- `outcome` is text-aware: empty, whitespace-only, gzip/PDF-signature, or control-heavy rows do not count as usable. `contentDiagnostics[]` summarizes the exact status/error/HTTP fields Exa returned and labels empty/binary/PDF rows; `warnings[]` and `nextActions[]` always provide a fallback when outcome is not `full`.
+- Government/primary-source fallback: Exa is the fast default, but its crawler can return `no_content`/`partial` for `uscode.house.gov`, `govinfo.gov`, eCFR, Congress.gov, and agency sites. For authority-critical statutory or regulatory text, follow the emitted action: `parallel-cli extract 'URL' --full-content --json`. This is an upstream crawl boundary, not content the CLI can safely reconstruct. PDFs are reported as `pdf_unextracted` because Exa returns extracted JSON text, not trustworthy raw PDF bytes; the CLI does not direct-download outside the Exa request path.
 
 ### `similar` — `POST /findSimilar` (deprecated upstream)
 

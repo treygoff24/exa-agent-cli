@@ -81,7 +81,7 @@
     "dataTruncated": false
   },
   "expected": {
-    "outcome": "partial",
+    "outcome": "no_content",
     "exit": 10
   }
 }

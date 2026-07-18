@@ -59,8 +59,9 @@ Before running any mutation for real, preview the exact upstream request it woul
 exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
 ```
 
-For generated docs, examples, and local probes that must not touch credentials or the network,
-set `EXA_AGENT_NO_NETWORK` (any value, including empty; unset it to turn the guard off). It refuses live typed, raw, streaming, `auth test`/`status`,
+**Repo-work rule:** every local `exa-agent` invocation used for generated docs, examples, or
+probing MUST export `EXA_AGENT_NO_NETWORK` (any value, including empty) to prevent unintended
+billed live calls; unset it only for an intentionally live test. The guard refuses live typed, raw, streaming, `auth test`/`status`,
 `schema refresh --check`, and `doctor --online` before credential resolution; dry-run and
 self-description commands still work.
 
@@ -70,7 +71,7 @@ Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's r
 
 Error envelope (`exa.cli.error.v1`, stderr): `error.code` (from the published dictionary below), `error.message`, and often `suggestedCommand`. Stdout stays empty on error.
 
-Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits the exact upstream bytes with no CLI envelope.
+Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits the exact upstream bytes with no CLI envelope. `-o/--output FILE` writes the complete selected output (exact bytes for `--raw`) to `FILE`; stdout carries only a small confirmation envelope with `dataPath`, and an explicit output path supersedes state-dir auto-spill.
 
 ## Exit codes
 

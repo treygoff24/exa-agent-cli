@@ -2849,6 +2849,153 @@ fn raw_live_without_credential_is_not_authenticated() {
 }
 
 #[test]
+fn contents_output_writes_full_envelope_and_small_confirmation_without_spill() {
+    let dir = temp_path("contents-output");
+    let output_path = dir.join("contents.json");
+    let state_dir = dir.join("state");
+    let response = br#"{"results":[{"url":"https://example.test","text":"captured"}],"statuses":[{"id":"https://example.test","status":"success"}]}"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://example.test",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            &base_url,
+            "--output",
+            output_path.to_str().unwrap(),
+            "--compact",
+        ],
+        &[("EXA_AGENT_STATE", state_dir.to_str().unwrap())],
+    );
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let file_bytes = fs::read(&output_path).expect("requested output file");
+    let full: serde_json::Value = serde_json::from_slice(&file_bytes).unwrap();
+    assert_eq!(full["data"]["results"][0]["text"], "captured");
+    assert_eq!(full["dataTruncated"], false);
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["data"], serde_json::Value::Null);
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["count"], 1);
+    assert_eq!(confirmation["bytes"], file_bytes.len() as u64);
+    assert!(confirmation["dataHash"].as_str().is_some());
+    assert!(!state_dir.join("spill").exists());
+}
+
+#[test]
+fn raw_output_writes_exact_upstream_bytes() {
+    let dir = temp_path("raw-output");
+    let output_path = dir.join("response.bin");
+    let response = b"{\n  \"results\": [{\"text\": \"exact\"}]\n}\n";
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /contents "));
+        },
+        response,
+    );
+    let output = run(&[
+        "contents",
+        "https://example.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        &base_url,
+        "--raw",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    assert_eq!(fs::read(&output_path).unwrap(), response);
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["count"], 1);
+    assert!(confirmation["dataHash"].as_str().is_some());
+    assert_eq!(confirmation["bytes"], response.len() as u64);
+}
+
+#[test]
+fn oversized_output_writes_only_requested_file() {
+    let dir = temp_path("oversized-output");
+    let output_path = dir.join("contents.json");
+    let state_dir = dir.join("state");
+    let response = Box::leak(
+        serde_json::to_vec(&serde_json::json!({
+            "results": [{"url": "https://large.test", "text": "x".repeat(1024)}],
+            "statuses": [{"id": "https://large.test", "status": "success"}]
+        }))
+        .unwrap()
+        .into_boxed_slice(),
+    );
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://large.test",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            &base_url,
+            "--max-output-bytes",
+            "64",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--compact",
+        ],
+        &[("EXA_AGENT_STATE", state_dir.to_str().unwrap())],
+    );
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let full: serde_json::Value = serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(full["data"]["results"][0]["text"], "x".repeat(1024));
+    assert_eq!(full["dataTruncated"], false);
+    assert!(!state_dir.join("spill").exists());
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+}
+
+#[test]
+fn unwritable_output_path_is_a_clear_error_without_false_success() {
+    let dir = temp_path("unwritable-output");
+    let output_path = dir.join("missing-parent").join("contents.json");
+    let response = br#"{"results":[{"url":"https://example.test","text":"captured"}]}"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://example.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        &base_url,
+        "--output",
+        output_path.to_str().unwrap(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!output_path.exists());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("failed to write --output file"));
+    assert!(message.contains(output_path.to_str().unwrap()));
+}
+
+#[test]
 fn raw_error_envelope_omits_absent_request_ids() {
     let output = run(&[
         "--header",

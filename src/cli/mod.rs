@@ -166,7 +166,7 @@ pub struct GlobalArgs {
     /// Emit compact single-line JSON envelopes.
     #[arg(long, global = true)]
     pub compact: bool,
-    /// Write output to a file when supported.
+    /// Write full output to FILE; stdout receives a confirmation envelope.
     #[arg(short = 'o', long, global = true)]
     pub output: Option<String>,
     /// Spill oversized `data` payloads above this byte limit; 0 disables.

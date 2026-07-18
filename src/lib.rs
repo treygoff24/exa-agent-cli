@@ -5225,8 +5225,7 @@ fn execute_paginated_live<T: Transport>(
         // shape varies by endpoint; a stale single-page breakdown next to a multi-page total
         // would be more misleading than showing only the total.
         envelope["costDollars"] = serde_json::json!({ "total": total_cost_dollars });
-        apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-        emit_response_value(&envelope, globals, pretty);
+        emit_completed_response(&mut envelope, globals, pretty)?;
     }
     Ok(0)
 }
@@ -5579,12 +5578,14 @@ fn execute_typed_live<T: Transport>(
     };
 
     if globals.raw {
-        emit_raw(&result.response.body).map_err(|err| {
-            CliError::Interrupted(Diag::new(
-                "interrupted",
-                format!("failed to write raw stdout: {err}"),
-            ))
-        })?;
+        emit_raw_result(
+            &result,
+            Some(spec.op),
+            &command,
+            globals,
+            execution.pretty,
+            &warnings,
+        )?;
         return Ok(0);
     }
 
@@ -5674,8 +5675,7 @@ fn execute_typed_live<T: Transport>(
         });
     attach_content_metadata(&mut envelope, outcome, content_diagnostics);
     append_warning_next_actions(&mut envelope);
-    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-    emit_response_value(&envelope, globals, execution.pretty);
+    emit_completed_response(&mut envelope, globals, execution.pretty)?;
     Ok(exit_code)
 }
 
@@ -8149,12 +8149,7 @@ fn dispatch_raw_inner(
     )?;
 
     if globals.raw {
-        emit_raw(&result.response.body).map_err(|err| {
-            CliError::Interrupted(Diag::new(
-                "interrupted",
-                format!("failed to write raw stdout: {err}"),
-            ))
-        })?;
+        emit_raw_result(&result, None, "raw", globals, pretty, &[])?;
         return Ok(0);
     }
 
@@ -8176,8 +8171,7 @@ fn dispatch_raw_inner(
         duration_ms: result.duration_ms,
         warnings: &[],
     });
-    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-    emit_response_value(&envelope, globals, pretty);
+    emit_completed_response(&mut envelope, globals, pretty)?;
     Ok(0)
 }
 
@@ -8224,6 +8218,119 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
         .collect()
 }
 
+fn emit_completed_response(
+    envelope: &mut serde_json::Value,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<(), CliError> {
+    if let Some(path) = globals.output.as_deref() {
+        let serialized = serialize_response_output(envelope, globals, pretty)?;
+        write_requested_output(path, &serialized)?;
+        elide_data(envelope, path, serialized.len() as u64);
+    } else {
+        apply_output_ceiling(envelope, globals.max_output_bytes);
+    }
+    emit_response_value(envelope, globals, pretty);
+    Ok(())
+}
+
+fn emit_raw_result(
+    result: &transport::RawExecuteResult,
+    operation: Option<&registry::OperationDef>,
+    command: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+    warnings: &[serde_json::Value],
+) -> Result<(), CliError> {
+    let Some(path) = globals.output.as_deref() else {
+        return emit_raw(&result.response.body).map_err(|err| {
+            CliError::Interrupted(Diag::new(
+                "interrupted",
+                format!("failed to write raw stdout: {err}"),
+            ))
+        });
+    };
+    write_requested_output(path, &result.response.body)?;
+    let data = transport::parse_response_data(&result.response.body);
+    let mut confirmation = response_envelope(ResponseEnvelopeArgs {
+        command,
+        method: &result.method,
+        path: &result.path,
+        operation,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        count: transport::primary_count(&data),
+        data_hash: transport::data_hash(&data),
+        data,
+        retries: result.retries,
+        duration_ms: result.duration_ms,
+        warnings,
+    });
+    elide_data(&mut confirmation, path, result.response.body.len() as u64);
+    emit_response_value(&confirmation, globals, pretty);
+    Ok(())
+}
+
+fn serialize_response_output(
+    envelope: &serde_json::Value,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<Vec<u8>, CliError> {
+    let mut output = match response_output_mode(globals) {
+        OutputMode::Human => render_human_response(envelope)
+            .map(String::into_bytes)
+            .unwrap_or(serde_json::to_vec_pretty(envelope).map_err(output_serialization_error)?),
+        OutputMode::Ndjson => {
+            let mut output = Vec::new();
+            for value in response_ndjson_values(envelope) {
+                serde_json::to_writer(&mut output, &value).map_err(output_serialization_error)?;
+                output.push(b'\n');
+            }
+            output
+        }
+        OutputMode::Json | OutputMode::Raw if pretty => {
+            serde_json::to_vec_pretty(envelope).map_err(output_serialization_error)?
+        }
+        OutputMode::Json | OutputMode::Raw => {
+            serde_json::to_vec(envelope).map_err(output_serialization_error)?
+        }
+    };
+    if !output.ends_with(b"\n") {
+        output.push(b'\n');
+    }
+    Ok(output)
+}
+
+fn output_serialization_error(err: serde_json::Error) -> CliError {
+    CliError::Usage(Diag::new(
+        "invalid_value",
+        format!("failed to serialize --output payload: {err}"),
+    ))
+}
+
+fn write_requested_output(path: &str, bytes: &[u8]) -> Result<(), CliError> {
+    std::fs::write(path, bytes).map_err(|err| {
+        CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("failed to write --output file `{path}`: {err}"),
+        ))
+    })
+}
+
+fn elide_data(envelope: &mut serde_json::Value, path: &str, bytes: u64) {
+    let Some(obj) = envelope.as_object_mut() else {
+        return;
+    };
+    obj.insert("data".to_string(), serde_json::Value::Null);
+    obj.insert("dataTruncated".to_string(), serde_json::Value::Bool(true));
+    obj.insert(
+        "dataPath".to_string(),
+        serde_json::Value::String(path.to_string()),
+    );
+    obj.insert("bytes".to_string(), serde_json::json!(bytes));
+}
+
 fn emit_response_value(envelope: &serde_json::Value, globals: &GlobalArgs, pretty: bool) {
     match response_output_mode(globals) {
         OutputMode::Ndjson => emit_response_ndjson(envelope),
@@ -8253,18 +8360,22 @@ fn response_output_mode(globals: &GlobalArgs) -> OutputMode {
 }
 
 fn emit_response_ndjson(envelope: &serde_json::Value) {
+    for value in response_ndjson_values(envelope) {
+        emit_ndjson(&value);
+    }
+}
+
+fn response_ndjson_values(envelope: &serde_json::Value) -> Vec<serde_json::Value> {
     let items = primary_items(envelope.get("data").unwrap_or(&serde_json::Value::Null));
     if items.is_empty() {
-        emit_ndjson(envelope);
-        return;
+        return vec![envelope.clone()];
     }
-    for item in items {
-        emit_ndjson(&item);
-    }
+    let mut values = items;
     let mut summary = envelope.clone();
     summary["summary"] = serde_json::Value::Bool(true);
     summary["data"] = serde_json::Value::Null;
-    emit_ndjson(&summary);
+    values.push(summary);
+    values
 }
 
 fn render_human_response(envelope: &serde_json::Value) -> Option<String> {

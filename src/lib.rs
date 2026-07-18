@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod error;
 pub mod output;
 pub mod pending;
+pub mod presets;
 pub mod redaction;
 pub mod registry;
 pub mod request;
@@ -25,13 +26,14 @@ use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
 use cli::{
     AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentRunArgs, AgentRunsCmd,
     AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
-    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MonitorBatchArgs,
-    MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd, PaginationArgs, ResearchCmd,
-    ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs, TeamCmd,
-    WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
-    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
-    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
-    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
+    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
+    PaginationArgs, PresetCmd, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd,
+    SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
+    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
+    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
+    SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -394,6 +396,7 @@ fn static_subcommands(parent: &str) -> &'static [&'static str] {
         "auth" => &["status", "test", "login", "logout"],
         "config" => &["list", "get", "set", "unset", "path", "profiles"],
         "config profiles" => &["list", "show", "use", "create", "delete"],
+        "preset" | "macro" => &["list", "show"],
         "agent" => &["run", "runs"],
         "agent runs" => &["create", "list", "get", "events", "cancel", "delete"],
         _ => &[],
@@ -449,6 +452,11 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
             let options = doctor::DoctorOptions {
                 online: args.online,
                 checks,
+                fix: args.fix,
+                dry_run: cli.globals.dry_run,
+                undo: args.undo,
+                allow_auth: args.allow_auth,
+                allow_delete: args.allow_delete,
             };
             if options.online {
                 transport::ensure_network_allowed()?;
@@ -463,6 +471,8 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         }
         Command::Auth { sub } => dispatch_auth(sub, &cli.globals, pretty),
         Command::Config { sub } => dispatch_config(sub, pretty),
+        Command::Preset { sub } => dispatch_preset(sub, pretty),
+        Command::Macro { sub } => dispatch_macro(sub, pretty),
         Command::Search(args) => dispatch_search(args, &cli.globals, pretty),
         Command::Contents(args) => dispatch_contents(args, &cli.globals, pretty),
         Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
@@ -4664,7 +4674,7 @@ fn build_typed_spec(
     flag_values: &[(&str, Option<String>)],
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
-    request::build_request(
+    let mut spec = request::build_request(
         op,
         flag_values,
         RequestOverrides {
@@ -4675,7 +4685,18 @@ fn build_typed_spec(
                 .transpose()?,
             sets: &globals.set,
         },
-    )
+    )?;
+    if let Some(name) = globals.preset.as_deref() {
+        let preset = presets::get_preset(name, &op.command())?;
+        let validation = validate_registry_body(op, &preset.body, false, true);
+        if validation.valid == serde_json::Value::Bool(false) {
+            return Err(registry_validation_error(validation));
+        }
+        let mut body = preset.body;
+        request::deep_merge(&mut body, spec.body);
+        spec.body = body;
+    }
+    Ok(spec)
 }
 
 fn with_typed_error_context<F>(
@@ -4935,6 +4956,10 @@ fn dispatch_typed_inner(
     extras: LiveExtras<'_>,
 ) -> Result<i32, CliError> {
     parse_user_headers(&globals.headers)?;
+    let validation = validate_registry_input(spec.op, &spec.body);
+    if validation.valid == serde_json::Value::Bool(false) {
+        return Err(registry_validation_error(validation));
+    }
     if globals.print_request || globals.dry_run {
         let mut warnings = typed_command_warnings(spec.op);
         warnings.extend_from_slice(extras.extra_warnings);
@@ -5394,6 +5419,12 @@ fn dispatch_typed_chunks_inner(
     globals: &GlobalArgs,
 ) -> Result<i32, CliError> {
     parse_user_headers(&globals.headers)?;
+    for spec in &specs {
+        let validation = validate_registry_input(spec.op, &spec.body);
+        if validation.valid == serde_json::Value::Bool(false) {
+            return Err(registry_validation_error(validation));
+        }
+    }
     if globals.raw && specs.len() > 1 {
         return Err(CliError::Usage(Diag::new(
             "invalid_flag_combination",
@@ -6481,7 +6512,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                 )
             })?;
             let body = read_validate_input_body(globals)?;
-            let validation = validate_registry_input(op, &body);
+            let validation = validate_registry_body(op, &body, true, true);
             emit_stdout(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_validate_input.v1",
@@ -6693,6 +6724,15 @@ fn validate_registry_input(
     op: &registry::OperationDef,
     body: &serde_json::Value,
 ) -> ValidateInputOutcome {
+    validate_registry_body(op, body, true, false)
+}
+
+fn validate_registry_body(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+    require_required: bool,
+    check_unknown: bool,
+) -> ValidateInputOutcome {
     if op.fields.is_empty() {
         return ValidateInputOutcome {
             valid: serde_json::Value::Null,
@@ -6705,18 +6745,20 @@ fn validate_registry_input(
         };
     }
 
-    for field in op.fields {
-        if field.required && !body_field_present(body, field.body_path) {
-            return ValidateInputOutcome {
-                valid: serde_json::Value::Bool(false),
-                details: Some(serde_json::json!({
-                    "issue": "missing_required_field",
-                    "field": field.body_path,
-                    "flag": field.flag,
-                })),
-                suggested_command: Some(suggested_validate_input_command(op, body, field)),
-                note: None,
-            };
+    if require_required {
+        for field in op.fields {
+            if field.required && !body_field_present(body, field.body_path) {
+                return ValidateInputOutcome {
+                    valid: serde_json::Value::Bool(false),
+                    details: Some(serde_json::json!({
+                        "issue": "missing_required_field",
+                        "field": field.body_path,
+                        "flag": field.flag,
+                    })),
+                    suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                    note: None,
+                };
+            }
         }
     }
 
@@ -6807,12 +6849,134 @@ fn validate_registry_input(
         }
     }
 
+    if check_unknown {
+        if let Some(issue) = unknown_body_fields_issue(op, body) {
+            return ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(issue),
+                suggested_command: Some(format!("exa-agent {} --help", op.command())),
+                note: None,
+            };
+        }
+    }
+
     ValidateInputOutcome {
         valid: serde_json::Value::Bool(true),
         details: None,
         suggested_command: None,
         note: None,
     }
+}
+
+fn known_body_paths(op: &registry::OperationDef) -> Vec<&'static str> {
+    let mut paths = Vec::new();
+    for field in op.fields {
+        paths.push(field.body_path);
+        for (co_path, _) in field.co_fields {
+            paths.push(*co_path);
+        }
+    }
+    paths
+}
+
+fn unknown_body_fields_issue(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if op.fields.is_empty() {
+        return None;
+    }
+    let concrete_fallback;
+    let free_fallback;
+    let (concrete, free) = if op.schema_fields.is_empty() && op.schema_free_paths.is_empty() {
+        concrete_fallback = known_body_paths(op);
+        free_fallback = Vec::new();
+        (&concrete_fallback[..], &free_fallback[..])
+    } else {
+        (op.schema_fields, op.schema_free_paths)
+    };
+    let mut unknown = Vec::new();
+    collect_unknown_body_paths(body, "", op.fields, concrete, free, &mut unknown);
+    if unknown.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "issue": "invalid_value",
+            "field": unknown[0],
+            "message": format!("request body contains unknown field `{}`", unknown[0]),
+        }))
+    }
+}
+
+fn collect_unknown_body_paths(
+    value: &serde_json::Value,
+    path: &str,
+    fields: &[registry::FieldDef],
+    concrete: &[&str],
+    free: &[&str],
+    unknown: &mut Vec<String>,
+) {
+    if is_free_body_path(path, free) {
+        return;
+    }
+    if let Some(field) = fields.iter().find(|field| field.body_path == path) {
+        if field.kind == registry::FieldKind::Json {
+            return;
+        }
+        if field.kind == registry::FieldKind::StrArray {
+            if let Some(template) = field.item_template {
+                if let serde_json::Value::Array(arr) = value {
+                    for (i, item) in arr.iter().enumerate() {
+                        if let serde_json::Value::Object(map) = item {
+                            for key in map.keys() {
+                                if key != template {
+                                    unknown.push(format!("{path}[{i}].{key}"));
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if !is_known_body_path(&child_path, concrete, free) {
+                    unknown.push(child_path);
+                    continue;
+                }
+                collect_unknown_body_paths(child, &child_path, fields, concrete, free, unknown);
+            }
+        }
+        serde_json::Value::Array(arr) if is_known_body_path(path, concrete, free) => {
+            // Elements match index-free: allowlist paths are dotted (`enrichments.title`), so
+            // descending with the parent path keeps both sides of the contract aligned.
+            for item in arr {
+                collect_unknown_body_paths(item, path, fields, concrete, free, unknown);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_free_body_path(path: &str, free: &[&str]) -> bool {
+    free.iter()
+        .any(|p| *p == path || path.starts_with(&format!("{p}.")))
+}
+
+fn is_known_body_path(path: &str, concrete: &[&str], free: &[&str]) -> bool {
+    concrete
+        .iter()
+        .any(|p| *p == path || p.starts_with(&format!("{path}.")))
+        || is_free_body_path(path, free)
 }
 
 fn content_option_shape_issue(
@@ -7304,6 +7468,55 @@ fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
     }
 }
 
+fn dispatch_preset(sub: &PresetCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        PresetCmd::List => {
+            let presets = presets::load_presets()?;
+            emit_stdout(
+                &serde_json::json!({
+                    "schema": "exa.cli.presets.v1",
+                    "ok": true,
+                    "userPath": presets::user_presets_path().display().to_string(),
+                    "localPath": presets::local_presets_path().display().to_string(),
+                    "presets": presets.keys().collect::<Vec<_>>(),
+                }),
+                pretty,
+            );
+        }
+        PresetCmd::Show { name } => emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.preset.v1",
+                "ok": true,
+                "preset": presets::find_preset(name)?,
+            }),
+            pretty,
+        ),
+    }
+    Ok(0)
+}
+
+fn dispatch_macro(sub: &MacroCmd, pretty: bool) -> Result<i32, CliError> {
+    match sub {
+        MacroCmd::List => emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.macros.v1",
+                "ok": true,
+                "macros": presets::MACROS.iter().map(|item| item.name).collect::<Vec<_>>(),
+            }),
+            pretty,
+        ),
+        MacroCmd::Show { name } => emit_stdout(
+            &serde_json::json!({
+                "schema": "exa.cli.macro.v1",
+                "ok": true,
+                "macro": presets::get_macro(name)?,
+            }),
+            pretty,
+        ),
+    }
+    Ok(0)
+}
+
 fn dispatch_config_profiles(sub: &ConfigProfilesCmd, pretty: bool) -> Result<i32, CliError> {
     match sub {
         ConfigProfilesCmd::List => {
@@ -7515,13 +7728,19 @@ fn redacted_preview_expanded(
     if !headers.is_empty() {
         request["headers"] = serde_json::Value::Array(headers);
     }
-    let data = data_with_expands_to(
+    let mut data = data_with_expands_to(
         serde_json::json!({
             "request": request,
             "dryRun": true,
         }),
         preview.expands_to,
     );
+    if let Some(preset) = preview
+        .globals
+        .and_then(|globals| globals.preset.as_deref())
+    {
+        data["preset"] = serde_json::Value::String(preset.to_string());
+    }
     let count = transport::primary_count(data.get("request").unwrap_or(&data));
     let hash = transport::data_hash(&data);
     response_envelope(ResponseEnvelopeArgs {
@@ -7977,6 +8196,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     static GENERIC_RANGE_FIELDS: &[FieldDef] = &[FieldDef {
@@ -8014,6 +8235,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     struct PendingPathGuard;

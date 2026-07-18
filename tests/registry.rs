@@ -72,6 +72,18 @@ fn capabilities_covers_every_operation() {
     assert_eq!(caps["errorCodes"]["idempotency_conflict"]["exit"], 8);
     assert!(caps["errorCodes"].get("partial_success").is_none());
     assert_eq!(caps["doctor"]["exitCodes"]["1"], "findings");
+    assert!(caps["doctor"]["detectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "config.format"));
+    assert_eq!(caps["doctor"]["fixers"][2]["requiredFlag"], "--allow-auth");
+    assert_eq!(caps["presets"]["localOverridesUser"], true);
+    assert!(caps["macros"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command == "macro show"));
 }
 
 /// Admin operations live in the service namespace and nowhere else (D4).

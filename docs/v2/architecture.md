@@ -332,13 +332,19 @@ base_url    = "https://api.exa.ai"
 api_key_env = "EXA_API_KEY_WORK"   # name of an env var, not a key
 ```
 
-The full preset/macro registry (`preset show`, presets-in-TOML) is deferred (D12); v1 ships only the two thin macros `ask` and `fetch`, which expand to canonical commands and return `expands_to` in their JSON so an agent learns the underlying command.
+Post-v1, the D12 registry loads user presets from `~/.config/exa-agent/presets.toml` and overlays
+`.exa-agent/presets.toml` from the Git root. `preset list|show` exposes the resolved definitions;
+`search --preset` merges a preset body before explicit flags, `--body`, and `--set`.
+`macro list|show` exposes the two transparent built-ins, `ask` and `fetch`.
 
 ---
 
 ## 9. Doctor (D8)
 
-Read-only, offline by default; network checks behind `--online`. **No `--fix`, no `undo`, no backups, no `mutate()` chokepoint** — this is a near-stateless API client whose broken states are diagnose-and-suggest, not mutate-and-undo. Each detector returns a `Finding` whose `suggestedCommand` mirrors the error envelope's, so the fix for a diagnosis is always one copy-pasteable line.
+Offline by default; network checks remain behind `--online`. Detectors stay read-only. Post-v1,
+`--fix` routes config formatting and permission changes through one backup-before-write path, while
+`--undo` restores the latest timestamped config backup. Credential permission changes require
+`--allow-auth`; stale spill deletion requires `--allow-delete`.
 
 ```rust
 trait Detector { fn check(&self, ctx: &DoctorCtx) -> Finding; }   // never mutates anything
@@ -350,6 +356,10 @@ Detector list (all read-only):
 | id | checks | example suggestedCommand |
 |---|---|---|
 | `config.parse` | config TOML parses; profile exists | `exa-agent config path` |
+| `config.format` | config TOML has canonical formatting | `exa-agent doctor --fix` |
+| `permissions.config` | config mode is `0600` on Unix | `exa-agent doctor --fix` |
+| `permissions.credentials` | credentials mode is `0600` on Unix | `exa-agent doctor --fix --allow-auth` |
+| `state.stale-cache` | spill files older than seven days | `exa-agent doctor --fix --allow-delete` |
 | `key.present` | api key resolvable via precedence (presence, not validity) | `export EXA_API_KEY=…` |
 | `service-key.scope` | service key, if configured, isn't an api key (shape) | `export EXA_SERVICE_KEY=…` (must be a service key, not an `EXA_API_KEY`) |
 | `base-url` | base-url is a well-formed absolute https URL | `exa-agent config set base_url …` |
@@ -359,7 +369,7 @@ Detector list (all read-only):
 | `auth.online` | *(`--online` only)* a billing-free auth probe succeeds — `POST /search` with an empty body (auth is validated before the body, so a good key returns 400 `INVALID_REQUEST_BODY` and a bad one 401/403; 5xx/429 → inconclusive/warn). Not a GET to `/v0/teams/me`, which upstream does not serve (see D22). | `exa-agent auth test` |
 | `connectivity` | *(`--online` only)* base-url reachable, TLS valid | `exa-agent doctor --online` |
 
-`doctor --json` emits an `exa.cli.doctor.v1` report (contracts §15): the findings array in stable order, each finding keeping its own `category` for granularity. The **exit code is doctor-local, not the §6 categories** — `0` healthy (no `Fail`), `1` findings present, `4` refused-unsafe (a detector that couldn't safely complete) — so a `doctor` exit can never be mistaken for a real `auth`(2)/`config`(3)/`network`(4) failure from another command (the SKILL's documented doctor exception). The detector ids and this exit dictionary are published in `capabilities.doctor` (contracts §13), so an agent can discover what `doctor` checks without running it. Every `Fail`/`Warn` finding MUST set `suggested_command` (the `service-key.scope` detector's fix is `export EXA_SERVICE_KEY=…` / the cross-use error pointer — no finding is left with a bare `—`). **Upgrade-path boundary (written down so it isn't over-built):** the *only* legitimate future `--fix` target is config-file rewrites — and adopting `--fix` means adopting the full chokepoint + backup + `undo` discipline at that point, not before.
+`doctor --json` emits an `exa.cli.doctor.v1` report (contracts §15): the findings array in stable order, each finding keeping its own `category` for granularity. The **exit code is doctor-local, not the §6 categories** — `0` healthy (no `Fail`), `1` findings present, `4` refused-unsafe (a detector or fixer that couldn't safely complete) — so a `doctor` exit can never be mistaken for a real `auth`(2)/`config`(3)/`network`(4) failure from another command. The detector ids, fixers, required safety flags, and exit dictionary are published in `capabilities.doctor` (contracts §13). `actions[]` records planned/fixed/skipped/refused/restored work; `backupPath` identifies the reversible config snapshot.
 
 ---
 

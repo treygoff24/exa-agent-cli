@@ -77,7 +77,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | Code | Name | Meaning |
 | ---: | --- | --- |
 | 0 | ok | success |
-| 1 | usage | bad invocation, parse error, or local validation failure |
+| 1 | usage | bad invocation, parse error, or local validation failure (missing required body field, unknown field, out-of-range value, malformed `--body`/`--set`) |
 | 2 | auth | missing, invalid, or wrong-scope credential |
 | 3 | config | malformed config or unknown profile |
 | 4 | network | connection/timeout failure reaching Exa |
@@ -91,6 +91,8 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 12 | interrupted | SIGINT / stream interrupted |
 
 `error.code` is the finer-grained signal — 27 codes map onto these 13 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+
+Dispatch-level body validation runs before credential resolution and network I/O. Body-level mistakes (unknown fields, out-of-range values, missing required fields, or a malformed `--body`/`--set`) exit `1` as a local `usage` error rather than being sent upstream and returning `5`. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
 
 ## Safety model
 
@@ -109,6 +111,14 @@ exa-agent robot-docs guide        # short paste-ready playbook for agents
 exa-agent schema --help           # embedded API/CLI schema
 exa-agent doctor                  # read-only health checks (add --online for a live probe)
 ```
+
+`doctor --fix` is an explicit, opt-in mutation: it repairs only canonical TOML formatting and
+config-file permission bits (0600) after creating one wall-clock-timestamped config backup plus a
+`*-latest` marker. `--fix --allow-auth` may also secure the credential-file permissions;
+`--fix --allow-delete` may delete spill files older than seven days. `--undo` restores only the
+latest marker backup (single-slot, pre-last-fix state only) and is config-only: it does not reverse
+credential-file permission changes or spill deletions. `--fix --dry-run` plans the same actions and
+exits `0` when only planned actions remain.
 
 If anything in this file disagrees with `capabilities` output, trust `capabilities`.
 

@@ -3,6 +3,10 @@
 Date: 2026-06-29 (design); shipped as 0.1.0 on 2026-07-06.
 Status: this is the canonical design record for the Rust rebuild of the Exa agent CLI, written before implementation and kept as-is for traceability. It supersedes the v1 docs in `docs/`. The implementation described here shipped in the [0.1.0 release](../../CHANGELOG.md); where this document and the shipped binary might drift, prefer `exa-agent capabilities --json`, which is generated from the code.
 
+Post-v1 note (2026-07-17): the deferred D8 doctor repair/undo path and D12 preset/macro
+registry are now activated. Their owner-approved contracts are recorded directly under D8 and D12
+in `decisions.md` and in the corresponding command, architecture, and contract sections.
+
 ## What changed from v1
 
 v1 was a language-agnostic research/design pass. v2 commits to **Rust, a single static binary**, and bakes in the review feedback: consolidated output flags, auto-JSON-when-piped default, a no-auto-retry-on-create rule, a context-window-aware `--output`, a deliberately *lean* (read-only) doctor, a gated admin namespace, and a trimmed v1 surface (the preset/profile system is deferred).
@@ -27,11 +31,11 @@ v1 was a language-agnostic research/design pass. v2 commits to **Rust, a single 
 | D5 / D19 | Stateless client, **no cache** (writes config/keyring/pending-run/trace/spill, none a cache) |
 | D6 | Output flags consolidated: `--format` + `--json`/`--ndjson` aliases + single `--raw` + `--pretty`/`--compact` |
 | D7 | **Never auto-retry a create-POST** without `--idempotency-key`; ambiguous create → pending-run record + recovery command |
-| D8 | **Lean doctor**: read-only diagnostics, no `--fix`/undo/backup machinery in v1 |
+| D8 | **Lean v1 doctor**, with post-v1 `--fix`/latest-backup `--undo` activation and explicit auth/delete gates |
 | D9 / D17 / D21 / D22 | Registry generated at build time from the committed **normalized-JSON** specs (`exa-spec.json` Public API 2.0.0 + Team-Management) + `overlay.toml`, which may also fully define docs-only ops (`/context`); generated into `OUT_DIR`, not committed; no YAML parser in the binary |
 | D10 | `-o/--output FILE` + threshold-gated auto-spill to protect the agent's context window |
 | D11 / D15 | Env-first auth, optional keyring (feature-gated off for musl artifacts), scopes `exa-agent:api:<profile>` / `exa-agent:service:<profile>` |
-| D12 | v1 trims the preset/profile system; keeps `ask`/`fetch` macros + `--profile` + minimal config |
+| D12 | v1 trimmed presets; post-v1 activates user + repo-local preset files and inspectable `ask`/`fetch` macros |
 | D13 | `clap` v4 derive; its suggestion engine satisfies the intent-inference axiom |
 | D16 | OpenAI-compat deferred post-v1; `raw` covers it in v1 |
 | D18 | `--header` cannot override managed auth headers (refused) |

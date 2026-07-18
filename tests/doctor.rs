@@ -15,6 +15,8 @@ fn online_ctx(name: &str, probes: OnlineProbes) -> DoctorCtx {
     DoctorCtx {
         config_path: path.clone(),
         config_load: Config::load_from_path(&path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: Some("exa-test".to_string()),
         service_key: None,
         stdout_is_tty: false,
@@ -46,9 +48,16 @@ fn temp_config_path(name: &str) -> PathBuf {
 fn doctor_healthy_when_config_and_key_ok() {
     let path = temp_config_path("healthy");
     fs::write(&path, "base_url = \"https://api.exa.ai\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: Config::load_from_path(&path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: Some("exa-test-key".to_string()),
         service_key: None,
         stdout_is_tty: false,
@@ -69,6 +78,8 @@ fn doctor_findings_when_config_malformed() {
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: load,
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: None,
         service_key: None,
         stdout_is_tty: false,
@@ -95,6 +106,8 @@ fn doctor_config_parse_message_preserves_exa_agent_cli_path() {
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: load,
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: None,
         service_key: None,
         stdout_is_tty: false,
@@ -132,6 +145,8 @@ fn doctor_service_key_scope_finding() {
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: Config::load_from_path(&path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: None,
         service_key: Some("exa-not-a-service-key".to_string()),
         stdout_is_tty: false,
@@ -150,6 +165,8 @@ fn doctor_warn_findings_make_report_non_healthy() {
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: Config::load_from_path(&path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: None,
         service_key: None,
         stdout_is_tty: false,
@@ -160,6 +177,7 @@ fn doctor_warn_findings_make_report_non_healthy() {
         &DoctorOptions {
             online: false,
             checks: vec!["key.present".to_string()],
+            ..DoctorOptions::default()
         },
         &ctx,
     );
@@ -182,6 +200,8 @@ fn doctor_report_serializes_contract_fields() {
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: Config::load_from_path(&path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: Some("exa-test".to_string()),
         service_key: None,
         stdout_is_tty: false,
@@ -207,6 +227,7 @@ fn doctor_online_reports_reachable_host_and_accepted_credential() {
         &DoctorOptions {
             online: true,
             checks: vec![],
+            ..DoctorOptions::default()
         },
         &ctx,
     );
@@ -227,6 +248,7 @@ fn doctor_online_flags_unreachable_host_and_rejected_credential() {
         &DoctorOptions {
             online: true,
             checks: vec![],
+            ..DoctorOptions::default()
         },
         &ctx,
     );
@@ -248,6 +270,7 @@ fn doctor_online_auth_skips_when_no_credential_resolves() {
         &DoctorOptions {
             online: true,
             checks: vec![],
+            ..DoctorOptions::default()
         },
         &ctx,
     );
@@ -261,6 +284,8 @@ fn doctor_skips_online_detectors_by_default() {
     let ctx = DoctorCtx {
         config_path: path.clone(),
         config_load: Config::load_from_path(&path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
         api_key: Some("exa-test".to_string()),
         service_key: None,
         stdout_is_tty: false,

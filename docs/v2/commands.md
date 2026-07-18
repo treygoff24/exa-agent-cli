@@ -618,7 +618,12 @@ Thin, transparent expansions (D12). Inspect with `--dry-run --print-request`. No
 | `ask QUESTION` | `answer QUESTION` | One-shot cited Q&A. `/answer`'s `text` field is boolean-only (no character cap), so the macro leaves it unset; plain answer output is already small. |
 | `fetch URL...` | `contents URL... --text --summary-query "Summarize the page"` | Pull + summarize known pages. |
 
-**Deferred post-v1 (D12):** the configurable preset/macro registry — `preset show`, presets-in-TOML (`[presets.X]`), `macro show`, and the additional macros lane-e sketched (`cite`, `investigate`, `watch`). v1 ships only `ask` and `fetch` plus `--profile` and a minimal config (base-url, default format, timeout, retry). The OpenAI-compat surfaces (`chat-completions`, `responses`) are also deferred (D16); v1 covers them via `raw` (e.g. `exa-agent raw POST /chat/completions --body @req.json`).
+**Post-v1 registry (D12 activation):** `preset list|show` merges user
+`~/.config/exa-agent/presets.toml` with repo-local `.exa-agent/presets.toml` (local wins), and
+`search --preset NAME` applies its `body` as defaults before explicit flags, `--body`, and `--set`.
+`macro list|show` exposes the transparent built-in `ask` and `fetch` expansions. The additional
+`cite`, `investigate`, and `watch` sketches remain deferred. OpenAI-compat surfaces remain raw-only
+(D16).
 
 ---
 

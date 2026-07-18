@@ -555,6 +555,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     #[test]
@@ -608,6 +610,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     #[test]
@@ -681,6 +685,8 @@ mod tests {
         body_builder: None,
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     static PLAIN_ARRAY_OP: OperationDef = OperationDef {
@@ -783,6 +789,8 @@ mod tests {
         body_builder: Some(BuilderId::Sentinel),
         validators: &[],
         mixed_status_exit: false,
+        schema_fields: &[],
+        schema_free_paths: &[],
     };
 
     #[test]

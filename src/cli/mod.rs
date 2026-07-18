@@ -234,6 +234,9 @@ pub struct GlobalArgs {
     /// Merge a JSON object body from inline JSON, `@file`, or `-`.
     #[arg(long, global = true)]
     pub body: Option<String>,
+    /// Apply named request defaults. Explicit flags, --body, and --set win.
+    #[arg(long, global = true)]
+    pub preset: Option<String>,
     /// Reduce diagnostics.
     #[arg(long, global = true)]
     pub quiet: bool,
@@ -317,6 +320,7 @@ impl std::fmt::Debug for GlobalArgs {
                     .collect::<Vec<_>>(),
             )
             .field("body", &self.body.as_ref().map(|_| "<redacted>"))
+            .field("preset", &self.preset)
             .field("quiet", &self.quiet)
             .field("verbose", &self.verbose)
             .field("trace", &self.trace)
@@ -408,6 +412,16 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         sub: ConfigCmd,
+    },
+    /// Inspect named request presets.
+    Preset {
+        #[command(subcommand)]
+        sub: PresetCmd,
+    },
+    /// Inspect built-in macro expansions.
+    Macro {
+        #[command(subcommand)]
+        sub: MacroCmd,
     },
     /// Macro → `answer QUESTION`.
     Ask(AskArgs),
@@ -1369,6 +1383,34 @@ pub struct DoctorArgs {
     pub online: bool,
     #[arg(long)]
     pub check: Vec<String>,
+    /// Repair safe findings after creating a config backup.
+    #[arg(long, conflicts_with = "undo")]
+    pub fix: bool,
+    /// Restore the config from the latest doctor backup.
+    #[arg(long, conflicts_with_all = ["fix", "online", "check"])]
+    pub undo: bool,
+    /// Permit fixes that modify credential-file permission bits.
+    #[arg(long, requires = "fix")]
+    pub allow_auth: bool,
+    /// Permit fixes that delete stale spill files.
+    #[arg(long, requires = "fix")]
+    pub allow_delete: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PresetCmd {
+    /// List merged preset names (repo-local definitions override user definitions).
+    List,
+    /// Show one resolved preset and its source file.
+    Show { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MacroCmd {
+    /// List built-in macro names.
+    List,
+    /// Show one transparent macro expansion.
+    Show { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1522,6 +1564,14 @@ pub fn command_path(command: &Command) -> String {
             AuthCmd::Logout => "auth logout".to_string(),
         },
         Command::Config { sub } => config_command_path(sub),
+        Command::Preset { sub } => match sub {
+            PresetCmd::List => "preset list".to_string(),
+            PresetCmd::Show { .. } => "preset show".to_string(),
+        },
+        Command::Macro { sub } => match sub {
+            MacroCmd::List => "macro list".to_string(),
+            MacroCmd::Show { .. } => "macro show".to_string(),
+        },
         Command::Ask(_) => "ask".to_string(),
         Command::Fetch(_) => "fetch".to_string(),
         Command::Raw(_) => "raw".to_string(),

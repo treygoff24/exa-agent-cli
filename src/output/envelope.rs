@@ -147,17 +147,24 @@ pub fn capabilities() -> serde_json::Value {
                 "1": "findings",
                 "4": "refused-unsafe",
             },
-            "detectors": [
-                "config.parse",
-                "key.present",
-                "service-key.scope",
-                "base-url",
-                "spec.hash",
-                "binary.version",
-                "tty.discipline",
-                "auth.online",
-                "connectivity",
+            "detectors": crate::doctor::DETECTOR_IDS,
+            "fixers": [
+                { "id": "config.format", "requiredFlag": null },
+                { "id": "permissions.config", "requiredFlag": null },
+                { "id": "permissions.credentials", "requiredFlag": "--allow-auth" },
+                { "id": "state.stale-cache", "requiredFlag": "--allow-delete" },
             ],
+            "backup": "one wall-clock-timestamped config backup per fix run; older backups are removed",
+            "undo": "doctor --undo restores the latest config backup (single-slot, pre-last-fix state only)",
+        },
+        "presets": {
+            "userPath": "~/.config/exa-agent/presets.toml",
+            "localPath": ".exa-agent/presets.toml",
+            "localOverridesUser": true,
+            "commands": ["preset list", "preset show", "search --preset"],
+        },
+        "macros": {
+            "commands": ["macro list", "macro show", "ask", "fetch"],
         },
     })
 }

@@ -71,11 +71,11 @@ This is the ADR-style record of the decisions that gate everything else. Each en
 
 ## D8 — Doctor: read-only diagnostics in v1 (right-sized)
 
-**Call.** `exa-agent doctor` is read-only and offline by default; network checks behind `--online`. Every finding names its exact fix command (mirroring the error envelope's `suggestedCommand`). **No `--fix`/`undo`/backup machinery in v1.**
+**Call.** `exa-agent doctor` is read-only and offline by default; network checks behind `--online`. `--fix` is an explicit, opt-in mutation that repairs only **config-file canonical TOML formatting** and **config-file permission bits** (0600). It does **not** touch credential-file permissions or spill files unless the caller also passes `--allow-auth` or `--allow-delete`. Before any config rewrite, `--fix` writes one wall-clock-timestamped, byte-preserving config backup and a `*-latest` marker; `--undo` restores only the latest marker backup (single-slot, pre-last-fix state only). `--fix --dry-run` plans the same actions and exits `0` when every planned finding would be fixed (no skipped or refused actions).
 
-**Why.** The `cli-doctor-mode` skill's heavy machinery (`mutate()` chokepoint, backups, `actions.jsonl`, `undo`) is for tools with mutable local state — databases, installers. This is a near-stateless API client; its broken states (missing/bad key, dead base-url, malformed config, stale embedded spec, TTY/color misconfig) are diagnose-and-suggest, not mutate-and-undo. We deliberately use the *lean* doctor, not the premium `world-class-doctor-mode-for-cli-tools` v7.
+**Why.** A CLI that agents drive must be able to repair its own local configuration without guessing. Config formatting and permission drift are the only config-side failures that are safe to auto-fix; credential and local-cache cleanup require explicit flags because they touch secrets or delete user data. The backup is intentionally single-slot so the repair surface stays small: `undo` rolls back the most recent `--fix`, not an arbitrary history stack.
 
-**Upgrade path.** If `doctor --fix` is ever added, the only legitimate targets are config-file rewrites — and *only then* do we adopt the full chokepoint + backup + `undo` discipline. That boundary is written down so it is not over-built early.
+**Upgrade path.** The upgrade path is now active. Bare `doctor` remains read-only and offline. `--fix` mutates only the config file itself; auth/cache mutations require `--allow-auth`/`--allow-delete`. `--undo` restores the latest config backup and is config-only (it does not reverse credential-file permission changes or spill deletions). `--fix --dry-run` with only planned actions exits `0`.
 
 ## D9 — Operation registry generated from OpenAPI at build time
 
@@ -100,6 +100,12 @@ This is the ADR-style record of the decisions that gate everything else. Each en
 **Call.** v1 ships: `EXA_API_KEY` env-first auth, a minimal config file (base-url, default format, timeout, retry), `--profile` selecting a `[profiles.X]` block, and two thin macros (`ask`, `fetch`). The full configurable **preset/macro registry** (`preset show`, presets-in-TOML, `macro show`) is deferred to a later phase.
 
 **Why.** The contracts (envelope, exit codes, capabilities, raw) earn their rigor — that's load-bearing. The preset/profile *system* is surface we don't need to ship to be useful. Macros stay because they're cheap expansions that serve first-try inevitability; the configurable engine behind them can wait.
+
+**Post-v1 activation (2026-07-17).** Presets now load from
+`~/.config/exa-agent/presets.toml`, with `.exa-agent/presets.toml` at the Git root overriding names
+from the user file. `preset list|show` exposes the merged registry; `search --preset NAME` applies
+the preset body before explicit flags, `--body`, and `--set`. `macro list|show` exposes the
+transparent built-in `ask` and `fetch` expansions.
 
 ## D13 — Parser: `clap` (derive), lean on its suggestion engine
 

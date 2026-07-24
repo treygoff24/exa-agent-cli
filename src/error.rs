@@ -251,6 +251,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
             ),
         ),
         (
+            "payment_required",
+            spec(
+                2,
+                "auth",
+                false,
+                "upstream returned an x402 or MPP payment challenge",
+            ),
+        ),
+        (
             "config_parse_error",
             spec(3, "config", false, "config TOML failed to parse"),
         ),
@@ -296,6 +305,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
                 "rate_limit",
                 true,
                 "Exa returned 429 or a budget was exhausted",
+            ),
+        ),
+        (
+            "credits_exhausted",
+            spec(
+                6,
+                "rate_limit",
+                false,
+                "authenticated Exa account has no remaining credits",
             ),
         ),
         (

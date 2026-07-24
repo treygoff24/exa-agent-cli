@@ -7,7 +7,7 @@ use exa_agent_cli::cli::Cli;
 use exa_agent_cli::error::{CliError, Diag};
 use exa_agent_cli::transport::{
     ensure_network_allowed, execute_raw_stream_with_request_id, send_with_retry, FakeTransport,
-    HttpRequest, RawExecuteParams, SendOptions, StreamItem, StreamOutcome, Transport,
+    HttpRequest, RawAuth, RawExecuteParams, SendOptions, StreamItem, StreamOutcome, Transport,
     UreqTransport,
 };
 use std::cell::Cell;
@@ -58,6 +58,7 @@ fn no_network_guard_stops_before_fake_and_live_transport_send_for_any_present_va
             retry: 0,
             retry_after: false,
             idempotency_key: None,
+            follow_redirects: true,
         };
         let result = send_with_retry(&fake, &request, &options).unwrap_err();
         assert_eq!(result.diag().code, "usage_error", "value {value:?}");
@@ -109,7 +110,7 @@ fn no_network_guard_stops_before_custom_stream_transport_override() {
         query_raw: &[],
         body: serde_json::json!({"query": "never sent"}),
         globals: &cli.globals,
-        credential: &credential,
+        auth: RawAuth::Api(&credential),
         request_id: "req_guard".to_string(),
     };
     let mut on_item = |_item: StreamItem<'_>| Ok(());

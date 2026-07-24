@@ -1,6 +1,6 @@
 # Exa API research synthesis
 
-Date: 2026-06-29
+Date: 2026-06-29; refreshed 2026-07-23
 
 ## Research method
 
@@ -9,7 +9,8 @@ I used current primary Exa sources and split research into five lanes: complete 
 Primary sources used:
 
 - Exa docs index: https://exa.ai/docs/llms.txt
-- Official public OpenAPI/spec docs: https://exa.ai/docs/exa-spec.yaml and https://exa.ai/docs/api-reference/openapi.json
+- Official public OpenAPI: https://exa.ai/docs/exa-spec.json
+- Official changelog: https://exa.ai/docs/changelog
 - Official OpenAPI repo snapshots: https://github.com/exa-labs/openapi-spec
 - Search guide: https://exa.ai/docs/reference/search-api-guide-for-coding-agents
 - Contents guide: https://exa.ai/docs/reference/contents-api-guide-for-coding-agents
@@ -23,7 +24,7 @@ Primary sources used:
 - Rate limits: https://exa.ai/docs/reference/rate-limits
 - Billing/pricing/security: https://exa.ai/docs/reference/billing, https://exa.ai/pricing, https://exa.ai/docs/reference/security
 - OpenAI compatibility: https://exa.ai/docs/reference/openai-sdk and https://exa.ai/docs/reference/openai-responses-api-with-exa
-- Exa MCP and x402: https://exa.ai/docs/reference/exa-mcp and https://exa.ai/docs/reference/x402-guide
+- Exa MCP, x402, and MPP: https://exa.ai/docs/reference/exa-mcp, https://exa.ai/docs/reference/x402-guide, and https://exa.ai/docs/reference/mpp-guide
 
 ## Full API surface for CLI coverage
 
@@ -42,7 +43,7 @@ Primary sources used:
 | Family | Endpoint(s) | CLI implication |
 |---|---|---|
 | Agent API | `POST/GET /agent/runs`, `GET/DELETE/POST cancel /agent/runs/{id}`, `GET /agent/runs/{id}/events` | Top-level `exa agent runs ...`; support create/run, poll, get, list, cancel, delete, events JSON pagination, and SSE replay. |
-| Research compatibility | `/research/v1` in current docs, `/research/v0/tasks` in the GitHub Search spec snapshot | Expose under `exa research` as compatibility, but prefer Agent/deep search for new workflows unless runtime validation proves otherwise. |
+| Research compatibility | Retired `/research/v1`, absent from the current live spec | Retain `exa research` as a deprecated compatibility overlay, but direct new work to `search --type deep-reasoning`. |
 | OpenAI compatibility | `/chat/completions`, `/responses` | Expose as compatibility/raw surfaces rather than default path. Current docs map chat completions to Answer and Responses to Agent. |
 
 ### Monitors
@@ -67,7 +68,7 @@ Websets are a full async product surface, not a minor search option. Coverage sh
 - Webhooks: create, list, get, update, delete, attempts list.
 - Events: list/get.
 - Team info: `/v0/teams/me`.
-- Exports: docs mention schedule/get export even though the downloaded Websets OpenAPI snapshot did not list the endpoints. Treat exports as docs-confirmed/spec-drift and runtime-validate before implementation.
+- Exports: no export/file endpoint is present in the current public spec or docs index, so the CLI does not invent one.
 
 Key Websets constraints/semantics from docs:
 
@@ -105,7 +106,7 @@ Recommended retrieval controls:
 
 - Domain filters: `includeDomains`, `excludeDomains`; docs mention domain/path and wildcard support.
 - Date filters: published and crawl dates.
-- Category filters: `company`, `people`, `research paper`, `news`, `personal site`, `financial report`.
+- Category filters: `company`, `people`, `publication`, `news`, `personal site`, `financial report`.
 - Text filters: `includeText` and `excludeText`; docs warn only one phrase is currently supported.
 - Location and moderation: `userLocation`, `moderation`.
 - Compliance: enterprise `compliance: "hipaa"` where supported.
@@ -148,7 +149,7 @@ Documented default limits:
 - `/search`: 10 QPS.
 - `/contents`: 100 QPS.
 - `/answer`: 10 QPS.
-- Legacy `/research/v1`: 15 concurrent tasks.
+- Retired `/research/v1`: historical docs stated 15 concurrent tasks; compatibility commands may now fail upstream.
 - Agent concurrency: one fifth of account QPS; docs say default pay-as-you-go implies two active Agent runs.
 
 Error handling:
@@ -167,12 +168,11 @@ Pricing/cost:
 
 Known drift or uncertainty:
 
-1. Exa has multiple spec surfaces: docs OpenAPI JSON/YAML, GitHub `exa-openapi-spec.yaml`, GitHub `exa-websets-spec.yaml`, and docs-only pages. They do not perfectly match.
-2. Websets exports are in docs/index and coding-agent guide but not in the downloaded Websets spec snapshot.
-3. Research appears as `/research/v1` in current docs and `/research/v0/tasks` in the GitHub Search spec snapshot.
-4. OpenAI `/responses` model naming should be live-tested; some snippets mention different names.
-5. Team Management `rateLimit` wording should be runtime-verified if possible, though the spec says requests per second.
-6. It is not documented whether Exa returns `Retry-After` on 429.
-7. It is not documented whether create API key returns a raw secret once; docs examples show metadata only.
+1. The live consolidated spec and older modular GitHub snapshots do not perfectly match; the live spec is authoritative for vendoring.
+2. Retired `/research/v1` is absent from the live spec and retained only as a deprecated CLI compatibility overlay.
+3. OpenAI `/responses` model naming should be live-tested; some snippets mention different names.
+4. Team Management `rateLimit` wording should be runtime-verified if possible, though the spec says requests per second.
+5. It is not documented whether Exa returns `Retry-After` on 429.
+6. It is not documented whether create API key returns a raw secret once; docs examples show metadata only.
 
 Implementation should therefore embed a spec snapshot but include `schema refresh --check`, `raw`, `--body`, and `--set` escape hatches.

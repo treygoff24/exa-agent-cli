@@ -79,6 +79,13 @@ exa-agent monitor create --query "AI policy news" --webhook-url https://example.
 
 # Call any Exa endpoint directly, with the same auth/output/error contracts
 exa-agent raw POST /search --body '{"query":"test"}'
+
+# Raw-only x402 / MPP payment pass-through; payment credentials are stdin-only
+exa-agent --payment-discovery raw POST /search --body @request.json
+printf '%s' "$PAYMENT_SIGNATURE" | exa-agent --x402-payment-stdin raw POST /search --body @request.json
+printf '%s' "$MPP_AUTHORIZATION" | exa-agent --mpp-payment-stdin raw POST /contents --body @request.json
+# MPP_AUTHORIZATION is the complete `Payment ...` Authorization header value.
+# Discovery is for one unpaid challenge request; do not poll with it.
 ```
 
 Before running any mutation for real, preview the exact upstream request it will send — without sending it — by appending `--dry-run --print-request`:
@@ -112,7 +119,7 @@ commands still work.
 
 - **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream).
 - **Agent runs** — `agent runs create|get|list|events|cancel|delete`; `create` streams.
-- **Research** — `research create|get|list` (the `/research/v1` API).
+- **Research** — `research create|get|list` is a deprecated compatibility overlay for retired `/research/v1`; migrate new work to `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
 - **Websets** — the full tree: websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
@@ -131,6 +138,7 @@ The contract is what makes this usable from code. Highlights:
 - **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it.
 - **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).
 - **No surprise double-billing.** `--idempotency-key` is forwarded upstream, and the CLI never auto-retries a non-idempotent create-POST.
+- **Payment headers stay off argv.** x402/MPP values are accepted only through `raw` stdin modes, only for nonstreaming default-host `POST /search` or `POST /contents`; generic request headers in the `payment-*` and `x-payment*` namespaces are refused/redacted. `--payment-discovery` is unauthenticated and intended for one 402 challenge, not polling.
 
 ## Authentication
 

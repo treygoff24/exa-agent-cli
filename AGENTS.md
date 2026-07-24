@@ -51,6 +51,11 @@ exa-agent context "how to stream SSE in Rust with ureq"
 exa-agent websets create --query "AI startups in SF" --count 25
 exa-agent monitor create --query "AI policy news" --webhook-url https://example.com/hook
 exa-agent raw POST /search --body '{"query":"test"}'
+exa-agent --payment-discovery raw POST /search --body @request.json
+printf '%s' "$PAYMENT_SIGNATURE" | exa-agent --x402-payment-stdin raw POST /search --body @request.json
+printf '%s' "$MPP_AUTHORIZATION" | exa-agent --mpp-payment-stdin raw POST /contents --body @request.json
+# MPP_AUTHORIZATION is the complete `Payment ...` Authorization header value.
+# Discovery is for one unpaid challenge request; do not poll with it.
 ```
 
 Before running any mutation for real, preview the exact upstream request it would send — without sending it:
@@ -90,7 +95,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 11 | no_input | required stdin/@file input absent, or a TTY would block |
 | 12 | interrupted | SIGINT / stream interrupted |
 
-`error.code` is the finer-grained signal — 27 codes map onto these 13 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+`error.code` is the finer-grained signal and maps onto these 13 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
 
 ## Safety model
 
@@ -98,6 +103,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 - Create-POSTs never auto-retry without `--idempotency-key` — retrying a create on a post-send timeout can double-bill. An ambiguous create failure writes a local pending-run record and the error names the exact recovery command.
 - `--dry-run --print-request` works on every mutation: it builds and prints the exact request body without sending it.
 - `--header` cannot override managed auth headers (`Authorization` or other secret headers) — refused at exit `1`.
+- x402/MPP payment values are raw-only, stdin-only, default-host only, nonstreaming, and limited to exact `POST /search` or `POST /contents`; generic request headers in the `payment-*` and `x-payment*` namespaces are refused/redacted. `--payment-discovery` sends one unauthenticated unpaid challenge request and is not for polling.
 
 ## Machine self-description
 

@@ -265,7 +265,7 @@ fn search_rejects_filter_with_typed_filter_suggestion() {
 }
 
 #[test]
-fn search_filter_category_typo_suggests_canonical_category() {
+fn search_filter_custom_category_suggests_category_flag() {
     let json = error_json(&[
         "search",
         "rust async",
@@ -277,8 +277,7 @@ fn search_filter_category_typo_suggests_canonical_category() {
     assert_eq!(json["error"]["code"], "invalid_flag_combination");
     let suggestion = json["error"]["suggestedCommand"].as_str().unwrap();
     assert!(suggestion.contains("--category"));
-    assert!(suggestion.contains("people"));
-    assert!(!suggestion.contains("person"));
+    assert!(suggestion.contains("person"));
 }
 
 #[test]
@@ -384,25 +383,25 @@ fn search_filter_suggests_end_published_date_flag() {
 }
 
 #[test]
-fn search_rejects_bad_category_with_did_you_mean() {
+fn search_rejects_retired_research_paper_category_with_did_you_mean() {
     let json = error_json(&[
         "search",
         "rust async",
         "--category",
-        "companys",
+        "research-paper",
         "--dry-run",
         "--compact",
     ]);
     assert_eq!(json["error"]["code"], "invalid_value");
-    assert_eq!(json["error"]["details"]["didYouMean"], "company");
+    assert_eq!(json["error"]["details"]["didYouMean"], "publication");
     let suggestion = json["error"]["suggestedCommand"].as_str().unwrap();
     assert!(suggestion.contains("--category"));
-    assert!(suggestion.contains("company"));
+    assert!(suggestion.contains("publication"));
 }
 
 #[test]
-fn search_rejects_singular_person_category_with_people_hint() {
-    let json = error_json(&[
+fn search_accepts_singular_person_as_custom_category_hint() {
+    let json = ok_json(&[
         "search",
         "rust async",
         "--category",
@@ -410,33 +409,12 @@ fn search_rejects_singular_person_category_with_people_hint() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(json["error"]["code"], "invalid_value");
-    assert_eq!(json["error"]["details"]["didYouMean"], "people");
-    let suggestion = json["error"]["suggestedCommand"].as_str().unwrap();
-    assert!(suggestion.contains("--category"));
-    assert!(suggestion.contains("people"));
+    assert_eq!(json["data"]["request"]["body"]["category"], "person");
 }
 
 #[test]
-fn search_rejects_peoples_category_with_people_hint() {
-    let json = error_json(&[
-        "search",
-        "rust async",
-        "--category",
-        "peoples",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(json["error"]["code"], "invalid_value");
-    assert_eq!(json["error"]["details"]["didYouMean"], "people");
-    let suggestion = json["error"]["suggestedCommand"].as_str().unwrap();
-    assert!(suggestion.contains("--category"));
-    assert!(suggestion.contains("people"));
-}
-
-#[test]
-fn search_rejects_unknown_category_without_misleading_default() {
-    let json = error_json(&[
+fn search_accepts_unknown_category_without_misleading_default() {
+    let json = ok_json(&[
         "search",
         "rust async",
         "--category",
@@ -444,12 +422,7 @@ fn search_rejects_unknown_category_without_misleading_default() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(json["error"]["code"], "invalid_value");
-    assert!(json["error"]["details"].get("didYouMean").is_none());
-    assert_eq!(
-        json["error"]["suggestedCommand"],
-        "exa-agent schema show search --compact"
-    );
+    assert_eq!(json["data"]["request"]["body"]["category"], "pdf");
 }
 
 #[test]
@@ -502,8 +475,8 @@ fn search_rejects_people_published_date_combo() {
 }
 
 #[test]
-fn search_rejects_people_include_domain_unless_linkedin() {
-    let json = error_json(&[
+fn search_accepts_people_include_domain_without_linkedin_restriction() {
+    let ok = ok_json(&[
         "search",
         "rust async",
         "--category",
@@ -513,25 +486,9 @@ fn search_rejects_people_include_domain_unless_linkedin() {
         "--dry-run",
         "--compact",
     ]);
-    assert_eq!(json["error"]["code"], "invalid_flag_combination");
-    assert_eq!(json["error"]["details"]["invalidDomain"], "example.com");
-
-    let ok = ok_json(&[
-        "search",
-        "rust async",
-        "--category",
-        "people",
-        "--include-domain",
-        "www.linkedin.com",
-        "--dry-run",
-        "--compact",
-    ]);
     let body = &ok["data"]["request"]["body"];
     assert_eq!(body["category"], "people");
-    assert_eq!(
-        body["includeDomains"],
-        serde_json::json!(["www.linkedin.com"])
-    );
+    assert_eq!(body["includeDomains"], serde_json::json!(["example.com"]));
 }
 
 #[test]

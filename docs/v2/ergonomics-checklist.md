@@ -21,9 +21,9 @@ The release gate pins the predictable mistakes most likely to waste agent loops:
 - bare `search` requests query-aware `contents.highlights`; `search --text` maps to `contents.text.maxCharacters=1500`; `search --no-highlights` is metadata-only.
 - `search --limit N`, `search --count N`, and `search --all` fail with `invalid_flag_combination` and a paste-ready `--num-results` suggestion.
 - `search --filter category=news` fails with a typed `--category news` suggestion.
-- Category near-misses such as `companys` fail with `details.didYouMean`.
-- `company` and `people` category filters reject unsupported domain/date combinations.
-- `people` include-domain filters accept only LinkedIn domains.
+- Retired category hints such as `research-paper` fail with `details.didYouMean=publication`; other non-empty custom hints pass through.
+- `company` and `people` category filters reject unsupported published-date, crawl-date, and exclude-domain combinations.
+- `people` include-domain filters pass through; there is no local LinkedIn-only restriction.
 - `contents --set contents.text=true` and equivalent nested `--body` shapes are rejected because `/contents` uses top-level `--text` / `--summary-query`.
 - `websets create --num-results N` is rejected in favor of `--count N`.
 

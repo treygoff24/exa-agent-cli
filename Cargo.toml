@@ -17,6 +17,7 @@ include = [
     "/openapi/exa-openapi.json",
     "/openapi/team-management.json",
     "/openapi/overlay.toml",
+    "/support/json_canonical.rs",
     "/README.md",
     "/LICENSE-*",
 ]

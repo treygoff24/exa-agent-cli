@@ -30,7 +30,7 @@ For a long autonomous `/goal` run, use [`autonomous-implementation-plan.md`](aut
 D1–D22 are locked. Phase 0 is not a coding task; it proves the inputs the build depends on are real before Phase 1 starts.
 
 **🚧 BLOCKER — vendor the canonical spec(s) before any Phase-1 golden is frozen.** The Phase-1 `capabilities --json`, success-envelope (`operation.source`/`sourceVersion`), and `embeddedSpecSha256` goldens are derived from the spec, so the wrong spec poisons them permanently. Per D22 (verified 2026-06-29):
-- Fetch the live consolidated **`https://exa.ai/docs/exa-spec.json`** (verified `info.title = "Exa Public API"`, `info.version = "2.0.0"`, containing `/search`, `/contents`, `/answer`, `/findSimilar`, `/agent/runs`(+sub), `/monitors`(+sub), `/research/v1`, `/v0/websets`+items/searches/enrichments/imports/events/webhooks/monitors, `/v0/teams/me`) → commit to `openapi/exa-openapi.json`.
+- Fetch the live consolidated **`https://exa.ai/docs/exa-spec.json`** (verified `info.title = "Exa Public API"`, `info.version = "2.0.0"`, containing `/search`, `/contents`, `/answer`, `/findSimilar`, `/agent/runs`(+sub), `/monitors`(+sub), `/v0/websets`+items/searches/enrichments/imports/events/webhooks/monitors, `/v0/teams/me`; retired `/research/v1` is absent from the current spec) → commit to `openapi/exa-openapi.json`.
 - Fetch the **Team-Management** spec (`admin-api.exa.ai`, the only source of `/api-keys`) → commit to `openapi/team-management.json`.
 - **Do not** vendor the stale partial specs already sitting in `work/research/` (Search 1.2.0, Websets 0, Team-Management 1.0.0) — they are the wrong title/version/path-set and would mis-key the goldens.
 - Record the docs-only surfaces that have no OpenAPI path and must be **overlay-defined** or raw-only: `/context` (overlay-defined typed command), `/chat/completions` + `/responses` (raw-only, D16).
@@ -40,7 +40,7 @@ D1–D22 are locked. Phase 0 is not a coding task; it proves the inputs the buil
 - Keyring vs musl-static: keyring is a default feature, **off** for musl release artifacts (env-first auth intact), on for macOS/Windows (D15).
 - OpenAI-compat: not a v1 typed namespace; `raw` covers it (D16).
 
-**Carry-over runtime validations (genuinely not blockers — `raw`/`--body`/`--set`/`schema refresh` cover them):** Websets export endpoints; Research `v1`/`v0` status; OpenAI `/responses` model names; whether 429 returns `Retry-After`; whether key-create returns a one-time secret; admin `rateLimit` semantics. Each is resolved in the phase that touches the surface, not up front.
+**Carry-over runtime validations (genuinely not blockers — `raw`/`--body`/`--set`/`schema refresh` cover them):** OpenAI `/responses` model names; whether 429 returns `Retry-After`; whether key-create returns a one-time secret; admin `rateLimit` semantics. Retired `/research/v1` is resolved as a deprecated compatibility overlay with migration guidance to `search --type deep-reasoning`.
 
 **Gate:** `openapi/exa-openapi.json` and `openapi/team-management.json` exist, parse, and report the verified title/version; `cargo xtask vendor-spec --check` is clean.
 
@@ -107,14 +107,14 @@ Typed commands over the Phase-1 spine: `search` (`/search`), `contents` (`/conte
 
 ## Phase 3 — Async APIs
 
-`agent runs create|list|get|events|cancel|delete` + the `agent run` macro; `research create|list|get` (compatibility). Where the **no-auto-retry-on-create rule (D7) is exercised for real**.
+`agent runs create|list|get|events|cancel|delete` + the `agent run` macro; `research create|list|get` as deprecated compatibility overlay for retired `/research/v1` (prefer `search --type deep-reasoning`). Where the **no-auto-retry-on-create rule (D7) is exercised for real**.
 
 **Deliverables**
 - Async lifecycle: create → poll/`get` → `events` (SSE) → structured output + grounding + cost; `cancel`/`delete` confirmation-gated (§9).
 - SSE normalization + raw SSE; **a short read timeout (≤250 ms) so a stalled stream still honors SIGINT** → exit **12** + `exa.cli.error.v1` carrying the last `eventId` within ~1s (arch §5); `--last-event-id` resumes.
 - **Pending-run records (D7/§7):** ambiguous create failure writes the append-only `exa.cli.pending_run.v1` JSONL record and sets `suggestedCommand` to the recovery. The only local persistence (D5 — JSONL append, not SQLite).
 - `agent runs list` is the first **cursor-paginated** command → the uniform pagination model (§10).
-- Resolves carry-over validations: Research `v1`/`v0` status; agent concurrency → rate_limit(6).
+- Resolves carry-over validations: retired `/research/v1` compatibility overlay and migration warning; agent concurrency → rate_limit(6).
 
 **Acceptance**
 - Agents can create, poll, stream/replay, and retrieve structured output/grounding/cost.
@@ -397,4 +397,4 @@ All seams from the drafting pass are resolved by `decisions.md` D14–D22 and th
 4. **`openai` not a v1 typed namespace** (D16) — `raw` covers it. Final.
 5. **Blocking `ureq`, no `tokio`** (D14); SSE is a blocking line reader with a ≤250 ms read timeout so SIGINT exits 12 promptly (arch §5). Final.
 6. **Spec vendored as JSON** (D21/D22) — fetched directly as JSON; no YAML parser ships. Final.
-7. **Canonical spec identity** (D22, verified 2026-06-29) — `exa-spec.json`, "Exa Public API" 2.0.0; `/context` overlay-defined; admin from the Team-Management spec; the `work/research/` specs are stale. Phase-0 blocker.
+7. **Canonical spec identity** (D22, verified 2026-07-23) — `exa-spec.json`, "Exa Public API" 2.0.0; `/context` overlay-defined; retired `/research/v1` retained only as deprecated compatibility overlay with `search --type deep-reasoning` migration; admin from the Team-Management spec; the `work/research/` specs are stale. Phase-0 blocker.

@@ -45,6 +45,18 @@ fn run_owned(args: &[String]) -> Output {
         .unwrap_or_else(|e| panic!("failed to run exa-agent {args:?}: {e}"))
 }
 
+fn run_owned_ok_json(args: &[String]) -> serde_json::Value {
+    let output = run_owned(args);
+    assert!(
+        output.status.success(),
+        "expected success for {args:?}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("stdout was not JSON for {args:?}: {e}"))
+}
+
 fn command(args: &[&str]) -> ProcessCommand {
     // Isolate from the developer's real ~/.config: default config/creds to paths that do not
     // exist so tests start from clean defaults, not whatever is in the user's config. Tests
@@ -561,6 +573,18 @@ fn schema_commands_work_offline() {
         invalid_type["details"]["allowed"],
         serde_json::json!(SEARCH_TYPE_VALUES)
     );
+
+    let null_data_sources = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "agent runs create",
+        "--body",
+        r#"{"query":"x","dataSources":null}"#,
+        "--compact",
+    ]);
+    assert_eq!(null_data_sources["valid"], false);
+    assert_eq!(null_data_sources["details"]["issue"], "invalid_field_type");
+    assert_eq!(null_data_sources["details"]["field"], "dataSources");
 
     let unsupported = run_ok_json(&[
         "schema",
@@ -2212,6 +2236,289 @@ fn raw_dry_run_refuses_user_authorization_header() {
 }
 
 #[test]
+fn raw_dry_run_refuses_payment_headers_from_generic_header() {
+    for header in [
+        "PAYMENT-SIGNATURE: user-supplied-secret",
+        "PAYMENT-REQUIRED: user-supplied-secret",
+        "PAYMENT-RESPONSE: user-supplied-secret",
+        "PAYMENT-RECEIPT: user-supplied-secret",
+        "x-payment-anything: user-supplied-secret",
+    ] {
+        let output = run(&[
+            "--header",
+            header,
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{header}");
+        assert!(output.stdout.is_empty(), "{header}");
+        let stderr: serde_json::Value = serde_json::from_slice(&output.stderr)
+            .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+        assert_eq!(
+            stderr["error"]["code"], "invalid_flag_combination",
+            "{header}"
+        );
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!all.contains("user-supplied-secret"), "{header}");
+    }
+}
+
+#[test]
+fn raw_payment_dry_run_is_limited_to_exact_search_or_contents_default_host() {
+    let ok = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(
+        ok.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let ok_json: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
+    assert_eq!(ok_json["request"]["profile"], "payment");
+    assert_eq!(
+        ok_json["data"]["request"]["headers"],
+        serde_json::json!([{"name":"PAYMENT-SIGNATURE","value":"<redacted>"}])
+    );
+
+    let discovery = run_with_env(
+        &[
+            "--payment-discovery",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ],
+        &[("EXA_API_KEY", "ambient-key-that-must-be-ignored")],
+    );
+    assert!(
+        discovery.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&discovery.stderr)
+    );
+    let discovery_json: serde_json::Value = serde_json::from_slice(&discovery.stdout).unwrap();
+    assert_eq!(discovery_json["request"]["profile"], "payment-discovery");
+    assert!(discovery_json["data"]["request"].get("headers").is_none());
+
+    let mpp = run(&[
+        "--mpp-payment-stdin",
+        "raw",
+        "POST",
+        "/contents",
+        "--body",
+        r#"{"urls":["https://example.com"]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(
+        mpp.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&mpp.stderr)
+    );
+    let mpp_json: serde_json::Value = serde_json::from_slice(&mpp.stdout).unwrap();
+    assert_eq!(mpp_json["request"]["profile"], "payment");
+    assert_eq!(
+        mpp_json["data"]["request"]["headers"],
+        serde_json::json!([{"name":"Authorization","value":"<redacted>"}])
+    );
+
+    let bad_path = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search/",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(bad_path.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&bad_path.stderr)
+        .unwrap_or_else(|e| panic!("stderr was not JSON: {e}"));
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+
+    let bad_discovery_method = run(&[
+        "--payment-discovery",
+        "raw",
+        "GET",
+        "/search",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(bad_discovery_method.status.code(), Some(1));
+
+    let bad_host = run(&[
+        "--x402-payment-stdin",
+        "--base-url",
+        "https://proxy.example.test",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(bad_host.status.code(), Some(1));
+
+    let dir = temp_path("raw-payment-custom-config-host");
+    let config = dir.join("config.toml");
+    fs::write(&config, r#"base_url = "https://proxy.example.test""#).unwrap();
+    let bad_config_host = run_with_env(
+        &[
+            "--x402-payment-stdin",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ],
+        &[("EXA_AGENT_CONFIG", config.to_str().unwrap())],
+    );
+    assert_eq!(bad_config_host.status.code(), Some(1));
+}
+
+#[test]
+fn payment_modes_are_raw_only_and_conflict_with_explicit_api_credentials() {
+    let non_raw = run(&[
+        "--payment-discovery",
+        "search",
+        "rust",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(non_raw.status.code(), Some(1));
+    let stderr = stderr_json(&non_raw);
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+
+    let explicit_api = run(&[
+        "--payment-discovery",
+        "--api-key",
+        "test-key-abcdef12",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(explicit_api.status.code(), Some(1));
+}
+
+#[test]
+fn raw_payment_stdin_modes_require_exclusive_nonempty_stdin() {
+    let conflict = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        "-",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(conflict.status.code(), Some(1));
+    let stderr = stderr_json(&conflict);
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+
+    let empty = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--compact",
+    ]);
+    assert_eq!(empty.status.code(), Some(11));
+    let stderr = stderr_json(&empty);
+    assert_eq!(stderr["error"]["code"], "no_input");
+
+    let invalid_mpp = run_with_env_stdin(
+        &[
+            "--mpp-payment-stdin",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--compact",
+        ],
+        &[],
+        "Bearer not-payment",
+    );
+    assert_eq!(invalid_mpp.status.code(), Some(1));
+    let stderr = stderr_json(&invalid_mpp);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+
+    let control_char = run_with_env_stdin(
+        &[
+            "--x402-payment-stdin",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--compact",
+        ],
+        &[],
+        "secret-line\nsecond-line",
+    );
+    assert_eq!(control_char.status.code(), Some(1));
+    let stderr = stderr_json(&control_char);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&control_char.stdout),
+        String::from_utf8_lossy(&control_char.stderr)
+    );
+    assert!(!rendered.contains("secret-line"));
+    assert!(!rendered.contains("second-line"));
+}
+
+#[test]
+fn raw_payment_modes_reject_streaming_before_network() {
+    let output = run(&[
+        "--payment-discovery",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x","stream":true}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert!(stderr["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("streaming"));
+}
+
+#[test]
 fn raw_live_without_credential_is_not_authenticated() {
     let dir = temp_path("raw-no-credential");
     let missing_credentials = dir.join("missing-credentials.json");
@@ -2845,11 +3152,360 @@ fn parse_search_core() {
         "--type",
         "Fast",
         "--category",
-        "research paper",
+        "publication",
     ]);
     assert_eq!(
         parse_err(&["search", "query", "--type", "garbage"]).kind(),
         clap::error::ErrorKind::InvalidValue
+    );
+}
+
+#[test]
+fn search_category_research_paper_is_not_silently_remapped() {
+    for spelling in ["research paper", "researchpaper", "research-paper"] {
+        let output = run(&[
+            "search",
+            "papers",
+            "--category",
+            spelling,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{spelling}");
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "invalid_value", "{spelling}");
+        assert_eq!(
+            stderr["error"]["details"]["didYouMean"], "publication",
+            "{spelling}"
+        );
+        assert_eq!(
+            stderr["error"]["suggestedCommand"],
+            "exa-agent search 'papers' --category 'publication'",
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
+fn search_and_similar_accept_custom_category_hints() {
+    let search = run_ok_json(&[
+        "search",
+        "papers",
+        "--category",
+        "pdf",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(search["data"]["request"]["body"]["category"], "pdf");
+
+    let similar = run_ok_json(&[
+        "similar",
+        "https://exa.ai",
+        "--category",
+        "internal wiki",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        similar["data"]["request"]["body"]["category"],
+        "internal wiki"
+    );
+}
+
+#[test]
+fn search_and_similar_canonicalize_known_category_hints() {
+    let search = run_ok_json(&[
+        "search",
+        "companies",
+        "--category",
+        "Company",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(search["data"]["request"]["body"]["category"], "company");
+
+    let similar = run_ok_json(&[
+        "similar",
+        "https://exa.ai",
+        "--category",
+        "Personal Site",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        similar["data"]["request"]["body"]["category"],
+        "personal site"
+    );
+}
+
+#[test]
+fn search_and_similar_accept_null_category_and_num_results_overrides() {
+    for (command, subject_key, subject, field, body) in [
+        (
+            "search",
+            "query",
+            "null category",
+            "category",
+            r#"{"query":"null category","category":null}"#,
+        ),
+        (
+            "search",
+            "query",
+            "null num results",
+            "numResults",
+            r#"{"query":"null num results","numResults":null}"#,
+        ),
+        (
+            "similar",
+            "url",
+            "https://exa.ai",
+            "category",
+            r#"{"url":"https://exa.ai","category":null}"#,
+        ),
+        (
+            "similar",
+            "url",
+            "https://exa.ai",
+            "numResults",
+            r#"{"url":"https://exa.ai","numResults":null}"#,
+        ),
+    ] {
+        let dry_run_body = match command {
+            "search" => run_owned_ok_json(&[
+                "search".to_string(),
+                subject.to_string(),
+                "--body".to_string(),
+                body.to_string(),
+                "--dry-run".to_string(),
+                "--compact".to_string(),
+            ]),
+            "similar" => run_owned_ok_json(&[
+                "similar".to_string(),
+                subject.to_string(),
+                "--body".to_string(),
+                body.to_string(),
+                "--dry-run".to_string(),
+                "--compact".to_string(),
+            ]),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            dry_run_body["data"]["request"]["body"][field],
+            serde_json::Value::Null,
+            "{command} --body {field}"
+        );
+
+        let dry_run_set = match command {
+            "search" => run_owned_ok_json(&[
+                "search".to_string(),
+                subject.to_string(),
+                "--set".to_string(),
+                format!("{field}=null"),
+                "--dry-run".to_string(),
+                "--compact".to_string(),
+            ]),
+            "similar" => run_owned_ok_json(&[
+                "similar".to_string(),
+                subject.to_string(),
+                "--set".to_string(),
+                format!("{field}=null"),
+                "--dry-run".to_string(),
+                "--compact".to_string(),
+            ]),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            dry_run_set["data"]["request"]["body"][field],
+            serde_json::Value::Null,
+            "{command} --set {field}"
+        );
+        assert_eq!(
+            dry_run_set["data"]["request"]["body"][subject_key],
+            serde_json::Value::String(subject.to_string()),
+            "{command} --set keeps required subject"
+        );
+
+        let schema = run_owned_ok_json(&[
+            "schema".to_string(),
+            "validate-input".to_string(),
+            command.to_string(),
+            "--body".to_string(),
+            body.to_string(),
+            "--compact".to_string(),
+        ]);
+        assert_eq!(schema["valid"], true, "{command} schema {field}");
+    }
+}
+
+#[test]
+fn search_rejects_company_people_spec_unsupported_filters() {
+    for (category, field) in [
+        ("company", "startCrawlDate=2026-01-01"),
+        ("people", "endCrawlDate=2026-12-31"),
+    ] {
+        let output = run(&[
+            "search",
+            "profiles",
+            "--category",
+            category,
+            "--set",
+            field,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{category} {field}");
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+        assert_eq!(stderr["error"]["details"]["category"], category);
+    }
+}
+
+#[test]
+fn similar_rejects_known_category_unsupported_filters_from_body_and_set() {
+    for (json_key, json_value, flag) in [
+        ("excludeDomains", r#"["blocked.example"]"#, "exclude-domain"),
+        (
+            "startPublishedDate",
+            r#""2026-01-01""#,
+            "start-published-date",
+        ),
+        ("endPublishedDate", r#""2026-12-31""#, "end-published-date"),
+        ("startCrawlDate", r#""2026-01-01""#, "start-crawl-date"),
+        ("endCrawlDate", r#""2026-12-31""#, "end-crawl-date"),
+    ] {
+        let body =
+            format!(r#"{{"url":"https://exa.ai","category":"company","{json_key}":{json_value}}}"#);
+        let body_output = run_owned(&[
+            "similar".to_string(),
+            "https://exa.ai".to_string(),
+            "--body".to_string(),
+            body,
+            "--dry-run".to_string(),
+            "--compact".to_string(),
+        ]);
+        assert_eq!(body_output.status.code(), Some(1), "{json_key} body");
+        let stderr = stderr_json(&body_output);
+        assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+        assert_eq!(stderr["error"]["details"]["category"], "company");
+        assert_eq!(
+            stderr["error"]["details"]["unsupportedFilters"],
+            serde_json::json!([flag])
+        );
+        assert_eq!(
+            stderr["error"]["suggestedCommand"],
+            "exa-agent similar 'https://exa.ai' --category company"
+        );
+
+        let set_arg = format!("{json_key}={json_value}");
+        let set_output = run_owned(&[
+            "similar".to_string(),
+            "https://exa.ai".to_string(),
+            "--set".to_string(),
+            "category=people".to_string(),
+            "--set".to_string(),
+            set_arg,
+            "--dry-run".to_string(),
+            "--compact".to_string(),
+        ]);
+        assert_eq!(set_output.status.code(), Some(1), "{json_key} set");
+        let stderr = stderr_json(&set_output);
+        assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+        assert_eq!(stderr["error"]["details"]["category"], "people");
+        assert_eq!(
+            stderr["error"]["details"]["unsupportedFilters"],
+            serde_json::json!([flag])
+        );
+        assert_eq!(
+            stderr["error"]["suggestedCommand"],
+            "exa-agent similar 'https://exa.ai' --category people"
+        );
+    }
+}
+
+#[test]
+fn similar_allows_include_domains_for_known_categories_via_body_and_set() {
+    let body = run_ok_json(&[
+        "similar",
+        "https://exa.ai",
+        "--body",
+        r#"{"category":"company","includeDomains":["exa.ai"]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(body["data"]["request"]["body"]["category"], "company");
+    assert_eq!(
+        body["data"]["request"]["body"]["includeDomains"],
+        serde_json::json!(["exa.ai"])
+    );
+
+    let set = run_ok_json(&[
+        "similar",
+        "https://exa.ai",
+        "--set",
+        "category=people",
+        "--set",
+        r#"includeDomains=["linkedin.com"]"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(set["data"]["request"]["body"]["category"], "people");
+    assert_eq!(
+        set["data"]["request"]["body"]["includeDomains"],
+        serde_json::json!(["linkedin.com"])
+    );
+}
+
+#[test]
+fn similar_category_research_paper_suggests_publication_without_accepting_it() {
+    for spelling in ["research paper", "research-paper", "research_paper"] {
+        let args = [
+            "similar",
+            "https://exa.ai",
+            "--category",
+            spelling,
+            "--dry-run",
+            "--compact",
+        ];
+        assert_similar_research_paper_suggests_publication(&args, spelling);
+    }
+
+    for args in [
+        &[
+            "similar",
+            "--num-results",
+            "5",
+            "https://exa.ai",
+            "--category",
+            "research-paper",
+            "--dry-run",
+            "--compact",
+        ][..],
+        &[
+            "similar",
+            "--category",
+            "research-paper",
+            "https://exa.ai",
+            "--dry-run",
+            "--compact",
+        ][..],
+    ] {
+        assert_similar_research_paper_suggests_publication(args, "research-paper");
+    }
+}
+
+fn assert_similar_research_paper_suggests_publication(args: &[&str], spelling: &str) {
+    let output = run(args);
+    assert_eq!(output.status.code(), Some(1), "{spelling}");
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "invalid_value", "{spelling}");
+    assert_eq!(
+        stderr["error"]["details"]["didYouMean"], "publication",
+        "{spelling}"
+    );
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent similar 'https://exa.ai' --category 'publication'",
+        "{spelling}"
     );
 }
 
@@ -3121,7 +3777,7 @@ fn parse_contents_answer_context_similar() {
         "https://exa.ai",
         "--exclude-source-domain",
         "--category",
-        "news",
+        "custom hint",
     ]);
 }
 
@@ -3360,7 +4016,7 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         "--data-source",
         "similarweb",
         "--data-source",
-        "fiber_ai",
+        "fiber",
         "--metadata",
         r#"{"ticket":"T1","owner":"ops"}"#,
         "--dry-run",
@@ -3389,7 +4045,7 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         body["dataSources"],
         serde_json::json!([
             {"provider":"similarweb"},
-            {"provider":"fiber_ai"}
+            {"provider":"fiber"}
         ])
     );
     assert_eq!(
@@ -3423,17 +4079,17 @@ fn agent_runs_create_rejects_bad_structured_create_fields() {
         "create",
         "enrich target accounts",
         "--data-source",
-        "a",
+        "fiber",
         "--data-source",
-        "b",
+        "financial_datasets",
         "--data-source",
-        "c",
+        "similarweb",
         "--data-source",
-        "d",
+        "baselayer",
         "--data-source",
-        "e",
+        "affiliate",
         "--data-source",
-        "f",
+        "particle",
         "--compact",
     ]);
     assert_eq!(too_many_sources.status.code(), Some(1));
@@ -3444,22 +4100,208 @@ fn agent_runs_create_rejects_bad_structured_create_fields() {
         .unwrap()
         .contains("at most 5"));
 
-    let empty_source = run(&[
+    let invalid_source = run(&[
         "agent",
         "runs",
         "create",
         "enrich target accounts",
         "--data-source",
-        "",
+        "unknown_provider",
         "--compact",
     ]);
-    assert_eq!(empty_source.status.code(), Some(1));
-    let stderr = stderr_json(&empty_source);
+    assert_eq!(invalid_source.status.code(), Some(1));
+    let stderr = stderr_json(&invalid_source);
     assert_eq!(stderr["error"]["code"], "invalid_value");
     assert!(stderr["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("must not be empty"));
+        .contains("unknown_provider"));
+}
+
+#[test]
+fn agent_runs_create_rejects_retired_fiber_ai_data_source() {
+    let output = run(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--data-source",
+        "fiber_ai",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert_eq!(stderr["error"]["details"]["didYouMean"], "fiber");
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent agent runs create 'enrich target accounts' --data-source fiber"
+    );
+
+    let macro_output = run(&[
+        "agent",
+        "run",
+        "enrich target accounts",
+        "--data-source",
+        "fiber-ai",
+        "--compact",
+    ]);
+    assert_eq!(macro_output.status.code(), Some(1));
+    let macro_stderr = stderr_json(&macro_output);
+    assert_eq!(macro_stderr["error"]["details"]["didYouMean"], "fiber");
+    assert_eq!(
+        macro_stderr["error"]["suggestedCommand"],
+        "exa-agent agent run 'enrich target accounts' --data-source fiber"
+    );
+}
+
+#[test]
+fn agent_runs_create_rejects_invalid_body_override_data_sources() {
+    for (body, expected_value, did_you_mean) in [
+        (
+            r#"{"dataSources":[{"provider":"unknown_provider"}]}"#,
+            "unknown_provider",
+            None,
+        ),
+        (
+            r#"{"dataSources":[{"provider":"fiber_ai"}]}"#,
+            "fiber_ai",
+            Some("fiber"),
+        ),
+    ] {
+        let output = run(&[
+            "agent",
+            "runs",
+            "create",
+            "enrich target accounts",
+            "--body",
+            body,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{body}");
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "invalid_value", "{body}");
+        assert_eq!(
+            stderr["error"]["details"]["value"], expected_value,
+            "{body}"
+        );
+        if let Some(did_you_mean) = did_you_mean {
+            assert_eq!(
+                stderr["error"]["details"]["didYouMean"], did_you_mean,
+                "{body}"
+            );
+        } else {
+            assert!(stderr["error"]["details"].get("didYouMean").is_none());
+        }
+    }
+}
+
+#[test]
+fn agent_runs_body_override_data_source_enum_is_exact() {
+    let typed_flag = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--data-source",
+        "FIBER",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        typed_flag["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{ "provider": "fiber" }])
+    );
+
+    let body_override = run(&[
+        "agent",
+        "runs",
+        "create",
+        "enrich target accounts",
+        "--set",
+        "dataSources.0.provider=FIBER",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(body_override.status.code(), Some(1));
+    let stderr = stderr_json(&body_override);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert_eq!(stderr["error"]["details"]["value"], "FIBER");
+}
+
+#[test]
+fn agent_run_and_runs_create_reject_null_data_sources_overrides() {
+    for args in [
+        &[
+            "agent",
+            "run",
+            "enrich target accounts",
+            "--body",
+            r#"{"dataSources":null}"#,
+            "--dry-run",
+            "--compact",
+        ][..],
+        &[
+            "agent",
+            "run",
+            "enrich target accounts",
+            "--set",
+            "dataSources=null",
+            "--dry-run",
+            "--compact",
+        ][..],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "enrich target accounts",
+            "--body",
+            r#"{"dataSources":null}"#,
+            "--dry-run",
+            "--compact",
+        ][..],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "enrich target accounts",
+            "--set",
+            "dataSources=null",
+            "--dry-run",
+            "--compact",
+        ][..],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "invalid_field_type", "{args:?}");
+        assert_eq!(
+            stderr["error"]["details"]["issue"], "invalid_field_type",
+            "{args:?}"
+        );
+        assert_eq!(
+            stderr["error"]["details"]["field"], "dataSources",
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn answer_does_not_validate_agent_data_sources_body_field() {
+    let json = run_ok_json(&[
+        "answer",
+        "What is Exa?",
+        "--body",
+        r#"{"dataSources":[{"provider":"unknown_provider"}]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["command"], "answer");
+    assert_eq!(
+        json["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{ "provider": "unknown_provider" }])
+    );
 }
 
 #[cfg(unix)]

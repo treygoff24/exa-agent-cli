@@ -233,11 +233,11 @@ pub fn ranged_u32_value_parser(
     }
 }
 
-pub fn permissive_enum_string_value_parser(
-    values: &'static [&'static str],
+pub fn suggested_string_value_parser(
+    _values: &'static [&'static str],
 ) -> impl clap::builder::TypedValueParser<Value = String> {
     #[derive(Clone)]
-    struct Parser(&'static [&'static str]);
+    struct Parser;
 
     impl clap::builder::TypedValueParser for Parser {
         type Value = String;
@@ -248,24 +248,18 @@ pub fn permissive_enum_string_value_parser(
             _arg: Option<&clap::Arg>,
             value: &std::ffi::OsStr,
         ) -> Result<Self::Value, clap::Error> {
-            // Search category validation stays in the operation-aware validator so
-            // typos retain its targeted recovery commands. This parser independently
-            // advertises Clap's accepted vocabulary for registry parity checks.
-            Ok(value.to_string_lossy().into_owned())
-        }
-
-        fn possible_values(
-            &self,
-        ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
-            Some(Box::new(
-                self.0
-                    .iter()
-                    .map(|value| clap::builder::PossibleValue::new(*value)),
-            ))
+            let value = value.to_string_lossy();
+            if value.is_empty() {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ValueValidation,
+                    "value must not be empty",
+                ));
+            }
+            Ok(value.into_owned())
         }
     }
 
-    Parser(values)
+    Parser
 }
 
 /// One Exa operation. Carries exactly what the contracts surface plus the internal

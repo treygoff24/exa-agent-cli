@@ -146,15 +146,33 @@ kind = "str"
 cli_path = "research create"
 namespace = "api"
 idempotency_sensitive = true
+defined_by_overlay = true
+deprecated = true
+method = "POST"
+api_path = "/research/v1"
+source = "https://exa.ai/docs/changelog"
+source_version = "compat-2026-04"
 
 [operations."ResearchController_getResearch"]
 cli_path = "research get"
 namespace = "api"
+defined_by_overlay = true
+deprecated = true
+method = "GET"
+api_path = "/research/v1/{researchId}"
+source = "https://exa.ai/docs/changelog"
+source_version = "compat-2026-04"
 
 [operations."ResearchController_listResearch"]
 cli_path = "research list"
 namespace = "api"
 cursor = "cursor"
+defined_by_overlay = true
+deprecated = true
+method = "GET"
+api_path = "/research/v1"
+source = "https://exa.ai/docs/changelog"
+source_version = "compat-2026-04"
 
 [operations."search"]
 cli_path = "search"
@@ -514,7 +532,6 @@ kind = "bool"
 flag = "category"
 body_path = "category"
 kind = "str"
-enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
 
 [[operations."findSimilar".fields]]
 flag = "text"
@@ -555,7 +572,6 @@ enum_values = ["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
 flag = "category"
 body_path = "category"
 kind = "str"
-enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
 
 [[operations."search".fields]]
 flag = "text"
@@ -746,6 +762,7 @@ enum_values = ["auto", "minimal", "low", "medium", "high", "xhigh"]
 flag = "data-source"
 body_path = "dataSources"
 kind = "json"
+enum_values = ["fiber", "financial_datasets", "similarweb", "baselayer", "affiliate", "particle", "jinko"]
 
 [[operations."createAgentRun".fields]]
 flag = "metadata"

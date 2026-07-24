@@ -103,10 +103,13 @@ Run an agent-ergonomics audit against the built CLI:
 
 ## Open runtime validations
 
-- Exact canonical spec URL and drift behavior.
-- Websets export endpoints.
-- Research v1/v0 status and desired exposure.
+- Exact canonical spec drift behavior.
 - Retry-After headers.
 - Team Management key-create secret behavior.
 - Admin `rateLimit` semantics.
 - OpenAI compatibility model names.
+
+Resolved 2026-07-23: the canonical public spec is
+`https://exa.ai/docs/exa-spec.json`; undocumented Websets export endpoints are
+not implemented; retired `/research/v1` remains a deprecated compatibility
+overlay with migration guidance to `search --type deep-reasoning`.

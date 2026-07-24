@@ -67,37 +67,53 @@ pub const SEARCH_TYPE_VALUES: &[&str] = &[
     "deep-reasoning",
 ];
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchCategory {
-    Company,
-    People,
-    #[value(name = "research paper")]
-    ResearchPaper,
-    News,
-    #[value(name = "personal site")]
-    PersonalSite,
-    #[value(name = "financial report")]
-    FinancialReport,
-}
-
 pub const SEARCH_CATEGORY_VALUES: &[&str] = &[
     "company",
     "people",
-    "research paper",
+    "publication",
     "news",
     "personal site",
     "financial report",
 ];
 
-impl SearchCategory {
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentDataSource {
+    #[value(name = "fiber")]
+    Fiber,
+    #[value(name = "financial_datasets")]
+    FinancialDatasets,
+    #[value(name = "similarweb")]
+    Similarweb,
+    #[value(name = "baselayer")]
+    Baselayer,
+    #[value(name = "affiliate")]
+    Affiliate,
+    #[value(name = "particle")]
+    Particle,
+    #[value(name = "jinko")]
+    Jinko,
+}
+
+pub const AGENT_DATA_SOURCE_VALUES: &[&str] = &[
+    "fiber",
+    "financial_datasets",
+    "similarweb",
+    "baselayer",
+    "affiliate",
+    "particle",
+    "jinko",
+];
+
+impl AgentDataSource {
     pub fn as_str(self) -> &'static str {
         match self {
-            SearchCategory::Company => "company",
-            SearchCategory::People => "people",
-            SearchCategory::ResearchPaper => "research paper",
-            SearchCategory::News => "news",
-            SearchCategory::PersonalSite => "personal site",
-            SearchCategory::FinancialReport => "financial report",
+            AgentDataSource::Fiber => "fiber",
+            AgentDataSource::FinancialDatasets => "financial_datasets",
+            AgentDataSource::Similarweb => "similarweb",
+            AgentDataSource::Baselayer => "baselayer",
+            AgentDataSource::Affiliate => "affiliate",
+            AgentDataSource::Particle => "particle",
+            AgentDataSource::Jinko => "jinko",
         }
     }
 }
@@ -204,6 +220,48 @@ pub struct GlobalArgs {
     /// Add a non-secret HTTP header as `Name: value`.
     #[arg(long = "header", global = true)]
     pub headers: Vec<String>,
+    /// Read an x402 PAYMENT-SIGNATURE header value from stdin for raw /search or /contents.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = [
+            "mpp_payment_stdin",
+            "payment_discovery",
+            "api_key",
+            "api_key_stdin",
+            "service_key",
+            "service_key_stdin"
+        ]
+    )]
+    pub x402_payment_stdin: bool,
+    /// Read an MPP Authorization: Payment header value from stdin for raw /search or /contents.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = [
+            "x402_payment_stdin",
+            "payment_discovery",
+            "api_key",
+            "api_key_stdin",
+            "service_key",
+            "service_key_stdin"
+        ]
+    )]
+    pub mpp_payment_stdin: bool,
+    /// Send a raw unauthenticated payment discovery request to get a 402 challenge.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = [
+            "x402_payment_stdin",
+            "mpp_payment_stdin",
+            "api_key",
+            "api_key_stdin",
+            "service_key",
+            "service_key_stdin"
+        ]
+    )]
+    pub payment_discovery: bool,
     /// Opt into an upstream beta header value.
     #[arg(long, global = true)]
     pub beta: Option<String>,
@@ -293,6 +351,9 @@ impl std::fmt::Debug for GlobalArgs {
                     })
                     .collect::<Vec<_>>(),
             )
+            .field("x402_payment_stdin", &self.x402_payment_stdin)
+            .field("mpp_payment_stdin", &self.mpp_payment_stdin)
+            .field("payment_discovery", &self.payment_discovery)
             .field("beta", &self.beta)
             .field("timeout", &self.timeout)
             .field("connect_timeout", &self.connect_timeout)
@@ -462,11 +523,11 @@ pub struct SearchArgs {
     pub r#type: Option<SearchType>,
     /// Result category.
     ///
-    /// Valid values: company, people, research paper, news, personal site, financial report.
+    /// Known suggestions: company, people, publication, news, personal site, financial report. Other non-empty category hints are passed through.
     #[arg(
         long,
         value_name = "CATEGORY",
-        value_parser = crate::registry::permissive_enum_string_value_parser(SEARCH_CATEGORY_VALUES)
+        value_parser = crate::registry::suggested_string_value_parser(SEARCH_CATEGORY_VALUES)
     )]
     pub category: Option<String>,
     /// Restrict results to matching domains.
@@ -596,8 +657,13 @@ pub struct SimilarArgs {
     pub num_results: Option<u32>,
     #[arg(long)]
     pub exclude_source_domain: bool,
-    #[arg(long, value_enum, ignore_case = true)]
-    pub category: Option<SearchCategory>,
+    /// Known suggestions: company, people, publication, news, personal site, financial report. Other non-empty category hints are passed through.
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        value_parser = crate::registry::suggested_string_value_parser(SEARCH_CATEGORY_VALUES)
+    )]
+    pub category: Option<String>,
     /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full for uncapped.
     #[arg(
         long,
@@ -615,10 +681,6 @@ fn similar_num_results_flag(value: &Option<u32>) -> Option<String> {
     value.map(|n| n.to_string())
 }
 
-fn similar_category_flag(value: &Option<SearchCategory>) -> Option<String> {
-    value.map(|category| category.as_str().to_string())
-}
-
 impl SimilarArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
         vec![
@@ -628,7 +690,7 @@ impl SimilarArgs {
                 "exclude-source-domain",
                 bool_flag(self.exclude_source_domain),
             ),
-            ("category", similar_category_flag(&self.category)),
+            ("category", self.category.clone()),
             ("text", self.text.clone()),
         ]
     }
@@ -799,8 +861,8 @@ pub struct AgentRunArgs {
     pub previous_run_id: Option<String>,
     #[arg(long, value_enum, ignore_case = true)]
     pub effort: Option<Effort>,
-    #[arg(long)]
-    pub data_source: Vec<String>,
+    #[arg(long, value_enum, ignore_case = true)]
+    pub data_source: Vec<AgentDataSource>,
     #[arg(long)]
     pub metadata: Option<String>,
     #[arg(long)]

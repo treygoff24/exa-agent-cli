@@ -19,6 +19,9 @@ pub fn is_secret_name(name: &str) -> bool {
         || n.contains("access-key")
         || n.contains("access_key")
         || n.contains("accesskey")
+        || n.contains("payment-signature")
+        || n == "x-payment"
+        || n == "x-payment-signature"
         || n.contains("token")
         || n.contains("secret")
         || n.contains("password")
@@ -52,6 +55,9 @@ mod tests {
             "access-key",
             "access_key",
             "accesskey",
+            "payment-signature",
+            "x-payment",
+            "x-payment-signature",
             "token",
             "secret",
             "password",

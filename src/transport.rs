@@ -68,12 +68,29 @@ pub struct RawExecuteParams<'a> {
     pub query_raw: &'a [String],
     pub body: Value,
     pub globals: &'a GlobalArgs,
-    pub credential: &'a ResolvedCredential,
+    pub auth: RawAuth<'a>,
     pub request_id: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RawAuth<'a> {
+    Api(&'a ResolvedCredential),
+    Payment(PaymentAuth<'a>),
+    PaymentDiscovery,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PaymentAuth<'a> {
+    X402 { signature: &'a Secret },
+    Mpp { authorization: &'a Secret },
 }
 
 pub trait Transport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError>;
+
+    fn send_no_redirects(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
+        self.send(req)
+    }
 
     fn send_sse<F>(
         &self,
@@ -115,6 +132,7 @@ pub enum StreamItem<'a> {
 /// Live transport backed by ureq + rustls (D14).
 pub struct UreqTransport {
     agent: ureq::Agent,
+    no_redirect_agent: ureq::Agent,
     sse_agent: ureq::Agent,
 }
 
@@ -124,6 +142,11 @@ impl UreqTransport {
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .build();
+        let no_redirect_config = ureq::config::Config::builder()
+            .timeout_global(Some(timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build();
         let sse_config = ureq::config::Config::builder()
             .timeout_global(Some(timeout))
             .timeout_recv_body(Some(crate::stream::SSE_READ_TIMEOUT))
@@ -131,6 +154,7 @@ impl UreqTransport {
             .build();
         Self {
             agent: config.into(),
+            no_redirect_agent: no_redirect_config.into(),
             sse_agent: sse_config.into(),
         }
     }
@@ -144,6 +168,20 @@ impl Transport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
         ensure_network_allowed()?;
         let response = send_ureq_request(&self.agent, req)?;
+
+        let status = response.status().as_u16();
+        let headers = response_headers(&response);
+        let body = response.into_body().read_to_vec().map_err(map_ureq_error)?;
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    fn send_no_redirects(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
+        ensure_network_allowed()?;
+        let response = send_ureq_request(&self.no_redirect_agent, req)?;
 
         let status = response.status().as_u16();
         let headers = response_headers(&response);
@@ -471,7 +509,12 @@ pub fn parse_user_headers(raw: &[String]) -> Result<Vec<(String, String)>, CliEr
 
 fn is_forbidden_header(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
-    redaction::is_secret_name(&n) || n == "x-api-key" || n == "idempotency-key"
+    redaction::is_secret_name(&n)
+        || n == "x-api-key"
+        || n == "idempotency-key"
+        || n == "payment-signature"
+        || n.starts_with("payment-")
+        || n.starts_with("x-payment")
 }
 
 fn has_header(headers: &[(String, String)], name: &str) -> bool {
@@ -774,7 +817,12 @@ pub fn send_with_retry<T: Transport>(
     let max_retries = options.retry;
     let mut attempt = 0u32;
     loop {
-        match transport.send(req) {
+        let sent = if options.follow_redirects {
+            transport.send(req)
+        } else {
+            transport.send_no_redirects(req)
+        };
+        match sent {
             Ok(resp) if (200..300).contains(&resp.status) => {
                 return Ok((resp, attempt));
             }
@@ -820,10 +868,28 @@ pub struct SendOptions {
     pub retry: u32,
     pub retry_after: bool,
     pub idempotency_key: Option<String>,
+    pub follow_redirects: bool,
 }
 
 pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String)]) -> CliError {
+    if has_no_more_credits(body) {
+        let mut diag = upstream_error_diag("credits_exhausted", status, body);
+        diag.http_status = Some(status);
+        diag.retryable = false;
+        return CliError::RateLimit(diag);
+    }
     match status {
+        402 => {
+            let mut diag = upstream_error_diag("payment_required", status, body);
+            diag.http_status = Some(status);
+            diag.retryable = false;
+            diag = diag_with_detail(
+                diag,
+                "payment",
+                payment_headers_metadata(headers, "challenge"),
+            );
+            CliError::Auth(diag)
+        }
         401 | 403 => {
             let mut diag = upstream_error_diag("reauth_required", status, body);
             diag.http_status = Some(status);
@@ -883,6 +949,54 @@ pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String
             CliError::Upstream(diag)
         }
     }
+}
+
+fn has_no_more_credits(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    ["tag", "code"].into_iter().any(|field| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "NO_MORE_CREDITS")
+    })
+}
+
+pub fn payment_headers_metadata(headers: &[(String, String)], kind: &str) -> Value {
+    let headers: Vec<Value> = headers
+        .iter()
+        .filter(|(name, value)| is_safe_payment_metadata_header(name, value))
+        .map(|(name, value)| {
+            serde_json::json!({
+                "name": name,
+                "present": true,
+                "bytes": value.len(),
+                "value": value,
+            })
+        })
+        .collect();
+    serde_json::json!({ "kind": kind, "headers": headers })
+}
+
+fn is_safe_payment_metadata_header(name: &str, value: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "payment-required"
+            | "payment-response"
+            | "payment-receipt"
+            | "x-payment-required"
+            | "x-payment-response"
+            | "x-payment-receipt"
+    ) || (n == "www-authenticate"
+        && value
+            .to_ascii_lowercase()
+            .split(',')
+            .any(|part| part.trim_start().starts_with("payment")))
 }
 
 /// Cap on the serialized upstream JSON body kept in error details; larger bodies are
@@ -1079,7 +1193,7 @@ pub fn execute_raw<T: Transport>(
             query_raw,
             body,
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: new_request_id(),
         },
     )
@@ -1319,8 +1433,14 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     let cfg = Config::load()?;
     let method = params.method.to_ascii_uppercase();
     let query = parse_raw_query(params.query_raw)?;
-    let base_url =
-        resolve_base_url_for_namespace(params.globals, &cfg, params.credential.namespace)?;
+    let base_url = match params.auth {
+        RawAuth::Api(credential) => {
+            resolve_base_url_for_namespace(params.globals, &cfg, credential.namespace)?
+        }
+        RawAuth::Payment(_) | RawAuth::PaymentDiscovery => {
+            payment_base_url(params.globals, &cfg, params.path, &method)?
+        }
+    };
     let url = build_url(&base_url, params.path, &query)?;
 
     let mut headers = parse_user_headers(&params.globals.headers)?;
@@ -1333,7 +1453,30 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     if let Some(beta) = &params.globals.beta {
         headers.push(("x-exa-beta".to_string(), beta.clone()));
     }
-    inject_auth_headers(&mut headers, &params.credential.secret);
+    let (profile, idempotency_key) = match params.auth {
+        RawAuth::Api(credential) => {
+            inject_auth_headers(&mut headers, &credential.secret);
+            (
+                credential.profile.clone(),
+                params.globals.idempotency_key.clone(),
+            )
+        }
+        RawAuth::Payment(PaymentAuth::X402 { signature }) => {
+            headers.push((
+                "PAYMENT-SIGNATURE".to_string(),
+                signature.expose().to_string(),
+            ));
+            ("payment".to_string(), None)
+        }
+        RawAuth::Payment(PaymentAuth::Mpp { authorization }) => {
+            headers.push((
+                "Authorization".to_string(),
+                authorization.expose().to_string(),
+            ));
+            ("payment".to_string(), None)
+        }
+        RawAuth::PaymentDiscovery => ("payment-discovery".to_string(), None),
+    };
 
     let body_bytes = if params.body.is_null() {
         None
@@ -1356,7 +1499,8 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     let send_opts = SendOptions {
         retry: params.globals.retry,
         retry_after: params.globals.retry_after,
-        idempotency_key: params.globals.idempotency_key.clone(),
+        idempotency_key,
+        follow_redirects: matches!(params.auth, RawAuth::Api(_)),
     };
     Ok(PreparedRawRequest {
         req,
@@ -1364,9 +1508,46 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
         request_id: params.request_id.clone(),
         method,
         path: params.path.to_string(),
-        profile: params.credential.profile.clone(),
+        profile,
         correlation_id: params.globals.correlation_id.clone(),
     })
+}
+
+pub(crate) fn payment_base_url(
+    globals: &GlobalArgs,
+    cfg: &Config,
+    path: &str,
+    method: &str,
+) -> Result<String, CliError> {
+    if globals.base_url.is_some() {
+        return Err(payment_usage(
+            "payment mode requires the default Exa API host; remove --base-url",
+        ));
+    }
+    let effective = cfg.effective_base_url_for_profile(globals.profile.as_deref());
+    if effective.trim_end_matches('/') != crate::config::DEFAULT_BASE_URL {
+        return Err(payment_usage(
+            "payment mode requires the default Exa API host; remove custom base_url config",
+        ));
+    }
+    if method != "POST" {
+        return Err(payment_usage(
+            "payment mode is only supported for POST /search and POST /contents",
+        ));
+    }
+    if !matches!(path, "/search" | "/contents") {
+        return Err(payment_usage(
+            "payment mode is only supported for exact raw paths /search and /contents",
+        ));
+    }
+    Ok(crate::config::DEFAULT_BASE_URL.to_string())
+}
+
+fn payment_usage(message: &str) -> CliError {
+    CliError::Usage(
+        Diag::new("invalid_flag_combination", message)
+            .with_suggestion("printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"),
+    )
 }
 
 /// Redacted, best-effort JSONL trace record for `--trace FILE` (commands.md "--trace FILE",
@@ -1546,6 +1727,19 @@ mod tests {
         assert_eq!(err.diag().code, "invalid_flag_combination");
         let err = parse_user_headers(&["x-api-key: leak".into()]).unwrap_err();
         assert_eq!(err.diag().code, "invalid_flag_combination");
+        let err = parse_user_headers(&["PAYMENT-SIGNATURE: leak".into()]).unwrap_err();
+        assert_eq!(err.diag().code, "invalid_flag_combination");
+        let err = parse_user_headers(&["x-payment-signature: leak".into()]).unwrap_err();
+        assert_eq!(err.diag().code, "invalid_flag_combination");
+        for header in [
+            "PAYMENT-RESPONSE: receipt",
+            "PAYMENT-RECEIPT: receipt",
+            "PAYMENT-REQUIRED: price",
+            "x-payment-response: receipt",
+        ] {
+            let err = parse_user_headers(&[header.into()]).unwrap_err();
+            assert_eq!(err.diag().code, "invalid_flag_combination", "{header}");
+        }
     }
 
     #[test]
@@ -1555,6 +1749,49 @@ mod tests {
         let rl = classify_http_status(429, b"too many", &[("Retry-After".into(), "2".into())]);
         assert!(matches!(rl, CliError::RateLimit(_)));
         assert_eq!(rl.diag().details.as_ref().unwrap()["retryAfterMs"], 2000);
+        let payment = classify_http_status(
+            402,
+            br#"{"message":"payment required"}"#,
+            &[
+                ("WWW-Authenticate".into(), "Payment challenge".into()),
+                ("PAYMENT-REQUIRED".into(), "price=0.01".into()),
+                ("PAYMENT-SIGNATURE".into(), "request-secret".into()),
+            ],
+        );
+        assert!(matches!(payment, CliError::Auth(_)));
+        assert_eq!(payment.diag().code, "payment_required");
+        assert_eq!(
+            payment.diag().details.as_ref().unwrap()["payment"]["headers"][0]["value"],
+            "Payment challenge"
+        );
+        assert_eq!(
+            payment.diag().details.as_ref().unwrap()["payment"]["headers"][1]["value"],
+            "price=0.01"
+        );
+        assert_eq!(
+            payment.diag().details.as_ref().unwrap()["payment"]["headers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let exhausted = classify_http_status(400, br#"{"tag":"NO_MORE_CREDITS"}"#, &[]);
+        assert!(matches!(exhausted, CliError::RateLimit(_)));
+        assert_eq!(exhausted.diag().code, "credits_exhausted");
+        assert!(!exhausted.diag().retryable);
+        let exhausted_code = classify_http_status(402, br#"{"code":"NO_MORE_CREDITS"}"#, &[]);
+        assert!(matches!(exhausted_code, CliError::RateLimit(_)));
+        assert_eq!(exhausted_code.diag().code, "credits_exhausted");
+        let near_match = classify_http_status(400, br#"{"tag":"no_more_credits"}"#, &[]);
+        assert!(matches!(near_match, CliError::Usage(_)));
+        assert_eq!(near_match.diag().code, "invalid_value");
+        let echoed = classify_http_status(
+            400,
+            br#"{"message":"NO_MORE_CREDITS is mentioned in user input"}"#,
+            &[],
+        );
+        assert!(matches!(echoed, CliError::Usage(_)));
+        assert_eq!(echoed.diag().code, "invalid_value");
     }
 
     #[test]
@@ -1667,6 +1904,190 @@ mod tests {
     }
 
     #[test]
+    fn execute_raw_payment_auth_sends_payment_header_without_api_key() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, r#"{"results":[]}"#);
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--x402-payment-stdin",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+        let signature = Secret::new("x402-signed-payload").unwrap();
+        let result = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &[],
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli.globals,
+                auth: RawAuth::Payment(PaymentAuth::X402 {
+                    signature: &signature,
+                }),
+                request_id: "req_payment".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.profile, "payment");
+        let recorded = &fake.recorded_requests()[0];
+        assert!(recorded
+            .headers
+            .iter()
+            .any(|(k, v)| { k == "PAYMENT-SIGNATURE" && v == "x402-signed-payload" }));
+        assert!(!recorded.headers.iter().any(|(k, _)| k == "x-api-key"));
+    }
+
+    #[test]
+    fn execute_raw_payment_auth_does_not_retry_even_with_global_idempotency_key() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(503, r#"{"error":"down"}"#);
+        fake.push_ok_json(200, r#"{"results":[]}"#);
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--x402-payment-stdin",
+            "--idempotency-key",
+            "idem-paid",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+        let signature = Secret::new("x402-signed-payload").unwrap();
+
+        let err = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &[],
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli.globals,
+                auth: RawAuth::Payment(PaymentAuth::X402 {
+                    signature: &signature,
+                }),
+                request_id: "req_payment_no_retry".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, CliError::Upstream(_)));
+        assert_eq!(fake.recorded_requests().len(), 1);
+    }
+
+    #[test]
+    fn payment_transport_policy_does_not_follow_redirects_or_hit_target() {
+        let live_transport = UreqTransport::with_defaults();
+        assert_eq!(live_transport.no_redirect_agent.config().max_redirects(), 0);
+        assert!(live_transport.agent.config().max_redirects() > 0);
+
+        #[derive(Default)]
+        struct RedirectRecordingTransport {
+            followed: RefCell<bool>,
+            no_redirect: RefCell<bool>,
+        }
+
+        impl Transport for RedirectRecordingTransport {
+            fn send(&self, _req: &HttpRequest) -> Result<HttpResponse, CliError> {
+                *self.followed.borrow_mut() = true;
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: b"ok".to_vec(),
+                })
+            }
+
+            fn send_no_redirects(&self, _req: &HttpRequest) -> Result<HttpResponse, CliError> {
+                *self.no_redirect.borrow_mut() = true;
+                Ok(HttpResponse {
+                    status: 302,
+                    headers: vec![(
+                        "Location".to_string(),
+                        "http://127.0.0.1/paid-target".to_string(),
+                    )],
+                    body: b"redirect".to_vec(),
+                })
+            }
+        }
+
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            url: "http://127.0.0.1/paid-start".to_string(),
+            headers: vec![(
+                "PAYMENT-SIGNATURE".to_string(),
+                "signed-payment".to_string(),
+            )],
+            body: Some(br#"{"query":"x"}"#.to_vec()),
+        };
+        let opts = SendOptions {
+            retry: 0,
+            retry_after: false,
+            idempotency_key: None,
+            follow_redirects: false,
+        };
+        let transport = RedirectRecordingTransport::default();
+        let err = send_with_retry(&transport, &req, &opts).unwrap_err();
+
+        assert_eq!(err.diag().http_status, Some(302));
+        assert!(*transport.no_redirect.borrow());
+        assert!(!*transport.followed.borrow());
+    }
+
+    #[test]
+    fn execute_raw_payment_discovery_sends_no_auth_and_returns_payment_required() {
+        let fake = FakeTransport::default();
+        fake.responses.borrow_mut().push_back(Ok(HttpResponse {
+            status: 402,
+            headers: vec![
+                (
+                    "WWW-Authenticate".to_string(),
+                    r#"Payment realm="exa""#.to_string(),
+                ),
+                (
+                    "PAYMENT-REQUIRED".to_string(),
+                    r#"{"scheme":"x402"}"#.to_string(),
+                ),
+            ],
+            body: br#"{"error":"payment required"}"#.to_vec(),
+        }));
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--payment-discovery",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+
+        let err = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &[],
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli.globals,
+                auth: RawAuth::PaymentDiscovery,
+                request_id: "req_payment_discovery".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.diag().code, "payment_required");
+        let recorded = &fake.recorded_requests()[0];
+        assert!(!recorded.headers.iter().any(|(k, _)| {
+            k.eq_ignore_ascii_case("x-api-key")
+                || k.eq_ignore_ascii_case("authorization")
+                || k.eq_ignore_ascii_case("payment-signature")
+        }));
+        let payment = &err.diag().details.as_ref().unwrap()["payment"];
+        assert_eq!(payment["headers"][0]["name"], "WWW-Authenticate");
+        assert_eq!(payment["headers"][1]["name"], "PAYMENT-REQUIRED");
+    }
+
+    #[test]
     fn post_without_idempotency_key_is_not_retried_on_503() {
         let fake = FakeTransport::default();
         fake.push_ok_json(503, "down");
@@ -1681,6 +2102,7 @@ mod tests {
             retry: 2,
             retry_after: false,
             idempotency_key: None,
+            follow_redirects: true,
         };
         let err = send_with_retry(&fake, &req, &opts).unwrap_err();
         assert!(matches!(err, CliError::Upstream(_)));
@@ -1702,6 +2124,7 @@ mod tests {
             retry: 2,
             retry_after: false,
             idempotency_key: None,
+            follow_redirects: true,
         };
         let (resp, retries) = send_with_retry(&fake, &req, &opts).unwrap();
         assert_eq!(resp.status, 200);
@@ -1853,6 +2276,7 @@ mod tests {
             retry: 0,
             retry_after: false,
             idempotency_key: None,
+            follow_redirects: true,
         };
         let mut callback = |item: StreamItem<'_>| -> Result<(), CliError> {
             if let StreamItem::Frame(frame) = item {

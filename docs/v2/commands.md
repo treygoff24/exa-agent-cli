@@ -36,7 +36,7 @@ exa-agent
 │       ├── events                 # GET    /agent/runs/{id}/events
 │       ├── cancel                 # POST   /agent/runs/{id}/cancel
 │       └── delete                 # DELETE /agent/runs/{id}                [--yes]
-├── research                       # Research API: /research/v1             [legacy; prefer agent]
+├── research                       # retired /research/v1 compatibility     [deprecated; prefer search --type deep-reasoning]
 │   ├── create                     # POST   /research/v1                    [create-POST]
 │   ├── list                       # GET    /research/v1
 │   └── get                        # GET    /research/v1/{researchId}
@@ -164,8 +164,8 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
 | `POST /agent/runs/{id}/cancel` | `exa-agent agent runs cancel ID` | Safe; returns terminal run if already done. |
 | `DELETE /agent/runs/{id}` | `exa-agent agent runs delete ID --yes` | Destructive. |
-| `GET/POST /research/v1` | `exa-agent research list/create` | `create` is `[create-POST]`. **Legacy**; warns and points to `agent`. |
-| `GET /research/v1/{id}` | `exa-agent research get ID` | Status read. |
+| `GET/POST /research/v1` | `exa-agent research list/create` | Deprecated compatibility overlay for retired `/research/v1`; warns and points to `search --type deep-reasoning`. |
+| `GET /research/v1/{id}` | `exa-agent research get ID` | Deprecated compatibility read for retained legacy ids. |
 | `GET/POST /websets/v0/websets` | `exa-agent websets list/create` | `create` is `[create-POST]`. Body-first; `--body @file` + `--set`. |
 | `GET/POST/DELETE /websets/v0/websets/{id}` | `exa-agent websets get/update/delete` | `update` is **POST**, not PATCH. `delete` requires `--yes`. |
 | `POST /websets/v0/websets/{id}/cancel` | `exa-agent websets cancel ID --yes` | Discards running work. |
@@ -270,9 +270,9 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 
 ### Input forgiveness (coerce at the edges, stay deterministic)
 
-Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest of the program sees only canonical values (design-principle "Input forgiveness"; architecture §6):
+Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest of the program sees only canonical values where the API defines a closed set, and preserves documented free-form hints where the API allows them (design-principle "Input forgiveness"; architecture §6):
 
-- **Enums are case-insensitive.** Every `ValueEnum` flag (`--type`, `--format`, `--effort`, `--category`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) sets `ignore_case = true`, so `--type Fast`, `--format JSON`, `--effort Medium` all resolve; an invalid choice lists the valid values (clap's possible-value suggestion). `--category` is a `ValueEnum` with multi-word variants (`research paper`), not a free string, so typos get suggestions too. The canonical (lowercase/kebab) spelling is what reaches the body.
+- **Enums are case-insensitive.** Every closed `ValueEnum` flag (`--type`, `--format`, `--effort`, `--data-source`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) sets `ignore_case = true`, so `--type Fast`, `--format JSON`, `--effort Medium` all resolve; an invalid choice lists the valid values. `--category` is different: Exa documents known suggestions (`company`, `people`, `publication`, `news`, `personal site`, `financial report`) while accepting other non-empty strings as hints. Known category hints canonicalize case-insensitively; retired `research paper` spellings hard-fail with `details.didYouMean=publication`; all other non-empty hints pass through unchanged.
 - **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..10000`; `--highlights[=N]` accepts a positive character cap.
 - **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
 - **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
@@ -292,7 +292,7 @@ exa-agent search QUERY
   --type auto|fast|instant|deep-lite|deep|deep-reasoning   # default auto
   --fast | --instant | --deep | --deep-reasoning           # shortcuts for --type
   --num-results N                                           # maps numResults; 1..100. Short alias: -n. NOT --limit
-  --category 'company|people|research paper|news|personal site|financial report'
+  --category CATEGORY          # known suggestions: company|people|publication|news|personal site|financial report; other non-empty hints pass through
   --include-domain DOMAIN        # repeatable; includeDomains[]; supports paths + wildcards
   --exclude-domain DOMAIN        # repeatable; excludeDomains[]
   --start-published-date ISO     # alias --published-after
@@ -336,8 +336,7 @@ Guards:
 - `--limit` on `search` → exit 1 did-you-mean: `search isn't cursor-paginated; use --num-results N (1..100).` (`--limit` is page size on list commands only; never silently aliased to `--num-results`, D20).
 - `--count` on `search` → exit 1 did-you-mean: `search uses --num-results N (1..100); --count is the Websets result-count flag.` (Reciprocal of the websets guard below — the result-count flag is `--num-results` on `search` and `--count` on `websets` creates; neither is aliased, both redirect, D20.)
 - `--livecrawl` + `--max-age-hours` → exit 1 (upstream forbids sending both).
-- `--category company` with `--start/end-published-date` or `--exclude-domain` → exit 1 (unsupported; upstream may 400).
-- `--category people` with `--start/end-published-date` or `--exclude-domain` → exit 1; `--include-domain` accepts LinkedIn domains only.
+- `--category company|people` with `--start/end-published-date`, `--start/end-crawl-date`, or `--exclude-domain` → exit 1 (unsupported by upstream for these known categories).
 - More than one `--include-text` / `--exclude-text` → exit 1 (single-phrase arrays only).
 - `--offset` / `--page` are not defined (search has no offset pagination).
 - `--stream` without `--output-schema` → `warnings[]`: streaming has no effect; falls back to a single JSON envelope.
@@ -374,9 +373,8 @@ Guards:
 exa-agent similar URL
   --exclude-source-domain
   --category ...               --num-results N
-  --include-domain DOMAIN      --exclude-domain DOMAIN
-  --start/end-published-date   --start/end-crawl-date
-  # content-extraction + freshness flags from `search` apply
+  --text[=N|full]
+  # Remaining /findSimilar schema fields use --body or --set.
 ```
 
 Help banner (stderr): `Deprecated upstream: prefer 'exa-agent search --similar-to URL "..."'. Kept for full API coverage.` Emits a non-fatal `warnings[]` entry on every call.
@@ -412,7 +410,7 @@ exa-agent agent runs create QUERY
   --exclusion JSON|@file       # input.exclusion
   --previous-run-id ID         # continue a completed run (same team)
   --effort auto|minimal|low|medium|high|xhigh   # default auto; `medium` good single-entity default
-  --data-source PROVIDER       # repeatable; max 5 (e.g. similarweb, fiber_ai)
+  --data-source PROVIDER       # repeatable; max 5 (e.g. similarweb, fiber)
   --metadata JSON
   --stream                     # SSE via Accept: text/event-stream
   --beta VALUE
@@ -437,12 +435,12 @@ Guards / notes:
 ### `research` — `/research/v1` (legacy)
 
 ```text
-exa-agent research create QUERY   # [create-POST]; --stream where supported
+exa-agent research create QUERY   # [create-POST]; deprecated compatibility overlay
 exa-agent research list           --limit N --cursor TOKEN --all
 exa-agent research get RESEARCH_ID
 ```
 
-Emits a non-fatal `warnings[]` entry: research v1 is legacy; new work should target `agent`. Kept for breadth.
+Emits a non-fatal `warnings[]` entry: `/research/v1` is retired upstream and retained only as a deprecated compatibility overlay; new work should use `search <query> --type deep-reasoning`.
 
 ### `monitor` — top-level Search Monitors `/monitors`
 
@@ -582,6 +580,10 @@ exa-agent config list [--effective]   get PATH   set PATH VALUE   unset PATH
 exa-agent config path
 exa-agent config profiles list | show NAME | use NAME | create NAME | delete NAME
 exa-agent raw METHOD PATH [--body @file] [--query k=v]
+exa-agent --payment-discovery raw POST /search --body @request.json
+printf '%s' "$PAYMENT_SIGNATURE" | exa-agent --x402-payment-stdin raw POST /search --body @request.json
+printf '%s' "$MPP_AUTHORIZATION" | exa-agent --mpp-payment-stdin raw POST /contents --body @request.json
+# MPP_AUTHORIZATION is the complete `Payment ...` Authorization header value.
 ```
 
 Notes:
@@ -589,6 +591,7 @@ Notes:
 - `doctor` is diagnose-and-suggest only — no `--fix`/undo/backup machinery in v1 (D8). Every `fail`/`warn` finding names its exact fix command. Output is `exa.cli.doctor.v1` (contracts §15) with the **linter-style exit dictionary 0 = healthy / 1 = findings / 4 = refused-unsafe** — deliberately *not* the §6 categories, so a `doctor` exit can't be confused with a real `auth`(2)/`config`(3) failure. The detector ids + exit dictionary are published in `capabilities.doctor`.
 - `auth logout` clears the keyring entry for the active profile (best-effort; no error if absent).
 - Config stores profile metadata and env-var names, never plaintext keys by default (D11).
+- x402/MPP payment pass-through is deliberately raw-only: stdin-only credentials, exact nonstreaming `POST /search` or `POST /contents`, default Exa host only, no generic request headers in the `payment-*` or `x-payment*` namespaces, no wallet/signing. `--payment-discovery` sends one unauthenticated unpaid request to retrieve a 402 challenge; it is rate-limited upstream and is not for polling.
 
 ---
 
@@ -601,7 +604,7 @@ Kept for breadth; each warns on stderr (`warnings[]`) with the recommended repla
 | `similar` / `POST /findSimilar` | Deprecated upstream | `search --similar-to URL` |
 | `--livecrawl never\|always\|fallback\|preferred` | Deprecated | `--max-age-hours N` / `--fresh` / `--cache-only` |
 | `--context` / `--context-max-characters` | Deprecated | `--highlights` / `--text` |
-| `research` / `/research/v1` | Legacy | `agent run` |
+| `research` / `/research/v1` | Deprecated compatibility overlay | `search <query> --type deep-reasoning` |
 | `useAutoprompt` | Removed from schema | not exposed; not a flag |
 | legacy highlight count/sentence sizing | Deprecated | `--highlights N` / `--highlight-max-characters` |
 | `resolvedSearchType`, response `context` | Deprecated upstream fields | ignore; not surfaced as flags |

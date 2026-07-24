@@ -23,15 +23,16 @@ use std::time::Duration;
 use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
 
 use cli::{
-    AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentRunArgs, AgentRunsCmd,
-    AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
-    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MonitorBatchArgs,
-    MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd, PaginationArgs, ResearchCmd,
-    ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs, TeamCmd,
-    WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
-    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
-    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
-    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentDataSource, AgentRunArgs,
+    AgentRunsCmd, AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command,
+    ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy,
+    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
+    PaginationArgs, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd, SearchArgs,
+    SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
+    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
+    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
+    AGENT_DATA_SOURCE_VALUES, SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -45,8 +46,8 @@ use output::{
 use request::RequestOverrides;
 use transport::{
     body_wants_stream, execute_raw_stream_with_request_id, execute_raw_with_request_id,
-    infer_stream_event_type, parse_user_headers, terminal_stream_data, RawExecuteParams,
-    StreamItem, Transport, UreqTransport,
+    infer_stream_event_type, parse_user_headers, terminal_stream_data, PaymentAuth, RawAuth,
+    RawExecuteParams, StreamItem, Transport, UreqTransport,
 };
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
@@ -56,6 +57,10 @@ const DEFAULT_TEXT_MAX_CHARACTERS: u32 = 1_500;
 const DEFAULT_HIGHLIGHTS_MAX_CHARACTERS: u32 = 800;
 const MAX_HIGHLIGHTS_MAX_CHARACTERS: u32 = 10_000;
 const SEARCH_OVERSIZED_DATA_WARNING_BYTES: usize = 10 * 1024;
+
+mod json_canonical {
+    include!("../support/json_canonical.rs");
+}
 
 #[derive(Clone, Copy)]
 struct TypedRoute<'a> {
@@ -184,6 +189,24 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 }
             }
 
+            if matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation)
+                && clap_ctx_strings(&e, ContextKind::InvalidArg)
+                    .iter()
+                    .any(|arg| arg.contains("--data-source") || arg.contains("data_source"))
+            {
+                if let Some((command, query, raw)) = agent_data_source_args() {
+                    if retired_fiber_ai_provider(&raw) {
+                        let err = retired_fiber_ai_provider_error(&command, &query, &raw);
+                        let env = ErrorEnvelope::from_error(&err);
+                        eprintln!(
+                            "{}",
+                            serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+                        );
+                        return err.category() as i32;
+                    }
+                }
+            }
+
             let code = match kind {
                 ErrorKind::UnknownArgument => "unknown_flag",
                 ErrorKind::InvalidSubcommand => "unknown_subcommand",
@@ -281,6 +304,70 @@ fn search_num_results_args() -> Option<(String, String, Option<String>)> {
         search.get_one::<String>("num_results")?.clone(),
         correlation_id,
     ))
+}
+
+fn loosen_data_source_arg(command: clap::Command) -> clap::Command {
+    command.mut_arg("data_source", |arg| {
+        arg.value_parser(clap::builder::StringValueParser::new())
+    })
+}
+
+fn agent_data_source_args() -> Option<(String, String, String)> {
+    let command = Cli::command().mut_subcommand("agent", |agent| {
+        agent
+            .mut_subcommand("run", loosen_data_source_arg)
+            .mut_subcommand("runs", |runs| {
+                runs.mut_subcommand("create", loosen_data_source_arg)
+            })
+    });
+    let matches = command.try_get_matches_from(std::env::args()).ok()?;
+    let agent = matches.subcommand_matches("agent")?;
+    match agent.subcommand()? {
+        ("run", run) => Some((
+            "agent run".to_string(),
+            run.get_one::<String>("query")?.clone(),
+            run.get_many::<String>("data_source")?
+                .find(|provider| retired_fiber_ai_provider(provider))?
+                .clone(),
+        )),
+        ("runs", runs) => {
+            let create = runs.subcommand_matches("create")?;
+            Some((
+                "agent runs create".to_string(),
+                create.get_one::<String>("query")?.clone(),
+                create
+                    .get_many::<String>("data_source")?
+                    .find(|provider| retired_fiber_ai_provider(provider))?
+                    .clone(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn retired_fiber_ai_provider(raw: &str) -> bool {
+    raw.trim()
+        .chars()
+        .filter(|ch| !matches!(ch, '-' | '_'))
+        .collect::<String>()
+        .eq_ignore_ascii_case("fiberai")
+}
+
+fn retired_fiber_ai_provider_error(command: &str, query: &str, raw: &str) -> CliError {
+    CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            format!("invalid data source provider `{raw}`; `fiber_ai` is retired, use `fiber`"),
+        )
+        .with_details(serde_json::json!({
+            "validProviders": AGENT_DATA_SOURCE_VALUES,
+            "didYouMean": "fiber",
+        }))
+        .with_suggestion(format!(
+            "exa-agent {command} {} --data-source fiber",
+            shell_quote(query)
+        )),
+    )
 }
 
 fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Option<CliError> {
@@ -436,6 +523,15 @@ fn first_line(s: &str) -> String {
 
 fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
+    if payment_flow_requested(&cli.globals) && !matches!(cli.command, Command::Raw(_)) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment modes are only supported by raw POST /search and raw POST /contents",
+            )
+            .with_suggestion("exa-agent --payment-discovery raw POST /search --body @request.json"),
+        ));
+    }
     match &cli.command {
         Command::Capabilities(args) => {
             emit_stdout(&capabilities_for(args)?, pretty);
@@ -655,7 +751,7 @@ fn search_filter_suggestion(query: &str, filter: &str) -> String {
                 return format!(
                     "exa-agent search {} --category {}",
                     shell_quote(query),
-                    shell_quote(category)
+                    shell_quote(&category)
                 );
             }
             return format!(
@@ -684,21 +780,23 @@ fn normalize_and_validate_search_body(
     validate_search_num_results_body(body, query)?;
 
     if let Some(raw) = body.get("category").cloned() {
-        let Some(raw) = raw.as_str() else {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "invalid_value",
-                    "search category must be a string; valid categories are company, people, research paper, news, personal site, financial report",
-                )
-                .with_details(serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES }))
-                .with_suggestion("exa-agent schema show search --compact"),
-            ));
-        };
-        let category = canonical_search_category(raw, query)?;
-        body["category"] = serde_json::Value::String(category.to_string());
+        if !raw.is_null() {
+            let Some(raw) = raw.as_str() else {
+                return Err(CliError::Usage(
+                    Diag::new(
+                        "invalid_value",
+                        "search category must be a string; valid categories are company, people, publication, news, personal site, financial report",
+                    )
+                    .with_details(serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES }))
+                    .with_suggestion("exa-agent schema show search --compact"),
+                ));
+            };
+            let category = normalize_category_hint(raw, "search", query)?;
+            body["category"] = serde_json::Value::String(category);
+        }
     }
 
-    validate_search_category_filter_combinations(body, query)?;
+    validate_known_category_unsupported_filters(body, "search", query)?;
     apply_default_search_highlights(body, query);
     Ok(())
 }
@@ -744,6 +842,9 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
     let Some(raw) = body.get("numResults") else {
         return Ok(());
     };
+    if raw.is_null() {
+        return Ok(());
+    }
     if matches!(raw.as_u64(), Some(1..=100)) {
         return Ok(());
     }
@@ -790,42 +891,44 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
     ))
 }
 
-fn canonical_search_category(raw: &str, query: &str) -> Result<&'static str, CliError> {
+fn normalize_category_hint(
+    raw: &str,
+    command: &'static str,
+    subject: &str,
+) -> Result<String, CliError> {
     if let Some(category) = exact_search_category(raw) {
-        return Ok(category);
+        return Ok(category.to_string());
     }
-
-    let did_you_mean = search_category_alias(raw);
-
-    let mut details = serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES });
-    if let Some(suggestion) = did_you_mean {
-        details["didYouMean"] = serde_json::Value::String(suggestion.to_string());
+    if retired_research_paper_category(raw) {
+        return Err(retired_research_paper_category_error(raw, command, subject));
     }
-
-    let suggested_command = if let Some(suggested_category) = did_you_mean {
-        format!(
-            "exa-agent search {} --category {}",
-            shell_quote(query),
-            shell_quote(suggested_category)
-        )
-    } else {
-        "exa-agent schema show search --compact".to_string()
-    };
-
-    Err(CliError::Usage(
-        Diag::new(
-            "invalid_value",
-            format!(
-                "invalid search category `{raw}`; valid categories are company, people, research paper, news, personal site, financial report"
-            ),
-        )
-        .with_details(details)
-        .with_suggestion(suggested_command),
-    ))
+    if raw.trim().is_empty() {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                format!("{command} category must be a non-empty string"),
+            )
+            .with_details(serde_json::json!({ "knownCategories": SEARCH_CATEGORY_VALUES }))
+            .with_suggestion(format!(
+                "exa-agent {command} {} --category {}",
+                shell_quote(subject),
+                shell_quote("publication")
+            )),
+        ));
+    }
+    Ok(raw.to_string())
 }
 
-fn suggested_search_category(raw: &str) -> Option<&'static str> {
-    exact_search_category(raw).or_else(|| search_category_alias(raw))
+fn suggested_search_category(raw: &str) -> Option<String> {
+    if let Some(category) = exact_search_category(raw) {
+        Some(category.to_string())
+    } else if retired_research_paper_category(raw) {
+        Some("publication".to_string())
+    } else if raw.trim().is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
 }
 
 fn exact_search_category(raw: &str) -> Option<&'static str> {
@@ -833,7 +936,7 @@ fn exact_search_category(raw: &str) -> Option<&'static str> {
     match lower.as_str() {
         "company" => Some("company"),
         "people" => Some("people"),
-        "research paper" => Some("research paper"),
+        "publication" => Some("publication"),
         "news" => Some("news"),
         "personal site" => Some("personal site"),
         "financial report" => Some("financial report"),
@@ -841,25 +944,43 @@ fn exact_search_category(raw: &str) -> Option<&'static str> {
     }
 }
 
-fn search_category_alias(raw: &str) -> Option<&'static str> {
+fn retired_research_paper_category(raw: &str) -> bool {
     let lower = raw.trim().to_ascii_lowercase();
     let compact: String = lower
         .chars()
         .filter(|ch| !matches!(ch, ' ' | '-' | '_'))
         .collect();
-    match compact.as_str() {
-        "companys" | "companies" => Some("company"),
-        "person" | "peoples" => Some("people"),
-        "researchpaper" => Some("research paper"),
-        "personalsite" => Some("personal site"),
-        "financialreport" => Some("financial report"),
-        _ => None,
-    }
+    compact == "researchpaper"
 }
 
-fn validate_search_category_filter_combinations(
+fn retired_research_paper_category_error(
+    raw: &str,
+    command: &'static str,
+    subject: &str,
+) -> CliError {
+    CliError::Usage(
+        Diag::new(
+            "invalid_value",
+            format!(
+                "invalid {command} category `{raw}`; `research paper` is retired, use `publication`"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "knownCategories": SEARCH_CATEGORY_VALUES,
+            "didYouMean": "publication",
+        }))
+        .with_suggestion(format!(
+            "exa-agent {command} {} --category {}",
+            shell_quote(subject),
+            shell_quote("publication")
+        )),
+    )
+}
+
+fn validate_known_category_unsupported_filters(
     body: &serde_json::Value,
-    query: &str,
+    command: &'static str,
+    subject: &str,
 ) -> Result<(), CliError> {
     let category = body.get("category").and_then(serde_json::Value::as_str);
     if matches!(category, Some("company" | "people")) {
@@ -867,6 +988,8 @@ fn validate_search_category_filter_combinations(
             ("exclude-domain", "excludeDomains"),
             ("start-published-date", "startPublishedDate"),
             ("end-published-date", "endPublishedDate"),
+            ("start-crawl-date", "startCrawlDate"),
+            ("end-crawl-date", "endCrawlDate"),
         ]
         .into_iter()
         .filter_map(|(flag, key)| json_field_has_value(body, key).then_some(flag))
@@ -886,32 +1009,9 @@ fn validate_search_category_filter_combinations(
                     "unsupportedFilters": unsupported_filters,
                 }))
                 .with_suggestion(format!(
-                    "exa-agent search {} --category {}",
-                    shell_quote(query),
+                    "exa-agent {command} {} --category {}",
+                    shell_quote(subject),
                     category
-                )),
-            ));
-        }
-    }
-
-    if category == Some("people") {
-        let include_domains = domains_from_body(body.get("includeDomains"));
-        if let Some(invalid) = include_domains
-            .iter()
-            .find(|domain| !is_linkedin_domain(domain))
-        {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "invalid_flag_combination",
-                    "`category=people` only supports LinkedIn include-domain filters",
-                )
-                .with_details(serde_json::json!({
-                    "invalidDomain": invalid,
-                    "allowedDomains": ["linkedin.com", "*.linkedin.com"],
-                }))
-                .with_suggestion(format!(
-                    "exa-agent search {} --category people --include-domain linkedin.com",
-                    shell_quote(query)
                 )),
             ));
         }
@@ -928,37 +1028,6 @@ fn json_field_has_value(body: &serde_json::Value, key: &str) -> bool {
         Some(serde_json::Value::Object(values)) => !values.is_empty(),
         Some(_) => true,
     }
-}
-
-fn domains_from_body(value: Option<&serde_json::Value>) -> Vec<String> {
-    match value {
-        Some(serde_json::Value::String(domain)) if !domain.is_empty() => vec![domain.clone()],
-        Some(serde_json::Value::Array(domains)) => domains
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .filter(|domain| !domain.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn is_linkedin_domain(raw: &str) -> bool {
-    let raw = raw.trim().trim_end_matches('.').to_ascii_lowercase();
-    let without_scheme = raw
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(raw.as_str());
-    let authority = without_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(without_scheme)
-        .rsplit('@')
-        .next()
-        .unwrap_or(without_scheme);
-    let host = authority.split(':').next().unwrap_or(authority);
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    host == "linkedin.com" || host.ends_with(".linkedin.com")
 }
 
 fn dispatch_contents(
@@ -1037,9 +1106,37 @@ fn build_similar_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
     let flag_values = normalize_content_flag_values(op, args.into_flag_values(), "")?;
-    let spec = build_typed_spec(op, &flag_values, globals)?;
+    let mut spec = build_typed_spec(op, &flag_values, globals)?;
+    normalize_and_validate_similar_body(&mut spec.body, &args.url)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
+}
+
+fn normalize_and_validate_similar_body(
+    body: &mut serde_json::Value,
+    url: &str,
+) -> Result<(), CliError> {
+    if let Some(raw) = body.get("category").cloned() {
+        if !raw.is_null() {
+            let Some(raw) = raw.as_str() else {
+                return Err(CliError::Usage(
+                    Diag::new("invalid_value", "similar category must be a string")
+                        .with_details(
+                            serde_json::json!({ "knownCategories": SEARCH_CATEGORY_VALUES }),
+                        )
+                        .with_suggestion(format!(
+                            "exa-agent similar {} --category {}",
+                            shell_quote(url),
+                            shell_quote("publication")
+                        )),
+                ));
+            };
+            let category = normalize_category_hint(raw, "similar", url)?;
+            body["category"] = serde_json::Value::String(category);
+        }
+    }
+    validate_known_category_unsupported_filters(body, "similar", url)?;
+    Ok(())
 }
 
 fn dispatch_answer(args: &AnswerArgs, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -1758,7 +1855,9 @@ fn build_agent_run_spec(
         ("data-source", data_sources),
         ("metadata", metadata),
     ];
-    build_typed_spec(op, &flag_values, globals)
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_agent_data_sources_body(&spec.body)?;
+    Ok(spec)
 }
 
 fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError> {
@@ -1779,7 +1878,7 @@ fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError
     Ok(Some(serde_json::Value::Array(rows).to_string()))
 }
 
-fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliError> {
+fn agent_data_sources_json(providers: &[AgentDataSource]) -> Result<Option<String>, CliError> {
     if providers.is_empty() {
         return Ok(None);
     }
@@ -1794,16 +1893,107 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
     }
     let mut sources = Vec::with_capacity(providers.len());
     for provider in providers {
-        let provider = provider.trim();
-        if provider.is_empty() {
-            return Err(CliError::Usage(Diag::new(
-                "invalid_value",
-                "`--data-source` provider must not be empty",
-            )));
-        }
-        sources.push(serde_json::json!({ "provider": provider }));
+        sources.push(serde_json::json!({ "provider": provider.as_str() }));
     }
     Ok(Some(serde_json::Value::Array(sources).to_string()))
+}
+
+fn validate_agent_data_sources_body(body: &serde_json::Value) -> Result<(), CliError> {
+    if let Some(issue) = body
+        .get("dataSources")
+        .and_then(validate_agent_data_sources_issue)
+    {
+        if issue
+            .get("issue")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|issue| issue == "invalid_enum_value")
+        {
+            let message = issue
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| format!("invalid data source provider `{value}`"))
+                .unwrap_or_else(|| "invalid data source provider".to_string());
+            return Err(CliError::Usage(
+                Diag::new("invalid_value", message)
+                    .with_details(issue)
+                    .with_suggestion("exa-agent agent runs create <query> --data-source fiber"),
+            ));
+        }
+        return Err(registry_validation_error(ValidateInputOutcome {
+            valid: serde_json::Value::Bool(false),
+            details: Some(issue),
+            suggested_command: Some(
+                "exa-agent agent runs create <query> --data-source fiber".to_string(),
+            ),
+            note: None,
+        }));
+    }
+    Ok(())
+}
+
+fn validate_agent_data_sources_issue(value: &serde_json::Value) -> Option<serde_json::Value> {
+    if value.is_null() {
+        return Some(serde_json::json!({
+            "issue": "invalid_field_type",
+            "field": "dataSources",
+            "flag": "data-source",
+            "expected": "non-null array of data source objects",
+            "received": value,
+        }));
+    }
+    let Some(items) = value.as_array() else {
+        return Some(serde_json::json!({
+            "issue": "invalid_field_type",
+            "field": "dataSources",
+            "flag": "data-source",
+            "expected": "array of data source objects",
+            "received": value,
+        }));
+    };
+    if items.len() > 5 {
+        return Some(serde_json::json!({
+            "issue": "invalid_value",
+            "field": "dataSources",
+            "flag": "data-source",
+            "message": "field `dataSources` (flag `--data-source`) accepts at most 5 providers",
+            "max": 5,
+            "received": items.len(),
+        }));
+    }
+    for item in items {
+        let Some(provider) = item.get("provider").and_then(serde_json::Value::as_str) else {
+            return Some(serde_json::json!({
+                "issue": "invalid_field_type",
+                "field": "dataSources.provider",
+                "flag": "data-source",
+                "expected": "string provider",
+                "received": item,
+            }));
+        };
+        if provider.trim().is_empty() {
+            return Some(serde_json::json!({
+                "issue": "invalid_value",
+                "field": "dataSources.provider",
+                "flag": "data-source",
+                "message": "`--data-source` provider must not be empty",
+                "received": provider,
+            }));
+        }
+        if !AGENT_DATA_SOURCE_VALUES.contains(&provider) {
+            let mut issue = serde_json::json!({
+                "issue": "invalid_enum_value",
+                "field": "dataSources.provider",
+                "flag": "data-source",
+                "value": provider,
+                "allowed": AGENT_DATA_SOURCE_VALUES,
+            });
+            if retired_fiber_ai_provider(provider) {
+                issue["didYouMean"] = serde_json::Value::String("fiber".to_string());
+            }
+            return Some(issue);
+        }
+    }
+    None
 }
 
 fn dispatch_agent_runs_list(
@@ -5094,7 +5284,7 @@ fn execute_paginated_live<T: Transport>(
                 query_raw: &query_raw,
                 body: typed_wire_body(spec),
                 globals,
-                credential,
+                auth: RawAuth::Api(credential),
                 request_id,
             },
         )?;
@@ -5500,7 +5690,7 @@ fn execute_typed_live<T: Transport>(
             query_raw: &query_raw,
             body,
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
         };
         return match execute_streaming_live(
@@ -5531,7 +5721,7 @@ fn execute_typed_live<T: Transport>(
             query_raw: &query_raw,
             body: body.clone(),
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
         },
     ) {
@@ -6037,8 +6227,8 @@ fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json
     if op.cli_path.first() == Some(&"research") {
         return vec![serde_json::json!({
             "code": "legacy_api",
-            "message": "The /research/v1 API is legacy; prefer `exa-agent agent run` for new work.",
-            "replacement": "exa-agent agent run <query>"
+            "message": "The /research/v1 API is deprecated upstream; prefer `exa-agent search <query> --type deep-reasoning` for new work.",
+            "replacement": "exa-agent search <query> --type deep-reasoning"
         })];
     }
     if !op.deprecated {
@@ -6517,9 +6707,17 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     retry: globals.retry,
                     retry_after: globals.retry_after,
                     idempotency_key: None,
+                    follow_redirects: true,
                 },
             )?;
-            let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
+            let live_spec_bytes =
+                json_canonical::canonical_json_bytes(&response.body).map_err(|err| {
+                    CliError::Upstream(Diag::new(
+                        "upstream_malformed",
+                        format!("live spec response was not valid JSON: {err}"),
+                    ))
+                })?;
+            let live_spec_sha256 = format!("{:x}", Sha256::digest(&live_spec_bytes));
             let current = live_spec_sha256 == registry::EMBEDDED_SPEC_SHA256;
             emit_stdout(
                 &serde_json::json!({
@@ -6560,6 +6758,8 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
+                    "Payment discovery is raw-only: `exa-agent --payment-discovery raw POST /search --body @request.json` sends one unauthenticated default-host challenge request; do not poll with it.",
+                    "x402/MPP payment values are raw-only and stdin-only for exact nonstreaming `POST /search` or `POST /contents` on the default Exa host; generic `--header payment-*`/`x-payment*` request headers are refused.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
             }),
@@ -6738,6 +6938,17 @@ fn validate_registry_input(
 
     for field in op.fields {
         if let Some(value) = body_value_at_path(body, field.body_path) {
+            if op.operation_id == "createAgentRun" && field.flag == "data-source" {
+                if let Some(issue) = validate_agent_data_sources_issue(value) {
+                    return ValidateInputOutcome {
+                        valid: serde_json::Value::Bool(false),
+                        details: Some(issue),
+                        suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                        note: None,
+                    };
+                }
+                continue;
+            }
             if let Some(issue) = validate_enum_field(op, field, value) {
                 return ValidateInputOutcome {
                     valid: serde_json::Value::Bool(false),
@@ -7225,6 +7436,17 @@ fn suggested_validate_input_command(
             shell_quote(&body.to_string())
         );
     }
+    if op.command() == "agent runs create" && field.flag == "data-source" {
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("<query>");
+        return format!(
+            "exa-agent agent runs create {} --data-source fiber",
+            shell_quote(query)
+        );
+    }
 
     format!("exa-agent schema show {} --compact", op.command())
 }
@@ -7600,16 +7822,27 @@ fn dispatch_raw_inner(
 ) -> Result<i32, CliError> {
     reject_placeholder_value(&args.path, "path")?;
     parse_user_headers(&globals.headers)?;
+    validate_raw_payment_stdin_conflicts(globals)?;
+    if payment_flow_requested(globals) {
+        let cfg = config::Config::load()?;
+        transport::payment_base_url(globals, &cfg, &args.path, method)?;
+    }
     if globals.print_request || globals.dry_run {
         let body = raw_body(globals)?;
+        validate_raw_payment_body(globals, &body)?;
         let query = raw_query_preview(&args.query)?;
+        let mut request = serde_json::json!({
+            "method": method,
+            "path": args.path,
+            "query": query,
+            "body": body,
+        });
+        let headers = raw_payment_preview_headers(globals);
+        if !headers.is_empty() {
+            request["headers"] = serde_json::Value::Array(header_preview(&headers));
+        }
         let data = serde_json::json!({
-            "request": {
-                "method": method,
-                "path": args.path,
-                "query": query,
-                "body": body,
-            },
+            "request": request,
             "dryRun": true,
         });
         let hash = transport::data_hash(&data);
@@ -7620,7 +7853,7 @@ fn dispatch_raw_inner(
                 path: &args.path,
                 operation: None,
                 request_id,
-                profile: "default",
+                profile: raw_preview_profile(globals),
                 correlation_id: globals.correlation_id.as_deref(),
                 data,
                 count: None,
@@ -7635,14 +7868,22 @@ fn dispatch_raw_inner(
     }
 
     transport::ensure_network_allowed()?;
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
-    reject_mismatched_credential_scope(&credential)?;
+    let payment_secret = raw_payment_secret(globals)?;
+    let credential = if payment_secret.is_none() && !globals.payment_discovery {
+        let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+        let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+            .map_err(|missing| auth::not_authenticated_error(&missing))?;
+        reject_mismatched_credential_scope(&credential)?;
+        Some(credential)
+    } else {
+        None
+    };
     let body = raw_body(globals)?;
+    validate_raw_payment_body(globals, &body)?;
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
+    let raw_auth = raw_auth(credential.as_ref(), payment_secret.as_ref(), globals);
     if body_wants_stream(&body) {
         return execute_streaming_live(
             &transport,
@@ -7652,7 +7893,7 @@ fn dispatch_raw_inner(
                 query_raw: &args.query,
                 body,
                 globals,
-                credential: &credential,
+                auth: raw_auth,
                 request_id: request_id.to_string(),
             },
             "raw",
@@ -7670,7 +7911,7 @@ fn dispatch_raw_inner(
             query_raw: &args.query,
             body,
             globals,
-            credential: &credential,
+            auth: raw_auth,
             request_id: request_id.to_string(),
         },
     )?;
@@ -7688,6 +7929,8 @@ fn dispatch_raw_inner(
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
+    let payment = payment_requested(globals)
+        .then(|| transport::payment_headers_metadata(&result.response.headers, "receipt"));
     let mut envelope = response_envelope(ResponseEnvelopeArgs {
         command: "raw",
         method: &result.method,
@@ -7703,9 +7946,134 @@ fn dispatch_raw_inner(
         duration_ms: result.duration_ms,
         warnings: &[],
     });
+    if let Some(payment) = payment {
+        envelope["payment"] = payment;
+    }
     apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     emit_response_value(&envelope, globals, pretty);
     Ok(0)
+}
+
+enum RawPaymentSecret {
+    X402(auth::Secret),
+    Mpp(auth::Secret),
+}
+
+fn payment_requested(globals: &GlobalArgs) -> bool {
+    globals.x402_payment_stdin || globals.mpp_payment_stdin
+}
+
+fn payment_flow_requested(globals: &GlobalArgs) -> bool {
+    payment_requested(globals) || globals.payment_discovery
+}
+
+fn raw_auth<'a>(
+    credential: Option<&'a auth::ResolvedCredential>,
+    payment: Option<&'a RawPaymentSecret>,
+    globals: &GlobalArgs,
+) -> RawAuth<'a> {
+    match payment {
+        Some(RawPaymentSecret::X402(signature)) => {
+            RawAuth::Payment(PaymentAuth::X402 { signature })
+        }
+        Some(RawPaymentSecret::Mpp(authorization)) => {
+            RawAuth::Payment(PaymentAuth::Mpp { authorization })
+        }
+        None if globals.payment_discovery => RawAuth::PaymentDiscovery,
+        None => RawAuth::Api(credential.expect("non-payment raw requires API credential")),
+    }
+}
+
+fn raw_preview_profile(globals: &GlobalArgs) -> &'static str {
+    if globals.payment_discovery {
+        "payment-discovery"
+    } else if payment_requested(globals) {
+        "payment"
+    } else {
+        "default"
+    }
+}
+
+fn raw_payment_preview_headers(globals: &GlobalArgs) -> Vec<(String, String)> {
+    if globals.x402_payment_stdin {
+        vec![(
+            "PAYMENT-SIGNATURE".to_string(),
+            redaction::REDACTED.to_string(),
+        )]
+    } else if globals.mpp_payment_stdin {
+        vec![("Authorization".to_string(), redaction::REDACTED.to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn raw_payment_secret(globals: &GlobalArgs) -> Result<Option<RawPaymentSecret>, CliError> {
+    if globals.x402_payment_stdin {
+        let secret = read_secret_stdin("--x402-payment-stdin", "PAYMENT_SIGNATURE")?;
+        validate_payment_secret("--x402-payment-stdin", &secret)?;
+        return Ok(Some(RawPaymentSecret::X402(secret)));
+    }
+    if globals.mpp_payment_stdin {
+        let secret = read_secret_stdin("--mpp-payment-stdin", "MPP_AUTHORIZATION")?;
+        validate_payment_secret("--mpp-payment-stdin", &secret)?;
+        if !secret.expose().starts_with("Payment ") {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    "--mpp-payment-stdin expects the complete `Payment ...` Authorization header value",
+                )
+                .with_suggestion(
+                    "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json",
+                ),
+            ));
+        }
+        return Ok(Some(RawPaymentSecret::Mpp(secret)));
+    }
+    Ok(None)
+}
+
+fn validate_payment_secret(flag: &str, secret: &auth::Secret) -> Result<(), CliError> {
+    if secret.expose().chars().any(char::is_control) {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("{flag} value must be a single header value without control characters"),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_raw_payment_stdin_conflicts(globals: &GlobalArgs) -> Result<(), CliError> {
+    if !payment_requested(globals) {
+        return Ok(());
+    }
+    if globals.body.as_deref() == Some("-") || globals.input.as_deref() == Some("-") {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment stdin modes cannot be combined with another stdin consumer",
+            )
+            .with_suggestion(
+                "use --body @request.json with --x402-payment-stdin or --mpp-payment-stdin",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_payment_body(
+    globals: &GlobalArgs,
+    body: &serde_json::Value,
+) -> Result<(), CliError> {
+    if payment_flow_requested(globals) && body_wants_stream(body) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment modes do not support streaming requests; omit `stream:true`",
+            )
+            .with_suggestion("remove `stream:true` and send a nonstreaming raw payment request"),
+        ));
+    }
+    Ok(())
 }
 
 fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
@@ -7950,7 +8318,7 @@ fn explicit_mode(g: &GlobalArgs) -> Option<OutputMode> {
 mod tests {
     use super::*;
     use crate::auth::{CredentialInput, NoopKeyring};
-    use crate::cli::{SearchCategory, SearchType};
+    use crate::cli::SearchType;
     use crate::registry::{FieldDef, FieldKind, Method, Namespace, OperationDef, Pagination};
     use crate::transport::{FakeTransport, HttpResponse, RawExecuteResult};
     use clap::ValueEnum;
@@ -8595,14 +8963,10 @@ mod tests {
     }
 
     #[test]
-    fn search_registry_enum_members_match_clap_value_enums() {
+    fn search_type_registry_enum_members_match_clap_value_enum() {
         assert_eq!(
             str_set(search_field("type").enum_values),
             clap_value_set::<SearchType>()
-        );
-        assert_eq!(
-            str_set(search_field("category").enum_values),
-            clap_value_set::<SearchCategory>()
         );
     }
 
@@ -8844,6 +9208,66 @@ mod tests {
     }
 
     #[test]
+    fn raw_payment_receipt_metadata_does_not_pollute_data_or_hash() {
+        let upstream = serde_json::json!({
+            "results": [],
+            "payment": {"upstream": true}
+        });
+        let count = transport::primary_count(&upstream);
+        let hash = transport::data_hash(&upstream);
+        let mut envelope = response_envelope(ResponseEnvelopeArgs {
+            command: "raw",
+            method: "POST",
+            path: "/search",
+            operation: None,
+            request_id: "req_payment",
+            profile: "payment",
+            correlation_id: None,
+            data: upstream.clone(),
+            count,
+            data_hash: hash.clone(),
+            retries: 0,
+            duration_ms: 0,
+            warnings: &[],
+        });
+        envelope["payment"] = transport::payment_headers_metadata(
+            &[("PAYMENT-RECEIPT".to_string(), "receipt-token".to_string())],
+            "receipt",
+        );
+
+        assert_eq!(envelope["data"], upstream);
+        assert_eq!(envelope["data"]["payment"]["upstream"], true);
+        assert_eq!(envelope["dataHash"].as_str(), hash.as_deref());
+        assert_eq!(envelope["payment"]["headers"][0]["name"], "PAYMENT-RECEIPT");
+    }
+
+    #[test]
+    fn json_canonicalizer_ignores_object_order_and_whitespace() {
+        let pretty = br#"{
+          "b": [ { "z": 1, "a": 2 } ],
+          "a": { "d": true, "c": null }
+        }"#;
+        let minified = br#"{"a":{"c":null,"d":true},"b":[{"a":2,"z":1}]}"#;
+
+        assert_eq!(
+            json_canonical::canonical_json_bytes(pretty).unwrap(),
+            json_canonical::canonical_json_bytes(minified).unwrap()
+        );
+    }
+
+    #[test]
+    fn committed_public_spec_is_canonical_and_hash_stable() {
+        let bytes = std::fs::read("openapi/exa-openapi.json").unwrap();
+        let canonical = json_canonical::canonical_json_bytes(&bytes).unwrap();
+
+        assert_eq!(canonical, bytes);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&canonical)),
+            registry::EMBEDDED_SPEC_SHA256
+        );
+    }
+
+    #[test]
     fn context_query_limit_counts_chars_not_bytes() {
         let globals = parse_globals(&[]);
         let two_thousand_multibyte = "é".repeat(2_000);
@@ -8949,7 +9373,7 @@ mod tests {
                 url: "https://example.com".into(),
                 num_results: Some(7),
                 exclude_source_domain: true,
-                category: Some(SearchCategory::ResearchPaper),
+                category: Some("publication".into()),
                 text: Some("1500".into()),
             }
             .into_flag_values(),
@@ -8957,7 +9381,7 @@ mod tests {
                 ("url", Some("https://example.com".to_string())),
                 ("num-results", Some("7".to_string())),
                 ("exclude-source-domain", Some("true".to_string())),
-                ("category", Some("research paper".to_string())),
+                ("category", Some("publication".to_string())),
                 ("text", Some("1500".to_string())),
             ]
         );
@@ -9134,7 +9558,7 @@ mod tests {
             assert!(warnings[0]["replacement"]
                 .as_str()
                 .unwrap()
-                .contains("agent run"));
+                .contains("--type deep-reasoning"));
         }
     }
 

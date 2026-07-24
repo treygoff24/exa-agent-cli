@@ -1,3 +1,4 @@
+use exa_agent_cli::cli::{AGENT_DATA_SOURCE_VALUES, SEARCH_CATEGORY_VALUES};
 use exa_agent_cli::registry;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -96,6 +97,58 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
     );
 }
 
+#[test]
+fn search_category_known_suggestions_match_vendored_descriptions() {
+    let specs = load_specs();
+    let cli_values: BTreeSet<String> = SEARCH_CATEGORY_VALUES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    let mut failures = Vec::new();
+    for operation_id in ["search", "findSimilar"] {
+        let values =
+            request_property_enum(&specs, operation_id, "category").unwrap_or_else(|err| {
+                panic!("failed to read {operation_id} category suggestions: {err}")
+            });
+        if values != cli_values {
+            failures.push(format!(
+                "{operation_id} OpenAPI category suggestions {:?} do not match CLI {:?}",
+                values, cli_values
+            ));
+        }
+        let description = request_property_description(&specs, operation_id, "category")
+            .unwrap_or_else(|err| {
+                panic!("failed to read {operation_id} category description: {err}")
+            });
+        if !description.contains("Other strings are accepted") {
+            failures.push(format!(
+                "{operation_id} category description no longer says custom strings are accepted"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "category suggestion parity failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn agent_data_source_values_match_vendored_provider_enum() {
+    let specs = load_specs();
+    let cli_values: BTreeSet<String> = AGENT_DATA_SOURCE_VALUES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    let provider_values = component_schema_enum(&specs, "AgentDataSourceProvider")
+        .expect("AgentDataSourceProvider enum");
+    assert_eq!(provider_values, cli_values);
+    assert!(
+        !provider_values.contains("fiber_ai"),
+        "retired provider fiber_ai must not re-enter the accepted enum"
+    );
+}
+
 fn load_specs() -> Vec<SpecDoc> {
     [
         ("openapi/exa-openapi.json", "exa-openapi"),
@@ -110,6 +163,66 @@ fn load_specs() -> Vec<SpecDoc> {
         .unwrap_or_else(|err| panic!("failed to parse {path}: {err}")),
     })
     .collect()
+}
+
+fn request_property_enum(
+    specs: &[SpecDoc],
+    operation_id: &str,
+    property: &str,
+) -> Result<BTreeSet<String>, String> {
+    for spec in specs {
+        let Some(operation) = find_operation(&spec.value, operation_id) else {
+            continue;
+        };
+        let schema = operation
+            .get("requestBody")
+            .and_then(|body| body.get("content"))
+            .and_then(|content| content.get("application/json"))
+            .and_then(|json| json.get("schema"))
+            .ok_or_else(|| format!("{operation_id} has no JSON requestBody schema"))?;
+        let values = collect_property_enum(&spec.value, schema, property, 0)?;
+        if !values.is_empty() {
+            return Ok(values);
+        }
+        return Err(format!(
+            "{operation_id} JSON requestBody has no enum property `{property}`"
+        ));
+    }
+    Err(format!("operation `{operation_id}` not found"))
+}
+
+fn request_property_description(
+    specs: &[SpecDoc],
+    operation_id: &str,
+    property: &str,
+) -> Result<String, String> {
+    for spec in specs {
+        let Some(operation) = find_operation(&spec.value, operation_id) else {
+            continue;
+        };
+        let schema = operation
+            .get("requestBody")
+            .and_then(|body| body.get("content"))
+            .and_then(|content| content.get("application/json"))
+            .and_then(|json| json.get("schema"))
+            .ok_or_else(|| format!("{operation_id} has no JSON requestBody schema"))?;
+        return collect_property_description(&spec.value, schema, property, 0);
+    }
+    Err(format!("operation `{operation_id}` not found"))
+}
+
+fn component_schema_enum(specs: &[SpecDoc], component: &str) -> Result<BTreeSet<String>, String> {
+    for spec in specs {
+        if let Some(schema) = spec
+            .value
+            .get("components")
+            .and_then(|components| components.get("schemas"))
+            .and_then(|schemas| schemas.get(component))
+        {
+            return collect_string_enums(&spec.value, schema, 0);
+        }
+    }
+    Err(format!("component `{component}` not found"))
 }
 
 fn request_body_shape(
@@ -152,6 +265,131 @@ fn find_operation<'a>(doc: &'a Value, operation_id: &str) -> Option<&'a Value> {
         }
     }
     None
+}
+
+fn collect_property_enum(
+    doc: &Value,
+    schema: &Value,
+    property: &str,
+    depth: usize,
+) -> Result<BTreeSet<String>, String> {
+    if depth > 6 {
+        return Err("requestBody enum resolution exceeded depth limit".to_string());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return collect_property_enum(
+            doc,
+            resolve_schema_ref(doc, reference)?,
+            property,
+            depth + 1,
+        );
+    }
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        if let Some(property_schema) = properties.get(property) {
+            return collect_string_enums(doc, property_schema, depth + 1);
+        }
+    }
+    let mut values = BTreeSet::new();
+    for composition in ["allOf", "oneOf", "anyOf"] {
+        if let Some(parts) = schema.get(composition).and_then(Value::as_array) {
+            for part in parts {
+                values.extend(collect_property_enum(doc, part, property, depth + 1)?);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn collect_property_description(
+    doc: &Value,
+    schema: &Value,
+    property: &str,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > 6 {
+        return Err("requestBody description resolution exceeded depth limit".to_string());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return collect_property_description(
+            doc,
+            resolve_schema_ref(doc, reference)?,
+            property,
+            depth + 1,
+        );
+    }
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        if let Some(property_schema) = properties.get(property) {
+            return collect_description(doc, property_schema, depth + 1);
+        }
+    }
+    for composition in ["allOf", "oneOf", "anyOf"] {
+        if let Some(parts) = schema.get(composition).and_then(Value::as_array) {
+            for part in parts {
+                if let Ok(description) =
+                    collect_property_description(doc, part, property, depth + 1)
+                {
+                    if !description.is_empty() {
+                        return Ok(description);
+                    }
+                }
+            }
+        }
+    }
+    Err(format!("property `{property}` has no description"))
+}
+
+fn collect_description(doc: &Value, schema: &Value, depth: usize) -> Result<String, String> {
+    if depth > 6 {
+        return Err("description schema resolution exceeded depth limit".to_string());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return collect_description(doc, resolve_schema_ref(doc, reference)?, depth + 1);
+    }
+    if let Some(description) = schema.get("description").and_then(Value::as_str) {
+        return Ok(description.to_string());
+    }
+    for composition in ["allOf", "oneOf", "anyOf"] {
+        if let Some(parts) = schema.get(composition).and_then(Value::as_array) {
+            for part in parts {
+                if let Ok(description) = collect_description(doc, part, depth + 1) {
+                    if !description.is_empty() {
+                        return Ok(description);
+                    }
+                }
+            }
+        }
+    }
+    Err("schema has no description".to_string())
+}
+
+fn collect_string_enums(
+    doc: &Value,
+    schema: &Value,
+    depth: usize,
+) -> Result<BTreeSet<String>, String> {
+    if depth > 6 {
+        return Err("enum schema resolution exceeded depth limit".to_string());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return collect_string_enums(doc, resolve_schema_ref(doc, reference)?, depth + 1);
+    }
+    let mut values = BTreeSet::new();
+    if let Some(items) = schema.get("enum").and_then(Value::as_array) {
+        values.extend(
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned),
+        );
+    }
+    for composition in ["allOf", "oneOf", "anyOf"] {
+        if let Some(parts) = schema.get(composition).and_then(Value::as_array) {
+            for part in parts {
+                values.extend(collect_string_enums(doc, part, depth + 1)?);
+            }
+        }
+    }
+    Ok(values)
 }
 
 fn collect_shape(doc: &Value, schema: &Value, depth: usize) -> Result<BodyShape, String> {
@@ -249,6 +487,9 @@ fn known_skips() -> BTreeSet<&'static str> {
         // Docs-only overlay-defined single-witness command; no upstream OpenAPI
         // JSON requestBody schema exists to compare.
         "context",
+        // Deprecated compatibility overlay retained after Exa removed /research/v1
+        // from the live public OpenAPI spec.
+        "ResearchController_createResearch",
     ]
     .into_iter()
     .collect()

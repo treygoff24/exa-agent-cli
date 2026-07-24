@@ -35,10 +35,9 @@ enum ConstraintKind {
 }
 
 const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
+    ("createAgentRun", "data-source", ConstraintKind::Enum),
     ("createAgentRun", "effort", ConstraintKind::Enum),
-    ("findSimilar", "category", ConstraintKind::Enum),
     ("findSimilar", "num-results", ConstraintKind::Range),
-    ("search", "category", ConstraintKind::Enum),
     ("search", "num-results", ConstraintKind::Range),
     ("search", "type", ConstraintKind::Enum),
     (
@@ -289,14 +288,7 @@ fn enum_range_ops_agree_on_verdict_between_validate_input_and_live() {
                 ConstraintKind::Range => "invalid_value",
             };
             let expected_live_issue = match (op.operation_id, field.flag, kind) {
-                // KNOWN two-validator drift (tracked follow-up): search `category` is validated on
-                // the live path by a bespoke normalizer emitting `invalid_value` + a rich
-                // "valid categories are ..." message, while `schema validate-input` uses the generic
-                // registry enum check emitting `invalid_enum_value` + a null message. Both paths
-                // correctly REJECT (the verdict parity asserted below is the load-bearing invariant);
-                // only the code/message differ. Codes are pinned per-path so a deliberate
-                // reconciliation of the two validators updates this line on purpose.
-                ("search", "category", ConstraintKind::Enum) => "invalid_value",
+                ("createAgentRun", "data-source", ConstraintKind::Enum) => "invalid_value",
                 _ => expected_validate_issue,
             };
 
@@ -662,10 +654,17 @@ fn values_for(field: &FieldDef, kind: ConstraintKind) -> (Value, Value) {
                 .enum_values
                 .first()
                 .unwrap_or_else(|| panic!("{} enum field has no values", field.flag));
-            (
-                Value::String((*valid).to_string()),
-                Value::String("__registry_property_invalid_enum__".to_string()),
-            )
+            if field.body_path == "dataSources" {
+                (
+                    serde_json::json!([{ "provider": valid }]),
+                    serde_json::json!([{ "provider": "__registry_property_invalid_enum__" }]),
+                )
+            } else {
+                (
+                    Value::String((*valid).to_string()),
+                    Value::String("__registry_property_invalid_enum__".to_string()),
+                )
+            }
         }
         ConstraintKind::Range => {
             let (min, max) = field.range.expect("range constraint");

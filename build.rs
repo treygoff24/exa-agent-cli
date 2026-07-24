@@ -17,6 +17,10 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+mod json_canonical {
+    include!("support/json_canonical.rs");
+}
+
 const EXA_SPEC: &str = "openapi/exa-openapi.json";
 const ADMIN_SPEC: &str = "openapi/team-management.json";
 const OVERLAY: &str = "openapi/overlay.toml";
@@ -42,6 +46,8 @@ struct OpMeta {
     cursor: Option<String>,
     #[serde(default)]
     defined_by_overlay: bool,
+    #[serde(default)]
+    deprecated: bool,
     #[serde(default)]
     method: Option<String>,
     #[serde(default)]
@@ -145,7 +151,13 @@ fn main() -> Result<()> {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
 
-    for input in ["build.rs", EXA_SPEC, ADMIN_SPEC, OVERLAY] {
+    for input in [
+        "build.rs",
+        "support/json_canonical.rs",
+        EXA_SPEC,
+        ADMIN_SPEC,
+        OVERLAY,
+    ] {
         println!("cargo:rerun-if-changed={input}");
     }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
@@ -174,8 +186,11 @@ fn main() -> Result<()> {
     let admin = parse_spec(&admin_bytes).context("parse admin spec")?;
     let overlay: Overlay = toml::from_str(&overlay_text).context("parse overlay.toml")?;
 
-    // The embedded-spec SHA-256 is computed over the exact public-spec bytes (arch §3).
-    let spec_sha = hex(&Sha256::digest(&exa_bytes));
+    // The embedded public-spec SHA-256 is computed over canonical JSON bytes so live
+    // schema-refresh, vendoring, and builds agree even if upstream changes key order.
+    let canonical_exa_bytes =
+        json_canonical::canonical_json_bytes(&exa_bytes).context("canonicalize exa spec")?;
+    let spec_sha = hex(&Sha256::digest(&canonical_exa_bytes));
 
     let mut rows: Vec<OpRow> = Vec::new();
     for (oid, meta) in &overlay.operations {
@@ -255,7 +270,7 @@ fn resolve(oid: &str, meta: &OpMeta, exa: &SpecInfo, admin: &SpecInfo) -> Result
             meta.api_path
                 .clone()
                 .ok_or_else(|| anyhow!("overlay-defined op {oid} needs `api_path`"))?,
-            false,
+            meta.deprecated,
             meta.source.clone().unwrap_or_else(|| "overlay".into()),
             meta.source_version
                 .clone()
@@ -339,8 +354,8 @@ fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
         }
     }
 
-    if !field.enum_values.is_empty() && field.kind != "str" {
-        return Err(anyhow!("{}: enum_values only valid on str", who()));
+    if !field.enum_values.is_empty() && !matches!(field.kind.as_str(), "str" | "json") {
+        return Err(anyhow!("{}: enum_values only valid on str or json", who()));
     }
     if field.enum_values.iter().any(String::is_empty) {
         return Err(anyhow!("{}: enum_values entries cannot be empty", who()));

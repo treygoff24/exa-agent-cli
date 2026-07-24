@@ -6,8 +6,8 @@
     "method": "POST",
     "path": "/research/v1",
     "operationId": "ResearchController_createResearch",
-    "source": "exa-spec.json",
-    "sourceVersion": "2.0.0"
+    "source": "https://exa.ai/docs/changelog",
+    "sourceVersion": "compat-2026-04"
   },
   "request": {
     "requestId": "req_dry_run",
@@ -34,8 +34,8 @@
   "warnings": [
     {
       "code": "legacy_api",
-      "message": "The /research/v1 API is legacy; prefer `exa-agent agent run` for new work.",
-      "replacement": "exa-agent agent run <query>"
+      "message": "The /research/v1 API is deprecated upstream; prefer `exa-agent search <query> --type deep-reasoning` for new work.",
+      "replacement": "exa-agent search <query> --type deep-reasoning"
     }
   ],
   "diagnostics": {

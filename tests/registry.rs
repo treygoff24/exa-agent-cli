@@ -3,9 +3,10 @@
 
 use clap::{CommandFactory, Parser};
 use exa_agent_cli::cli::Cli;
-use exa_agent_cli::error::error_code_dictionary;
+use exa_agent_cli::error::{error_code_dictionary, error_code_specs};
 use exa_agent_cli::output::envelope::capabilities;
 use exa_agent_cli::registry::{self, Method};
+use std::fs;
 
 /// The `idempotency_sensitive` set equals the contracts §7 create-POST list, exactly (D7).
 #[test]
@@ -107,6 +108,17 @@ fn error_code_dictionary_is_well_formed() {
         assert!(
             code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
             "error code {code:?} is not snake_case"
+        );
+    }
+}
+
+#[test]
+fn contracts_doc_lists_every_published_error_code() {
+    let contracts = fs::read_to_string("docs/v2/contracts.md").expect("read contracts doc");
+    for code in error_code_specs().keys() {
+        assert!(
+            contracts.contains(&format!("| `{code}` |")),
+            "docs/v2/contracts.md is missing published error code `{code}`"
         );
     }
 }

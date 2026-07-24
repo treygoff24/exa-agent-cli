@@ -144,6 +144,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `usage_error` | usage (1) | false | generic parse/usage failure (the remapped clap fallback). |
 | `unknown_flag` | usage (1) | false | unrecognized flag; `details.didYouMean` set when a near match exists. |
 | `unknown_subcommand` | usage (1) | false | unrecognized command; `details.didYouMean` set. |
+| `missing_subcommand` | usage (1) | false | a parent command was passed without a subcommand. |
 | `invalid_value` | usage (1) | false | flag value outside its `ValueEnum`/range; `details.didYouMean` lists valid values. |
 | `invalid_flag_combination` | usage (1) | false | mutually-exclusive or unsupported flag combo. |
 | `missing_required_argument` | usage (1) | false | a required positional/flag was absent. |
@@ -152,6 +153,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `not_authenticated` | auth (2) | false | no credential resolved locally; `details.checked` lists the ladder rungs tried. |
 | `reauth_required` | auth (2) | false | a credential was sent but upstream rejected it (401/403 — revoked/expired/wrong scope). |
 | `key_scope_mismatch` | auth (2) | false | an api key was presented where a service key is required, or vice versa (D4). |
+| `payment_required` | auth (2) | false | upstream returned an x402 or MPP payment challenge. |
 | `config_parse_error` | config (3) | false | config TOML failed to parse. |
 | `unknown_profile` | config (3) | false | `--profile`/`EXA_PROFILE` names a profile that doesn't exist. |
 | `config_invalid` | config (3) | false | a config value is malformed (e.g. bad base-url). |
@@ -159,6 +161,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `upstream_error` | upstream (5) | true | Exa 5xx. |
 | `upstream_malformed` | upstream (5) | false | upstream returned an unparseable/contract-violating body. |
 | `rate_limited` | rate_limit (6) | true | HTTP 429; `details.retryAfterMs` set when `Retry-After` is present. |
+| `credits_exhausted` | rate_limit (6) | false | authenticated Exa account has no remaining credits. |
 | `concurrency_limit` | rate_limit (6) | true | account concurrency cap hit. |
 | `not_found` | not_found (7) | false | resource id does not exist. |
 | `conflict` | conflict (8) | false | resource conflict (e.g. `externalId` exists). |
@@ -167,6 +170,8 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `partial_batch` | partial (10) | false | a batch had mixed success/failure (§11). |
 | `no_input` | no_input (11) | false | required stdin/input was empty or a TTY (§1). |
 | `interrupted` | interrupted (12) | false | SIGINT or a stream broke after partial output (§8). |
+| `not_implemented` | usage (1) | false | command is recognized but not yet wired in this build. |
+| `internal_error` | usage (1) | false | an internal invariant was violated; report as a bug. |
 
 `retryable` here is the **default**; transport may refine it (e.g. an un-keyed create failure is always `retryable: false` regardless of the underlying network class — D7/§7).
 
@@ -312,6 +317,8 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   },
   "errorCodes": {
     "not_authenticated": { "category": "auth", "exit": 2, "retryable": false },
+    "payment_required": { "category": "auth", "exit": 2, "retryable": false },
+    "credits_exhausted": { "category": "rate_limit", "exit": 6, "retryable": false },
     "rate_limited": { "category": "rate_limit", "exit": 6, "retryable": true }
   },
   "doctor": {

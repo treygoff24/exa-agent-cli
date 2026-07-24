@@ -50,7 +50,7 @@ fn search_core_fields_map_and_overrides_keep_precedence() {
         ],
         RequestOverrides {
             body: Some(BodySource::Inline(r#"{"numResults":10,"type":"deep"}"#)),
-            sets: &["category=research paper".into()],
+            sets: &["category=publication".into()],
         },
     )
     .unwrap();
@@ -58,7 +58,7 @@ fn search_core_fields_map_and_overrides_keep_precedence() {
     assert_eq!(spec.body["query"], "typed query");
     assert_eq!(spec.body["numResults"], 10);
     assert_eq!(spec.body["type"], "deep");
-    assert_eq!(spec.body["category"], "research paper");
+    assert_eq!(spec.body["category"], "publication");
 }
 
 #[test]

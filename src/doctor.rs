@@ -738,6 +738,14 @@ fn detect_auth_online(options: &DoctorOptions, ctx: &DoctorCtx) -> Finding {
             format!("credential rejected upstream (HTTP {status})"),
             Some("exa-agent auth login".to_string()),
         ),
+        Some(Ok(AuthProbe::OutOfCredits { status })) => (
+            FindingStatus::Fail,
+            format!(
+                "credential is valid but the Exa account is out of credits (HTTP {status}); \
+                 every billed call will fail until it is topped up at https://dashboard.exa.ai"
+            ),
+            Some("exa-agent auth status --json".to_string()),
+        ),
         Some(Ok(AuthProbe::Inconclusive { status })) => (
             FindingStatus::Warn,
             format!("could not verify credential; upstream returned HTTP {status}"),

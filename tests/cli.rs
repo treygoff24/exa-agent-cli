@@ -253,6 +253,20 @@ fn local_json_server<F>(
 where
     F: FnOnce(String) + Send + 'static,
 {
+    local_json_server_with_status(validate, 200, "OK", response_body)
+}
+
+/// Same harness, with the response status under the test's control — needed to exercise the
+/// error-classification paths (402 billing, 429, …) end to end through the real binary.
+fn local_json_server_with_status<F>(
+    validate: F,
+    status: u16,
+    reason: &'static str,
+    response_body: &'static [u8],
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(String) + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -273,7 +287,7 @@ where
         validate(String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned());
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response_body.len()
         )
         .unwrap();
@@ -2041,14 +2055,80 @@ fn contents_partial_url_failures_warn_and_exit_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["warnings"]
+    let failed = json["warnings"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|warning| warning["code"] == "url_failed"
-            && warning["url"] == "https://partial-b.test"
-            && warning["error"] == serde_json::json!({})));
+        .find(|warning| {
+            warning["code"] == "url_failed" && warning["url"] == "https://partial-b.test"
+        })
+        .expect("per-URL failure warning");
+    // The raw upstream payload is preserved verbatim, empty object and all …
+    assert_eq!(failed["error"], serde_json::json!({}));
+    // … and the fact that upstream gave no reason is stated rather than left as silence.
+    assert_eq!(failed["reason"], "upstream_reason_unavailable");
+
+    let diagnostic = json["contentDiagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "https://partial-b.test")
+        .expect("diagnostic row for the failed URL");
+    assert_eq!(diagnostic["crawl_status"], "error");
+    assert_eq!(diagnostic["error_reason"], "upstream_reason_unavailable");
+
     assert_eq!(json["outcome"], "partial");
+}
+
+/// End-to-end proof of the papercut cluster's root cause: an out-of-credits account must exit 13
+/// with `insufficient_credits`, not exit 1 with `invalid_value`. Exit 1 read as "bad flags" and
+/// sent agents into three or four more doomed retries before they switched research lanes.
+#[test]
+fn search_out_of_credits_exits_billing_not_usage() {
+    let (base_url, server) = local_json_server_with_status(
+        |request_text| assert!(request_text.starts_with("POST /search ")),
+        402,
+        "Payment Required",
+        br#"{"tag":"NO_MORE_CREDITS","message":"You have exceeded your credits limit. Please top up to keep using Exa at dashboard.exa.ai"}"#,
+    );
+    let output = run(&[
+        "search",
+        "rust async runtimes",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(
+        output.status.code(),
+        Some(13),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay empty on error: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "insufficient_credits");
+    assert_eq!(error["error"]["category"], "billing");
+    assert_eq!(error["error"]["exitCode"], 13);
+    assert_eq!(error["error"]["retryable"], false);
+    assert_eq!(error["error"]["httpStatus"], 402);
+
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("out of credits"), "{message}");
+    assert!(message.contains("dashboard.exa.ai"), "{message}");
+    // The upstream tag survives for anything matching on it.
+    assert_eq!(
+        error["error"]["details"]["upstream"]["tag"],
+        "NO_MORE_CREDITS"
+    );
 }
 
 #[test]

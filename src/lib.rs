@@ -222,6 +222,17 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 }
             }
 
+            // clap's own message for a rejected enum value names only the value it refused, so an
+            // agent guessing `--category github` learns nothing about what would have worked and
+            // retries with another guess. Spell the accepted set into the message and details.
+            if matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
+                let valid = clap_ctx_strings(&e, ContextKind::ValidValue);
+                if !valid.is_empty() {
+                    message = format!("{message}; valid values are {}", valid.join(", "));
+                    details.insert("validValues".to_string(), serde_json::json!(valid));
+                }
+            }
+
             let suggested_kind = match kind {
                 ErrorKind::UnknownArgument => Some(ContextKind::SuggestedArg),
                 ErrorKind::InvalidSubcommand => Some(ContextKind::SuggestedSubcommand),
@@ -6436,10 +6447,13 @@ fn append_contents_status_warnings(
             });
             if let Some(command) = contents_status_suggested_command(entry, uses_ids) {
                 warning["suggestedCommand"] = serde_json::Value::String(command);
-                if contents_status_reason(entry).is_none() {
-                    warning["reason"] =
-                        serde_json::Value::String("upstream_reason_unavailable".to_string());
-                }
+            }
+            // Label the missing reason whether or not a fallback command could be built —
+            // an entry with no usable id is exactly the case where the caller most needs to be
+            // told the failure reason was absent rather than unread.
+            if contents_status_reason(entry).is_none() {
+                warning["reason"] =
+                    serde_json::Value::String("upstream_reason_unavailable".to_string());
             }
             warnings.push(warning);
         }
@@ -6667,6 +6681,16 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
             )
             .with_suggestion("exa-agent auth login"),
         )),
+        transport::AuthProbe::OutOfCredits { status } => Err(CliError::Billing(
+            crate::error::Diag::new(
+                "insufficient_credits",
+                format!(
+                    "credential is valid but the Exa account is out of credits (HTTP {status}); \
+                     top up at https://dashboard.exa.ai or switch research lanes — retrying will not help"
+                ),
+            )
+            .with_suggestion("exa-agent auth status --json"),
+        )),
         transport::AuthProbe::Inconclusive { status } => Err(CliError::Upstream(
             crate::error::Diag::new(
                 "probe_inconclusive",
@@ -6823,6 +6847,10 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
                     "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
+                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (HTTP 402). The key is valid and the command was correct, so do not retry and do not re-guess flags: top up at https://dashboard.exa.ai or switch lanes to `parallel-cli` for the rest of the task.",
+                    "`exa-agent auth test --json` and `doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
+                    "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
+                    "There is no `github` search category. Valid --category values are exactly: company, people, research paper, news, personal site, financial report. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."

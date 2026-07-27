@@ -169,6 +169,9 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `partial_batch` | partial (10) | false | a batch had mixed success/failure (§11). |
 | `no_input` | no_input (11) | false | required stdin/input was empty or a TTY (§1). |
 | `interrupted` | interrupted (12) | false | SIGINT or a stream broke after partial output (§8). |
+| `insufficient_credits` | billing (13) | false | HTTP 402 (or any 4xx carrying `NO_MORE_CREDITS`): the account is out of credits. Valid key, valid request, no balance — never classify as `usage`. |
+| `probe_inconclusive` | upstream (5) | true | the credential probe got a response that neither confirms nor denies the key. |
+| `invalid_field_type` | usage (1) | false | a body field was the wrong JSON type for its schema. |
 
 `retryable` here is the **default**; transport may refine it (e.g. an un-keyed create failure is always `retryable: false` regardless of the underlying network class — D7/§7).
 
@@ -191,6 +194,7 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 | 10 | partial | Batch had mixed success/failure. | some content chunks failed |
 | 11 | no_input | Required stdin/input was empty. | `--input -` with empty stdin |
 | 12 | interrupted | SIGINT or stream broke after partial output. | Ctrl-C during `--stream` |
+| 13 | billing | Account credits exhausted (HTTP 402). Not retryable, not a usage error. | `NO_MORE_CREDITS` mid-research |
 
 Keep the dictionary, but agents should branch on `error.code` + `error.retryable` first; the exit code is the coarse fallback. The exit dictionary **and** the `error.code` dictionary (§5.1) are both published in `capabilities --json` (`exitCodes` / `errorCodes`).
 
@@ -310,11 +314,13 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   "exitCodes": {
     "0": "success", "1": "usage", "2": "auth", "3": "config", "4": "network",
     "5": "upstream", "6": "rate_limit", "7": "not_found", "8": "conflict",
-    "9": "safety", "10": "partial", "11": "no_input", "12": "interrupted"
+    "9": "safety", "10": "partial", "11": "no_input", "12": "interrupted",
+    "13": "billing"
   },
   "errorCodes": {
     "not_authenticated": { "category": "auth", "exit": 2, "retryable": false },
-    "rate_limited": { "category": "rate_limit", "exit": 6, "retryable": true }
+    "rate_limited": { "category": "rate_limit", "exit": 6, "retryable": true },
+    "insufficient_credits": { "category": "billing", "exit": 13, "retryable": false }
   },
   "doctor": {
     "exitCodes": { "0": "healthy", "1": "findings", "4": "refused-unsafe" },

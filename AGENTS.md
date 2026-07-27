@@ -90,8 +90,11 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 10 | partial | batch partially succeeded (per-item statuses) |
 | 11 | no_input | required stdin/@file input absent, or a TTY would block |
 | 12 | interrupted | SIGINT / stream interrupted |
+| 13 | billing | 402; the Exa account is out of credits (key is valid, command was fine) |
 
-`error.code` is the finer-grained signal — 27 codes map onto these 13 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+`error.code` is the finer-grained signal — 30 codes map onto these 14 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+
+**Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** A 402 means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane. `exa-agent auth test` and `doctor --online` report this state without spending anything, and are the only credit preflight available: the Exa API publishes no balance endpoint, so exhaustion is observable only as a 402 on the billing-free probe.
 
 Dispatch-level body validation runs before credential resolution and network I/O. Body-level mistakes (unknown fields, out-of-range values, missing required fields, or a malformed `--body`/`--set`) exit `1` as a local `usage` error rather than being sent upstream and returning `5`. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
 

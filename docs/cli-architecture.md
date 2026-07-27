@@ -161,6 +161,7 @@ Failures under `--json` should write an error envelope to stderr and leave stdou
 | 10 | partial | Mixed success/failure in batch. |
 | 11 | no_input | Required stdin/input empty. |
 | 12 | interrupted | SIGINT or broken stream after partial output. |
+| 13 | billing | HTTP 402: account credits exhausted. Valid key, valid request, no balance. |
 
 ## Auth and config
 

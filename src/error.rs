@@ -61,6 +61,8 @@ pub enum CliError {
     NoInput(Diag), // 11
     #[error("{0}")]
     Interrupted(Diag), // 12
+    #[error("{0}")]
+    Billing(Diag), // 13
 }
 
 impl std::fmt::Display for Diag {
@@ -84,6 +86,7 @@ impl CliError {
             CliError::Partial(_) => 10,
             CliError::NoInput(_) => 11,
             CliError::Interrupted(_) => 12,
+            CliError::Billing(_) => 13,
         }
     }
 
@@ -105,7 +108,8 @@ impl CliError {
             | CliError::Safety(d)
             | CliError::Partial(d)
             | CliError::NoInput(d)
-            | CliError::Interrupted(d) => d,
+            | CliError::Interrupted(d)
+            | CliError::Billing(d) => d,
         }
     }
 }
@@ -141,6 +145,11 @@ pub const EXIT_CODES: &[(u8, &str, &str)] = &[
         "required stdin/@file input absent or a TTY would block",
     ),
     (12, "interrupted", "SIGINT / stream interrupted"),
+    (
+        13,
+        "billing",
+        "account credits exhausted; the key is valid but nothing will run until it is topped up",
+    ),
 ];
 
 /// The error-code vocabulary (contracts §5.1), surfaced in `capabilities.errorCodes`.
@@ -290,6 +299,24 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
             ),
         ),
         (
+            "probe_inconclusive",
+            spec(
+                5,
+                "upstream",
+                true,
+                "the credential probe got a response that neither confirms nor denies the key",
+            ),
+        ),
+        (
+            "invalid_field_type",
+            spec(
+                1,
+                "usage",
+                false,
+                "a body field was the wrong JSON type for its schema",
+            ),
+        ),
+        (
             "rate_limited",
             spec(
                 6,
@@ -301,6 +328,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
         (
             "concurrency_limit",
             spec(6, "rate_limit", true, "account concurrency cap was hit"),
+        ),
+        (
+            "insufficient_credits",
+            spec(
+                13,
+                "billing",
+                false,
+                "HTTP 402: the Exa account is out of credits — not a usage error and not retryable; top up or switch research lanes",
+            ),
         ),
         (
             "not_found",

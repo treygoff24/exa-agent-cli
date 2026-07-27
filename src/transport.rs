@@ -659,6 +659,11 @@ pub enum AuthProbe {
     Accepted { status: u16 },
     /// Upstream rejected the credential (401/403).
     Rejected { status: u16 },
+    /// The credential authenticated but the account has no credits left (402). Distinct from
+    /// `Accepted` because every real call will fail, and from `Rejected` because rotating the
+    /// key fixes nothing. This is the only pre-flight credit signal Exa exposes: the API has no
+    /// balance endpoint, but the billing-free probe still gets a 402 when the account is dry.
+    OutOfCredits { status: u16 },
     /// The response neither confirms nor denies the key — a 5xx outage, a 429, or any other
     /// unexpected status. Reported as inconclusive rather than a false "valid".
     Inconclusive { status: u16 },
@@ -688,6 +693,16 @@ pub fn probe_auth<T: Transport>(
         401 | 403 => AuthProbe::Rejected {
             status: resp.status,
         },
+        // Billing is settled before body validation, so a dry account answers the empty `{}`
+        // probe with 402 instead of the usual 400 — the key is fine, the balance is not.
+        // Restricted to non-2xx so a success body can never be read as an exhaustion signal.
+        status
+            if status == 402
+                || (!(200..300).contains(&status)
+                    && body_signals_credit_exhaustion(&resp.body)) =>
+        {
+            AuthProbe::OutOfCredits { status }
+        }
         // Auth passed: a 2xx, or the expected body-validation failure for the empty `{}`.
         200..=299 | 400 | 422 => AuthProbe::Accepted {
             status: resp.status,
@@ -822,7 +837,42 @@ pub struct SendOptions {
     pub idempotency_key: Option<String>,
 }
 
+/// Top-up URL Exa names in its own 402 body; repeated here so the CLI can point at the fix
+/// even when upstream sends an empty or non-JSON body.
+const EXA_TOPUP_URL: &str = "https://dashboard.exa.ai";
+
+/// True when an upstream error body carries Exa's credit-exhaustion signal. Exa sends this as
+/// HTTP 402 with a `NO_MORE_CREDITS` tag, but the tag has also been observed on other 4xx codes,
+/// so the body is sniffed as well as the status. Deliberately narrow: only phrases that can only
+/// mean "the account cannot pay", never a bare "credit" that could appear in a search result.
+fn body_signals_credit_exhaustion(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    text.contains("no_more_credits")
+        || text.contains("exceeded your credits")
+        || text.contains("insufficient credits")
+        || text.contains("out of credits")
+}
+
+/// Build the billing error for a credit-exhausted account. Separate from the generic upstream
+/// path because the message has to do two jobs no generic 4xx message can: say the account is out
+/// of credits (not that the command was wrong), and name the two ways out.
+fn insufficient_credits_error(status: u16, body: &[u8]) -> CliError {
+    let mut diag = upstream_error_diag("insufficient_credits", status, body);
+    diag.message = format!(
+        "Exa account is out of credits (HTTP {status}) — the API key is valid and the command was well-formed, \
+         so retrying or changing flags will not help. Top up at {EXA_TOPUP_URL}, or switch to another research lane."
+    );
+    diag.http_status = Some(status);
+    diag.retryable = false;
+    CliError::Billing(diag.with_suggestion("exa-agent auth status --json"))
+}
+
 pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String)]) -> CliError {
+    // Checked before the status arms: credit exhaustion is a billing state, not a bad request,
+    // a bad key, or a rate limit, whichever 4xx Exa happens to wrap it in.
+    if status == 402 || ((400..500).contains(&status) && body_signals_credit_exhaustion(body)) {
+        return insufficient_credits_error(status, body);
+    }
     match status {
         401 | 403 => {
             let mut diag = upstream_error_diag("reauth_required", status, body);
@@ -1244,6 +1294,16 @@ pub fn contents_diagnostics(data: &Value, requested: &[String]) -> Vec<Value> {
             }
             if let Some(value) = http_status {
                 diagnostic.insert("http_status".to_string(), Value::Number(value.into()));
+            }
+            // Exa sometimes reports a failed crawl with an empty `error: {}`. Without this the
+            // row carries a bare `crawl_status: "error"` and no reason at all, which reads as a
+            // silent dead end. `error_tag`/`http_status` stay exact-upstream-only; the absence
+            // itself gets its own field.
+            if crawl_status == Some("error") && error_tag.is_none() && http_status.is_none() {
+                diagnostic.insert(
+                    "error_reason".to_string(),
+                    Value::String("upstream_reason_unavailable".to_string()),
+                );
             }
             if let Some((value, source)) = content_type {
                 diagnostic.insert("content_type".to_string(), Value::String(value));

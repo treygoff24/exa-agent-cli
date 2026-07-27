@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- New exit code `13` (`billing`) and error code `insufficient_credits` for HTTP 402. An
+  out-of-credits account previously surfaced as `invalid_value` / exit `1` — a *usage* error —
+  so callers read it as "my flags were wrong" and retried with different arguments against an
+  account that could not pay for any of them. The 402 path now says the account is out of
+  credits, names the top-up URL, is marked non-retryable, and is skipped by the retry policy.
+  Credit exhaustion is also detected from a `NO_MORE_CREDITS` body on any 4xx, since the tag has
+  been observed outside 402.
+- `auth test` and `doctor --online` distinguish "credential valid but account out of credits"
+  from both acceptance and rejection. The Exa API publishes no balance endpoint, so this
+  billing-free probe is the only credit preflight available.
+
+### Fixed
+
+- Rejected enum flag values now name the accepted set. `similar --category github` reported only
+  `invalid value 'github' for '--category <CATEGORY>'`; it now lists the six valid categories.
+  (`search --category` already did this.)
+- `contents` rows whose upstream crawl failed with an empty `error: {}` now carry
+  `error_reason: "upstream_reason_unavailable"` in `contentDiagnostics[]` instead of a bare
+  `crawl_status: "error"` with no reason at all. The matching per-URL warning label no longer
+  depends on a fallback command being constructible.
+- `probe_inconclusive` and `invalid_field_type` were emitted but missing from the published
+  `errorCodes` dictionary; both are now declared.
+
 ## 0.4.0 — 2026-07-16
 
 ### Changed

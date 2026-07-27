@@ -379,6 +379,196 @@ fn status_409_mentions_idempotency_conflict_when_body_does() {
     assert_eq!(err.diag().code, "idempotency_conflict");
 }
 
+/// Regression: a 402 used to fall through the `400..=499` arm and surface as `invalid_value` /
+/// exit 1 — a *usage* error. Agents read that as "my flags were wrong" and burned three or four
+/// more calls re-guessing arguments against an account that could not pay for any of them.
+#[test]
+fn status_402_is_billing_not_usage() {
+    let err = classify_http_status(
+        402,
+        br#"{"tag":"NO_MORE_CREDITS","message":"You have exceeded your credits limit. Please top up to keep using Exa at dashboard.exa.ai"}"#,
+        &[],
+    );
+    assert!(matches!(err, CliError::Billing(_)));
+    assert_eq!(err.diag().code, "insufficient_credits");
+    assert_eq!(err.category(), 13);
+    assert_eq!(err.category_name(), "billing");
+    assert_eq!(err.diag().http_status, Some(402));
+
+    // Not retryable: credits do not come back on a timer the way a 429 does.
+    assert!(!err.diag().retryable);
+
+    // The message must say what is actually wrong and what to do about it.
+    let message = err.diag().message.to_ascii_lowercase();
+    assert!(message.contains("out of credits"), "message: {message}");
+    assert!(message.contains("dashboard.exa.ai"), "message: {message}");
+    assert!(
+        message.contains("retrying") || message.contains("will not help"),
+        "message must tell the agent not to retry: {message}"
+    );
+
+    // The exact upstream body is preserved for anything that wants to read the tag.
+    let details = err.diag().details.as_ref().unwrap();
+    assert_eq!(details["upstream"]["tag"], "NO_MORE_CREDITS");
+}
+
+/// Exa has been observed tagging credit exhaustion onto 4xx codes other than 402. The status
+/// alone must not be the only signal, or the misclassification comes straight back.
+#[test]
+fn credit_exhaustion_body_is_billing_on_any_4xx() {
+    let err = classify_http_status(400, br#"{"tag":"NO_MORE_CREDITS"}"#, &[]);
+    assert_eq!(err.diag().code, "insufficient_credits");
+    assert_eq!(err.category(), 13);
+
+    let err = classify_http_status(403, b"You have exceeded your credits limit", &[]);
+    assert_eq!(err.diag().code, "insufficient_credits");
+    assert_eq!(err.category(), 13);
+}
+
+/// The sniff must stay narrow — an ordinary bad request that happens to mention credit is still
+/// a usage error, and a real auth failure is still an auth failure.
+#[test]
+fn credit_sniff_does_not_swallow_ordinary_4xx() {
+    let err = classify_http_status(
+        400,
+        br#"{"message":"invalid query: credit card fraud detection"}"#,
+        &[],
+    );
+    assert!(matches!(err, CliError::Usage(_)));
+    assert_eq!(err.diag().code, "invalid_value");
+
+    let err = classify_http_status(401, br#"{"tag":"INVALID_API_KEY"}"#, &[]);
+    assert!(matches!(err, CliError::Auth(_)));
+    assert_eq!(err.diag().code, "reauth_required");
+}
+
+/// A 402 must not be retried. `should_retry` is private, so this asserts through the public
+/// send path: one canned 402 and one recorded request means no retry happened.
+#[test]
+fn billing_error_is_not_retried() {
+    let fake = FakeTransport::default();
+    fake.push_ok_json(402, r#"{"tag":"NO_MORE_CREDITS"}"#);
+    fake.push_ok_json(200, r#"{"ok":true}"#);
+    let req = HttpRequest {
+        method: "GET".into(),
+        url: "https://api.exa.ai/search".into(),
+        headers: vec![],
+        body: None,
+    };
+    let opts = SendOptions {
+        retry: 3,
+        retry_after: false,
+        idempotency_key: None,
+    };
+    let err = send_with_retry(&fake, &req, &opts).unwrap_err();
+    assert_eq!(err.diag().code, "insufficient_credits");
+    assert_eq!(
+        fake.recorded_requests().len(),
+        1,
+        "a dry account must not be retried"
+    );
+}
+
+/// The wire shape is what agents actually branch on, so pin it: a 402 must reach stderr as a
+/// billing envelope with exit 13, not as a usage envelope with exit 1.
+#[test]
+fn billing_error_envelope_carries_exit_13() {
+    let err = classify_http_status(402, br#"{"tag":"NO_MORE_CREDITS"}"#, &[]);
+    let envelope = exa_agent_cli::output::envelope::ErrorEnvelope::from_error(&err).to_json();
+    assert_eq!(envelope["schema"], "exa.cli.error.v1");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "insufficient_credits");
+    assert_eq!(envelope["error"]["category"], "billing");
+    assert_eq!(envelope["error"]["exitCode"], 13);
+    assert_eq!(envelope["error"]["retryable"], false);
+    assert_eq!(envelope["error"]["httpStatus"], 402);
+}
+
+/// `capabilities` is the generated source of truth agents read; the new codes must be published
+/// there, and every code the binary can emit must be a declared member of the dictionary.
+#[test]
+fn billing_codes_are_published_in_capabilities() {
+    let caps = exa_agent_cli::output::envelope::capabilities();
+    assert_eq!(caps["exitCodes"]["13"]["name"], "billing");
+    assert_eq!(caps["errorCodes"]["insufficient_credits"]["exit"], 13);
+    assert_eq!(
+        caps["errorCodes"]["insufficient_credits"]["category"],
+        "billing"
+    );
+    assert_eq!(
+        caps["errorCodes"]["insufficient_credits"]["retryable"],
+        false
+    );
+    // Previously emitted but undeclared — an agent branching on them found nothing published.
+    assert!(caps["errorCodes"].get("probe_inconclusive").is_some());
+    assert!(caps["errorCodes"].get("invalid_field_type").is_some());
+}
+
+/// Exa reports some failed crawls as `status: "error"` with an empty `error: {}`. Without an
+/// explicit label the row carries a crawl failure and no reason whatsoever, which reads to a
+/// caller as a silent dead end rather than as upstream declining to say why.
+#[test]
+fn contents_diagnostics_label_empty_upstream_error_objects() {
+    let data = serde_json::json!({
+        "statuses": [
+            { "id": "https://cato.org/a", "status": "error", "error": {} },
+            { "id": "https://cato.org/b", "status": "error",
+              "error": { "tag": "CRAWL_NOT_FOUND", "httpStatusCode": 404 } },
+        ],
+        "results": [],
+    });
+    let requested = vec![
+        "https://cato.org/a".to_string(),
+        "https://cato.org/b".to_string(),
+    ];
+    let diagnostics = exa_agent_cli::transport::contents_diagnostics(&data, &requested);
+
+    let empty = &diagnostics[0];
+    assert_eq!(empty["crawl_status"], "error");
+    assert_eq!(empty["content_status"], "crawl_error");
+    assert_eq!(empty["error_reason"], "upstream_reason_unavailable");
+    // Nothing is invented into the exact-upstream fields.
+    assert!(empty.get("error_tag").is_none());
+    assert!(empty.get("http_status").is_none());
+
+    // A row that *does* carry a reason keeps it verbatim and gets no synthetic label.
+    let reported = &diagnostics[1];
+    assert_eq!(reported["error_tag"], "CRAWL_NOT_FOUND");
+    assert_eq!(reported["http_status"], 404);
+    assert!(reported.get("error_reason").is_none());
+}
+
+/// The billing-free auth probe is the only credit preflight Exa's API makes possible — there is
+/// no balance endpoint — so it has to distinguish "key is bad" from "account is dry".
+#[test]
+fn probe_auth_reports_out_of_credits_separately_from_rejection() {
+    let secret = Secret::new("exa-probe-key-123456").unwrap();
+
+    let dry = FakeTransport::default();
+    dry.push_ok_json(402, r#"{"tag":"NO_MORE_CREDITS"}"#);
+    assert_eq!(
+        probe_auth(&dry, "https://api.exa.ai", &secret).unwrap(),
+        AuthProbe::OutOfCredits { status: 402 }
+    );
+
+    // A dry account answering some other 4xx with the credits tag is still out of credits,
+    // not a valid-and-healthy key.
+    let tagged = FakeTransport::default();
+    tagged.push_ok_json(400, r#"{"tag":"NO_MORE_CREDITS"}"#);
+    assert_eq!(
+        probe_auth(&tagged, "https://api.exa.ai", &secret).unwrap(),
+        AuthProbe::OutOfCredits { status: 400 }
+    );
+
+    // The ordinary healthy-key probe response is unchanged.
+    let healthy = FakeTransport::default();
+    healthy.push_ok_json(400, r#"{"tag":"INVALID_REQUEST_BODY"}"#);
+    assert_eq!(
+        probe_auth(&healthy, "https://api.exa.ai", &secret).unwrap(),
+        AuthProbe::Accepted { status: 400 }
+    );
+}
+
 #[test]
 fn create_post_is_not_retried_without_idempotency_key() {
     let fake = FakeTransport::default();

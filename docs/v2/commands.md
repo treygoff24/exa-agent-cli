@@ -36,10 +36,9 @@ exa-agent
 │       ├── events                 # GET    /agent/runs/{id}/events
 │       ├── cancel                 # POST   /agent/runs/{id}/cancel
 │       └── delete                 # DELETE /agent/runs/{id}                [--yes]
-├── research                       # Research API: /research/v1             [legacy; prefer agent]
-│   ├── create                     # POST   /research/v1                    [create-POST]
-│   ├── list                       # GET    /research/v1
-│   └── get                        # GET    /research/v1/{researchId}
+├── research                       # RETIRED upstream (0.5.0): local stub, exits 1 with
+│   │                              #   `research_retired` + replacement `search --type deep-reasoning`
+│   ├── create|list|get            # no network call; absent from capabilities
 ├── websets                        # Websets API: /websets/v0/websets
 │   ├── create                     # POST   /websets/v0/websets                     [create-POST]
 │   ├── list                       # GET    /websets/v0/websets
@@ -62,6 +61,9 @@ exa-agent
 │   │   ├── update                 # PATCH  /websets/v0/websets/{webset}/enrichments/{id}
 │   │   ├── delete                 # DELETE /websets/v0/websets/{webset}/enrichments/{id}    [--yes]
 │   │   └── cancel                 # POST   /websets/v0/websets/{webset}/enrichments/{id}/cancel [--yes]
+│   ├── exports                    # overlay-defined (docs-only, D40/D17 precedent; added 0.5.0)
+│   │   ├── create                 # POST   /websets/v0/websets/{webset}/exports  --format csv|json  [create-POST]
+│   │   └── get                    # GET    /websets/v0/websets/{webset}/exports/{id}
 │   ├── imports
 │   │   ├── create                 # POST   /websets/v0/imports   (returns uploadUrl)        [create-POST]
 │   │   ├── list                   # GET    /websets/v0/imports
@@ -164,8 +166,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
 | `POST /agent/runs/{id}/cancel` | `exa-agent agent runs cancel ID` | Safe; returns terminal run if already done. |
 | `DELETE /agent/runs/{id}` | `exa-agent agent runs delete ID --yes` | Destructive. |
-| `GET/POST /research/v1` | `exa-agent research list/create` | `create` is `[create-POST]`. **Legacy**; warns and points to `agent`. |
-| `GET /research/v1/{id}` | `exa-agent research get ID` | Status read. |
+| `/research/v1` (all verbs) | `exa-agent research …` (stub) | **Retired upstream** (HTTP 410, 2026-08). Local stub errors with `research_retired` and the deep-reasoning replacement; see D40. |
 | `GET/POST /websets/v0/websets` | `exa-agent websets list/create` | `create` is `[create-POST]`. Body-first; `--body @file` + `--set`. |
 | `GET/POST/DELETE /websets/v0/websets/{id}` | `exa-agent websets get/update/delete` | `update` is **POST**, not PATCH. `delete` requires `--yes`. |
 | `POST /websets/v0/websets/{id}/cancel` | `exa-agent websets cancel ID --yes` | Discards running work. |
@@ -173,7 +174,8 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET/DELETE /websets/v0/websets/{w}/items` | `exa-agent websets items list/get/delete` | List: `--limit/--cursor/--all`, `--source-id`. `delete` `--yes`. |
 | `POST/GET/cancel searches` | `exa-agent websets searches create/get/cancel` | `create` is `[create-POST]`. |
 | `POST/GET/PATCH/DELETE/cancel enrichments` | `exa-agent websets enrichments create/get/update/delete/cancel` | `create` is `[create-POST]`. `delete`/`cancel` require `--yes`. |
-| `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl`; `--csv FILE` uploads only when explicit. `delete` `--yes`. |
+| `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl` and a `nextActions` PUT template for the documented upload step (the former `--csv`/`--url` conveniences were removed in 0.5.0 — D40d). `delete` `--yes`. |
+| `POST/GET exports` | `exa-agent websets exports create/get` | Overlay-defined (D40e). `create` requires `--format csv\|json`, is `[create-POST]`, and nextActions → `exports get`. Responses are opaque upstream `data`. |
 | `POST/GET/PATCH/DELETE /websets/v0/monitors` | `exa-agent websets monitors create/list/get/update/delete` | `create` is `[create-POST]`. Distinct from top-level `monitor`. |
 | `GET /websets/v0/monitors/{m}/runs[/id]` | `exa-agent websets monitors runs list/get` | Cursor on list. |
 | `GET /websets/v0/events[/id]` | `exa-agent websets events list/get` | List: cursor, `--type`, `--created-before/after`. |
@@ -506,8 +508,7 @@ exa-agent websets enrichments delete WEBSET ENRICHMENT_ID --yes
 exa-agent websets enrichments cancel WEBSET ENRICHMENT_ID --yes
 
 # imports
-exa-agent websets imports create --source csv --url URL             # [create-POST]; returns uploadUrl
-exa-agent websets imports create --csv FILE                         # convenience: create then upload (explicit only)
+exa-agent websets imports create --set format=csv …                 # [create-POST]; returns uploadUrl + nextActions PUT template (D40d)
 exa-agent websets imports list   --limit N --cursor TOKEN --all
 exa-agent websets imports get    IMPORT_ID
 exa-agent websets imports update IMPORT_ID --set path=value

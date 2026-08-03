@@ -335,7 +335,13 @@ fn ci() -> Result<()> {
             "warnings",
         ],
     )?;
-    run("cargo", &["test", "--workspace", "--locked"])?;
+    // A caller-level EXA_AGENT_NO_NETWORK is meant for the generator steps above; if it
+    // leaks into cargo test it false-fails the loopback/fake-transport suites (pc_7281ca17bc9a).
+    run_without_env(
+        "cargo",
+        &["test", "--workspace", "--locked"],
+        "EXA_AGENT_NO_NETWORK",
+    )?;
     println!("ci: OK");
     Ok(())
 }
@@ -1645,6 +1651,17 @@ fn run_json_value_with_network_guard(
 
 fn run(cmd: &str, args: &[&str]) -> Result<()> {
     run_env(cmd, args, &[])
+}
+
+fn run_without_env(cmd: &str, args: &[&str], removed: &str) -> Result<()> {
+    eprintln!("$ {cmd} {}", args.join(" "));
+    let mut command = Command::new(cmd);
+    command.args(args).env_remove(removed);
+    let status = command.status().with_context(|| format!("spawn {cmd}"))?;
+    if !status.success() {
+        bail!("{cmd} {} failed ({status})", args.join(" "));
+    }
+    Ok(())
 }
 
 fn run_env(cmd: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {

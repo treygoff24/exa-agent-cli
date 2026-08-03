@@ -14,7 +14,6 @@ fn registry_idempotency_matches_contract_create_list() {
         "create-api-key",
         "createAgentRun",
         "createMonitor",
-        "ResearchController_createResearch",
         "imports-create",
         "monitors-create",
         "webhooks-create",
@@ -112,6 +111,7 @@ fn error_code_dictionary_is_well_formed() {
         "concurrency_limit",
         "idempotency_conflict",
         "partial_batch",
+        "research_retired",
     ] {
         assert!(dict.contains_key(expected), "missing {expected}");
     }

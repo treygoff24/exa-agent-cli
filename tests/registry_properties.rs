@@ -11,7 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const EXPECTED_OP_COUNT: usize = 68;
+// Wave 1 removes retired Research; Wave 2 exports will raise this from 65 to 67.
+const EXPECTED_OP_COUNT: usize = 65;
 const MANIFEST: &str = "tests/request_corpus/manifest.toml";
 
 #[derive(Debug, Deserialize)]
@@ -54,7 +55,7 @@ const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
 ];
 
 #[test]
-fn registry_has_68_ops_and_manifest_covers_all() {
+fn registry_has_65_ops_and_manifest_covers_all() {
     let manifest = load_manifest();
     assert_eq!(registry::REGISTRY.len(), EXPECTED_OP_COUNT);
 

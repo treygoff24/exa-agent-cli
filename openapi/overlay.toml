@@ -142,20 +142,6 @@ flag = "webhook-url"
 body_path = "webhook.url"
 kind = "str"
 
-[operations."ResearchController_createResearch"]
-cli_path = "research create"
-namespace = "api"
-idempotency_sensitive = true
-
-[operations."ResearchController_getResearch"]
-cli_path = "research get"
-namespace = "api"
-
-[operations."ResearchController_listResearch"]
-cli_path = "research list"
-namespace = "api"
-cursor = "cursor"
-
 [operations."search"]
 cli_path = "search"
 namespace = "api"
@@ -514,7 +500,7 @@ kind = "bool"
 flag = "category"
 body_path = "category"
 kind = "str"
-enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
+enum_values = ["company", "people", "publication", "news", "personal site", "financial report"]
 
 [[operations."findSimilar".fields]]
 flag = "text"
@@ -555,7 +541,7 @@ enum_values = ["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
 flag = "category"
 body_path = "category"
 kind = "str"
-enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
+enum_values = ["company", "people", "publication", "news", "personal site", "financial report"]
 
 [[operations."search".fields]]
 flag = "text"
@@ -751,12 +737,3 @@ kind = "json"
 flag = "metadata"
 body_path = "metadata"
 kind = "json"
-
-[[operations."ResearchController_createResearch".fields]]
-flag = "query"
-body_path = "instructions"
-kind = "str"
-required = true
-input_kind = "argument"
-input_name = "QUERY"
-arity = { min = 1, max = 1 }

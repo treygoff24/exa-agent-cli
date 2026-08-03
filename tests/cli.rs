@@ -3529,6 +3529,97 @@ fn similar_dry_run_builds_request_body() {
 }
 
 #[test]
+fn category_aliases_coerce_only_on_typed_flags() {
+    for args in [
+        vec![
+            "search",
+            "q",
+            "--category",
+            "publication",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--category",
+            "publication",
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(json["data"]["request"]["body"]["category"], "publication");
+        assert!(!json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "legacy_value_coerced"));
+    }
+
+    for args in [
+        vec![
+            "search",
+            "q",
+            "--category",
+            "research paper",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--category",
+            "research paper",
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(json["data"]["request"]["body"]["category"], "publication");
+        let warning = json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["code"] == "legacy_value_coerced")
+            .expect("legacy category warning");
+        assert_eq!(warning["details"]["field"], "category");
+        assert_eq!(warning["details"]["given"], "research paper");
+        assert_eq!(warning["details"]["sent"], "publication");
+    }
+
+    for args in [
+        vec![
+            "search",
+            "q",
+            "--body",
+            r#"{"category":"research paper"}"#,
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--set",
+            "category=research paper",
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(
+            json["data"]["request"]["body"]["category"],
+            "research paper"
+        );
+        assert!(!json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "legacy_value_coerced"));
+    }
+}
+
+#[test]
 fn team_info_dry_run_builds_get_path() {
     let json = run_ok_json(&["team", "info", "--dry-run", "--print-request", "--compact"]);
     assert_eq!(json["command"], "team info");
@@ -3548,115 +3639,55 @@ fn bare_team_runs_info() {
 }
 
 #[test]
-fn research_dry_run_builds_create_list_and_get_requests() {
-    let create = run_ok_json(&[
-        "research",
-        "create",
-        "legacy topic",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(create["command"], "research create");
-    assert_eq!(create["data"]["request"]["path"], "/research/v1");
+fn research_stub_is_local_and_actionable() {
+    for args in [
+        vec!["capabilities", "--compact"],
+        vec!["schema", "list", "--compact"],
+        vec!["robot-docs", "commands", "--compact"],
+    ] {
+        assert!(
+            !run_ok_json(&args)
+                .to_string()
+                .contains("ResearchController"),
+            "retired Research operations must stay out of generated surfaces"
+        );
+    }
+
+    let create = run(&["research", "create", "legacy topic", "--compact"]);
+    assert_eq!(create.status.code(), Some(1));
+    assert!(create.stdout.is_empty());
+    let stderr = stderr_json(&create);
+    assert_eq!(stderr["error"]["code"], "research_retired");
     assert_eq!(
-        create["data"]["request"]["body"]["instructions"],
-        "legacy topic"
+        stderr["error"]["suggestedCommand"],
+        "exa-agent search \"legacy topic\" --type deep-reasoning"
     );
-    assert_eq!(create["warnings"][0]["code"], "legacy_api");
-
-    let list = run_ok_json(&[
-        "research",
-        "list",
-        "--limit",
-        "10",
-        "--cursor",
-        "cur_abc",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(list["command"], "research list");
-    assert_eq!(list["data"]["request"]["path"], "/research/v1");
     assert_eq!(
-        list["data"]["request"]["query"],
-        serde_json::json!([
-            {"name": "limit", "value": "10"},
-            {"name": "cursor", "value": "cur_abc"}
-        ])
+        stderr["error"]["details"]["replacement"],
+        "exa-agent search --type deep-reasoning"
     );
-    assert_eq!(list["data"]["request"]["body"], serde_json::json!(null));
-    assert_eq!(list["warnings"][0]["code"], "legacy_api");
 
-    let get = run_ok_json(&["research", "get", "research/abc", "--dry-run", "--compact"]);
-    assert_eq!(get["command"], "research get");
-    assert_eq!(
-        get["data"]["request"]["path"],
-        "/research/v1/research%2Fabc"
-    );
-    assert_eq!(get["data"]["request"]["body"], serde_json::json!(null));
-    assert_eq!(get["warnings"][0]["code"], "legacy_api");
-}
-
-#[test]
-fn research_accepts_all_but_rejects_orphaned_pagination_flags_and_create_stream() {
-    let list_all = run_ok_json(&["research", "list", "--all", "--dry-run", "--compact"]);
-    assert_eq!(list_all["command"], "research list");
-    assert_eq!(list_all["data"]["request"]["path"], "/research/v1");
-    assert_eq!(list_all["data"]["request"]["query"], serde_json::json!([]));
-
-    let max_pages = run(&[
-        "research",
-        "list",
-        "--max-pages",
-        "3",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(max_pages.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&max_pages.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
-    assert!(stderr["error"]["suggestedCommand"]
-        .as_str()
-        .unwrap()
-        .contains("--all"));
-
-    let page_delay = run(&[
-        "research",
-        "list",
-        "--page-delay",
-        "100ms",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(page_delay.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&page_delay.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
-
-    let max_pages_zero = run(&[
-        "research",
-        "list",
-        "--all",
-        "--max-pages",
-        "0",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(max_pages_zero.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&max_pages_zero.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_value");
-
-    let create_stream = run(&[
-        "research",
-        "create",
-        "legacy topic",
-        "--stream",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(create_stream.status.code(), Some(1));
-    assert!(create_stream.stdout.is_empty());
-    let stderr: serde_json::Value = serde_json::from_slice(&create_stream.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
-    assert_eq!(stderr["operation"]["path"], "/research/v1");
+    for (args, id) in [
+        (
+            &["research", "get", "research/abc", "--compact"][..],
+            Some("research/abc"),
+        ),
+        (&["research", "list", "--compact"][..], None),
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "research_retired");
+        assert_eq!(
+            stderr["error"]["suggestedCommand"],
+            "exa-agent search --help"
+        );
+        match id {
+            Some(id) => assert_eq!(stderr["error"]["details"]["researchId"], id),
+            None => assert!(stderr["error"]["details"].get("researchId").is_none()),
+        }
+    }
 }
 
 #[test]
@@ -4214,9 +4245,13 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         body["dataSources"],
         serde_json::json!([
             {"provider":"similarweb"},
-            {"provider":"fiber_ai"}
+            {"provider":"fiber"}
         ])
     );
+    assert_eq!(create["warnings"][0]["code"], "legacy_value_coerced");
+    assert_eq!(create["warnings"][0]["details"]["field"], "provider");
+    assert_eq!(create["warnings"][0]["details"]["given"], "fiber_ai");
+    assert_eq!(create["warnings"][0]["details"]["sent"], "fiber");
     assert_eq!(
         body["metadata"],
         serde_json::json!({"ticket":"T1","owner":"ops"})
@@ -4285,6 +4320,73 @@ fn agent_runs_create_rejects_bad_structured_create_fields() {
         .as_str()
         .unwrap()
         .contains("must not be empty"));
+}
+
+#[test]
+fn agent_provider_aliases_coerce_and_set_passes_through() {
+    let canonical = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        "fiber",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        canonical["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"fiber"}])
+    );
+    assert!(!canonical["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "legacy_value_coerced"));
+
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        "particle_news",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"particle"}])
+    );
+    let warning = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "legacy_value_coerced")
+        .expect("legacy provider warning");
+    assert_eq!(warning["details"]["field"], "provider");
+    assert_eq!(warning["details"]["given"], "particle_news");
+    assert_eq!(warning["details"]["sent"], "particle");
+
+    let pass_through = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--set",
+        r#"dataSources=[{"provider":"fiber_ai"}]"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        pass_through["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"fiber_ai"}])
+    );
+    assert!(!pass_through["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "legacy_value_coerced"));
 }
 
 #[cfg(unix)]

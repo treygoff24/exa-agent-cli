@@ -26,10 +26,6 @@ fn similar_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["similar"]).expect("similar op")
 }
 
-fn research_create_op() -> &'static registry::OperationDef {
-    registry::lookup_by_segments(&["research", "create"]).expect("research create op")
-}
-
 fn team_info_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["team", "info"]).expect("team info op")
 }
@@ -146,18 +142,6 @@ fn similar_fields_map_core_flags() {
             "category": "company"
         })
     );
-}
-
-#[test]
-fn research_create_maps_query_to_instructions() {
-    let spec = request::build_body(
-        research_create_op(),
-        &[("query", Some("legacy research topic".into()))],
-    )
-    .unwrap();
-
-    assert_eq!(spec.body["instructions"], "legacy research topic");
-    assert_eq!(spec.op.api_path, "/research/v1");
 }
 
 #[test]

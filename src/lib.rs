@@ -28,12 +28,11 @@ use cli::{
     AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
     ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
     MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
-    PaginationArgs, PresetCmd, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd,
-    SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
-    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
-    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
-    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
-    SEARCH_CATEGORY_VALUES,
+    PaginationArgs, PresetCmd, ResearchCmd, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
+    TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
+    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
+    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
+    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -554,7 +553,17 @@ fn dispatch_search(args: &SearchArgs, globals: &GlobalArgs, pretty: bool) -> Res
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     with_typed_error_context(op, globals, || {
         let spec = build_search_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
+        let warnings = typed_category_alias_warnings(args.category.as_deref(), &spec.body);
+        dispatch_typed_command_with_extras(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                extra_warnings: &warnings,
+                ..LiveExtras::default()
+            },
+        )
     })
 }
 
@@ -709,14 +718,13 @@ fn normalize_and_validate_search_body(
             return Err(CliError::Usage(
                 Diag::new(
                     "invalid_value",
-                    "search category must be a string; valid categories are company, people, research paper, news, personal site, financial report",
+                    "search category must be a string; valid categories are company, people, publication, news, personal site, financial report",
                 )
                 .with_details(serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES }))
                 .with_suggestion("exa-agent schema show search --compact"),
             ));
         };
-        let category = canonical_search_category(raw, query)?;
-        body["category"] = serde_json::Value::String(category.to_string());
+        canonical_search_category(raw, query)?;
     }
 
     validate_search_category_filter_combinations(body, query)?;
@@ -837,7 +845,7 @@ fn canonical_search_category(raw: &str, query: &str) -> Result<&'static str, Cli
         Diag::new(
             "invalid_value",
             format!(
-                "invalid search category `{raw}`; valid categories are company, people, research paper, news, personal site, financial report"
+                "invalid search category `{raw}`; valid categories are company, people, publication, news, personal site, financial report"
             ),
         )
         .with_details(details)
@@ -854,7 +862,7 @@ fn exact_search_category(raw: &str) -> Option<&'static str> {
     match lower.as_str() {
         "company" => Some("company"),
         "people" => Some("people"),
-        "research paper" => Some("research paper"),
+        "publication" | "research paper" => Some("publication"),
         "news" => Some("news"),
         "personal site" => Some("personal site"),
         "financial report" => Some("financial report"),
@@ -871,11 +879,35 @@ fn search_category_alias(raw: &str) -> Option<&'static str> {
     match compact.as_str() {
         "companys" | "companies" => Some("company"),
         "person" | "peoples" => Some("people"),
-        "researchpaper" => Some("research paper"),
+        "researchpaper" => Some("publication"),
         "personalsite" => Some("personal site"),
         "financialreport" => Some("financial report"),
         _ => None,
     }
+}
+
+fn coerce_typed_category(raw: &str) -> String {
+    exact_search_category(raw).unwrap_or(raw).to_string()
+}
+
+fn typed_category_alias_warnings(
+    given: Option<&str>,
+    body: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    if given.is_some_and(|value| value.trim().eq_ignore_ascii_case("research paper"))
+        && body.get("category").and_then(serde_json::Value::as_str) == Some("publication")
+    {
+        return vec![serde_json::json!({
+            "code": "legacy_value_coerced",
+            "message": "legacy category spelling was coerced to the canonical publication value",
+            "details": {
+                "field": "category",
+                "given": given.unwrap_or_default(),
+                "sent": "publication"
+            }
+        })];
+    }
+    Vec::new()
 }
 
 fn validate_search_category_filter_combinations(
@@ -1048,7 +1080,17 @@ fn dispatch_similar(
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
     with_typed_error_context(op, globals, || {
         let spec = build_similar_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
+        let warnings = typed_category_alias_warnings(args.category.as_deref(), &spec.body);
+        dispatch_typed_command_with_extras(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                extra_warnings: &warnings,
+                ..LiveExtras::default()
+            },
+        )
     })
 }
 
@@ -1711,7 +1753,8 @@ fn dispatch_agent_runs_create(
     with_typed_error_context(op, globals, || {
         let spec = build_agent_run_spec(args, globals)?;
         let extra_headers = agent_run_create_headers(args);
-        dispatch_typed_command_with_options(
+        let warnings = typed_provider_alias_warnings(&args.data_source, &spec.body);
+        dispatch_typed_command_with_extras(
             spec,
             globals,
             pretty,
@@ -1721,6 +1764,10 @@ fn dispatch_agent_runs_create(
                 extra_headers: (!extra_headers.is_empty()).then_some(extra_headers.as_slice()),
                 command_override,
                 ..TypedDispatchOptions::default()
+            },
+            LiveExtras {
+                extra_warnings: &warnings,
+                ..LiveExtras::default()
             },
         )
     })
@@ -1815,7 +1862,11 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
     }
     let mut sources = Vec::with_capacity(providers.len());
     for provider in providers {
-        let provider = provider.trim();
+        let provider = match provider.trim() {
+            "fiber_ai" => "fiber",
+            "particle_news" => "particle",
+            provider => provider,
+        };
         if provider.is_empty() {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
@@ -1825,6 +1876,41 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
         sources.push(serde_json::json!({ "provider": provider }));
     }
     Ok(Some(serde_json::Value::Array(sources).to_string()))
+}
+
+fn typed_provider_alias_warnings(
+    given: &[String],
+    body: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let sent = body
+        .get("dataSources")
+        .and_then(serde_json::Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .filter_map(|source| source.get("provider").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    given
+        .iter()
+        .filter_map(|raw| {
+            let (canonical, sent_value) = match raw.trim() {
+                "fiber_ai" => ("fiber", "fiber"),
+                "particle_news" => ("particle", "particle"),
+                _ => return None,
+            };
+            sent.contains(&sent_value).then_some(serde_json::json!({
+                "code": "legacy_value_coerced",
+                "message": format!("legacy data-source provider spelling was coerced to `{canonical}`"),
+                "details": {
+                    "field": "provider",
+                    "given": raw,
+                    "sent": canonical
+                }
+            }))
+        })
+        .collect()
 }
 
 fn dispatch_agent_runs_list(
@@ -1973,65 +2059,16 @@ fn globals_with_extra_headers(globals: &GlobalArgs, extra: &[(String, String)]) 
 
 fn dispatch_research(
     sub: &ResearchCmd,
-    globals: &GlobalArgs,
-    pretty: bool,
+    _globals: &GlobalArgs,
+    _pretty: bool,
 ) -> Result<i32, CliError> {
     match sub {
-        ResearchCmd::Create(args) => dispatch_research_create(args, globals, pretty),
-        ResearchCmd::List(pagination) => dispatch_research_list(pagination, globals, pretty),
-        ResearchCmd::Get { research_id } => dispatch_research_get(research_id, globals, pretty),
+        ResearchCmd::Create(args) => Err(research_retired_error("create", Some(&args.query), None)),
+        ResearchCmd::List(_) => Err(research_retired_error("list", None, None)),
+        ResearchCmd::Get { research_id } => {
+            Err(research_retired_error("get", None, Some(research_id)))
+        }
     }
-}
-
-fn dispatch_research_create(
-    args: &ResearchCreateArgs,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["research", "create"])
-        .expect("research create is in the registry");
-    with_typed_error_context(op, globals, || {
-        if args.stream {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "invalid_flag_combination",
-                    "`research create --stream` is not supported by the upstream create endpoint",
-                )
-                .with_suggestion("exa-agent research create QUERY && exa-agent research get ID"),
-            ));
-        }
-        let spec = build_research_create_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
-    })
-}
-
-fn build_research_create_spec(
-    args: &ResearchCreateArgs,
-    globals: &GlobalArgs,
-) -> Result<request::RequestSpec, CliError> {
-    let op = registry::lookup_by_segments(&["research", "create"])
-        .expect("research create is in the registry");
-    let flag_values = [("query", Some(args.query.clone()))];
-    build_typed_spec(op, &flag_values, globals)
-}
-
-fn dispatch_research_list(
-    pagination: &PaginationArgs,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op =
-        registry::lookup_by_segments(&["research", "list"]).expect("research list is in registry");
-    with_typed_error_context(op, globals, || {
-        validate_cursor_pagination(pagination)?;
-        let spec = build_typed_spec(op, &[], globals)?;
-        let query = pagination_query(pagination);
-        if pagination.all && !(globals.print_request || globals.dry_run) {
-            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None, &[])
-        } else {
-            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
-        }
-    })
 }
 
 fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliError> {
@@ -2041,13 +2078,13 @@ fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliErro
                 "invalid_flag_combination",
                 "`--max-pages` and `--page-delay` require `--all` on cursor-paginated list commands",
             )
-            .with_suggestion("exa-agent research list --all --max-pages 3"),
+            .with_suggestion("exa-agent websets events list --all --max-pages 3"),
         ));
     }
     if pagination.max_pages == Some(0) {
         return Err(CliError::Usage(
             Diag::new("invalid_value", "--max-pages must be at least 1")
-                .with_suggestion("exa-agent research list --all --max-pages 1"),
+                .with_suggestion("exa-agent websets events list --all --max-pages 1"),
         ));
     }
     if let Some(raw) = &pagination.page_delay {
@@ -2056,18 +2093,39 @@ fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliErro
     Ok(())
 }
 
-fn dispatch_research_get(
-    research_id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op =
-        registry::lookup_by_segments(&["research", "get"]).expect("research get is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("researchId", research_id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+fn research_retired_error(verb: &str, query: Option<&str>, research_id: Option<&str>) -> CliError {
+    let mut details = serde_json::json!({
+        "replacement": "exa-agent search --type deep-reasoning"
+    });
+    if let Some(research_id) = research_id {
+        details["researchId"] = serde_json::Value::String(research_id.to_string());
+    }
+    let suggested = match verb {
+        "create" => format!(
+            "exa-agent search {} --type deep-reasoning",
+            shell_double_quote(query.unwrap_or_default())
+        ),
+        _ => "exa-agent search --help".to_string(),
+    };
+    CliError::Usage(
+        Diag::new(
+            "research_retired",
+            "the Exa Research API is retired; use search --type deep-reasoning",
+        )
+        .with_details(details)
+        .with_suggestion(suggested),
+    )
+}
+
+fn shell_double_quote(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
+    )
 }
 
 fn dispatch_monitor(sub: &MonitorCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -4481,7 +4539,7 @@ fn parse_page_delay(raw: &str) -> Result<Duration, CliError> {
                 "invalid_value",
                 "--page-delay expects a duration like 250ms or 1s",
             )
-            .with_suggestion("exa-agent research list --all --page-delay 250ms"),
+            .with_suggestion("exa-agent websets events list --all --page-delay 250ms"),
         )
     })
 }
@@ -4597,6 +4655,9 @@ fn normalize_content_flag_values(
                 (_, "text", Some(raw)) => Some(normalize_text_flag(op, &raw)?),
                 ("search", "highlights", Some(raw)) => {
                     Some(normalize_highlights_flag(&raw, query)?)
+                }
+                ("search", "category", Some(raw)) | ("similar", "category", Some(raw)) => {
+                    Some(coerce_typed_category(&raw))
                 }
                 (_, _, value) => value,
             };
@@ -5037,7 +5098,7 @@ fn dispatch_paginated_typed_command(
                 "invalid_flag_combination",
                 "`--raw` cannot be combined with `--all`; request JSON or NDJSON pages instead",
             )
-            .with_suggestion("exa-agent research list --all --ndjson"),
+            .with_suggestion(format!("exa-agent {} --all --ndjson", spec.op.command())),
         ));
     }
     transport::ensure_network_allowed()?;
@@ -5933,7 +5994,6 @@ fn should_write_pending_run(
 fn pending_recovery_command(op: &'static registry::OperationDef) -> String {
     match op.command().as_str() {
         "agent runs create" => "exa-agent agent runs list --limit 10".to_string(),
-        "research create" => "exa-agent research list --limit 10".to_string(),
         other => format!("exa-agent {other} --idempotency-key <stable-key>"),
     }
 }
@@ -6116,13 +6176,6 @@ fn stream_output_mode_from_env(
 }
 
 fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json::Value> {
-    if op.cli_path.first() == Some(&"research") {
-        return vec![serde_json::json!({
-            "code": "legacy_api",
-            "message": "The /research/v1 API is legacy; prefer `exa-agent agent run` for new work.",
-            "replacement": "exa-agent agent run <query>"
-        })];
-    }
     if !op.deprecated {
         return Vec::new();
     }
@@ -6850,7 +6903,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (HTTP 402). The key is valid and the command was correct, so do not retry and do not re-guess flags: top up at https://dashboard.exa.ai or switch lanes to `parallel-cli` for the rest of the task.",
                     "`exa-agent auth test --json` and `doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
                     "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
-                    "There is no `github` search category. Valid --category values are exactly: company, people, research paper, news, personal site, financial report. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
+                    "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
@@ -6877,6 +6930,11 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 }).collect::<Vec<_>>(),
                 "errorCodes": error_codes_json(),
                 "warningCodes": [
+                    {
+                        "code": "legacy_value_coerced",
+                        "exit": 0,
+                        "description": "a typed flag accepted a legacy enum spelling and sent its canonical value; details identify field, given, and sent"
+                    },
                     {
                         "code": "url_failed",
                         "exit": 0,
@@ -7610,6 +7668,14 @@ fn validate_enum_field(
     value: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let raw = value.as_str()?;
+    if matches!(op.command().as_str(), "search" | "similar")
+        && field.flag == "category"
+        && raw.trim().eq_ignore_ascii_case("research paper")
+    {
+        // --body/--set are explicit pass-through escape hatches. They may retain
+        // the legacy upstream spelling, but typed flags are normalized earlier.
+        return None;
+    }
     let allowed = enum_values_for_field(op, field)?;
     let normalized = raw.trim().to_ascii_lowercase();
     if allowed
@@ -8915,66 +8981,6 @@ mod tests {
     }
 
     #[test]
-    fn paginated_research_list_follows_next_cursor() {
-        let fake = FakeTransport::default();
-        fake.push_ok_json(
-            200,
-            r#"{"data":[{"researchId":"r1"}],"hasMore":true,"nextCursor":"cur2"}"#,
-        );
-        fake.push_ok_json(
-            200,
-            r#"{"data":[{"researchId":"r2"}],"hasMore":false,"nextCursor":null}"#,
-        );
-        let globals = parse_globals(&[
-            "--format",
-            "json",
-            "--api-key",
-            "test-key-abcdef12",
-            "--base-url",
-            "https://example.test",
-        ]);
-        let op = registry::lookup_by_segments(&["research", "list"]).unwrap();
-        let spec = request::build_body(op, &[]).unwrap();
-        let credential = auth::resolve_api_credential(
-            &CredentialInput {
-                explicit: Some("test-key-abcdef12".into()),
-                ..Default::default()
-            },
-            &NoopKeyring,
-        )
-        .unwrap();
-        let pagination = PaginationArgs {
-            limit: Some(1),
-            all: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            execute_paginated_live(
-                &fake,
-                &spec,
-                PaginatedExecution {
-                    globals: &globals,
-                    credential: &credential,
-                    pretty: false,
-                    pagination: &pagination,
-                    route: PaginatedRoute {
-                        path_override: None,
-                        static_query: &[],
-                    },
-                },
-            )
-            .unwrap(),
-            0
-        );
-        let recorded = fake.recorded_requests();
-        assert_eq!(recorded.len(), 2);
-        assert!(recorded[0].url.ends_with("/research/v1?limit=1"));
-        assert!(recorded[1].url.contains("limit=1"));
-        assert!(recorded[1].url.contains("cursor=cur2"));
-    }
-
-    #[test]
     fn golden_pending_run_record() {
         let _pending_lock = PENDING_TEST_LOCK.lock().unwrap();
         let pending_path = std::env::temp_dir().join(format!(
@@ -9565,7 +9571,7 @@ mod tests {
                 url: "https://example.com".into(),
                 num_results: Some(7),
                 exclude_source_domain: true,
-                category: Some(SearchCategory::ResearchPaper),
+                category: Some("publication".into()),
                 text: Some("1500".into()),
             }
             .into_flag_values(),
@@ -9573,7 +9579,7 @@ mod tests {
                 ("url", Some("https://example.com".to_string())),
                 ("num-results", Some("7".to_string())),
                 ("exclude-source-domain", Some("true".to_string())),
-                ("category", Some("research paper".to_string())),
+                ("category", Some("publication".to_string())),
                 ("text", Some("1500".to_string())),
             ]
         );
@@ -9736,30 +9742,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("/findSimilar"));
-    }
-
-    #[test]
-    fn research_commands_emit_legacy_api_warning() {
-        let create = registry::lookup_by_segments(&["research", "create"]).unwrap();
-        let list = registry::lookup_by_segments(&["research", "list"]).unwrap();
-        let get = registry::lookup_by_segments(&["research", "get"]).unwrap();
-        for op in [create, list, get] {
-            let warnings = typed_command_warnings(op);
-            assert_eq!(warnings.len(), 1);
-            assert_eq!(warnings[0]["code"], "legacy_api");
-            assert!(warnings[0]["replacement"]
-                .as_str()
-                .unwrap()
-                .contains("agent run"));
-        }
-    }
-
-    #[test]
-    fn substitute_path_encodes_template_segments() {
-        assert_eq!(
-            substitute_path("/research/v1/{researchId}", &[("researchId", "abc/def")]),
-            "/research/v1/abc%2Fdef"
-        );
     }
 
     fn envelope_with_data(data: serde_json::Value) -> serde_json::Value {

@@ -56,15 +56,6 @@ argv = ["monitor", "trigger", "monitor_abc123"]
 [ops.updateMonitor]
 argv = ["monitor", "update", "monitor_abc123", "--status", "paused"]
 
-[ops.ResearchController_createResearch]
-argv = ["research", "create", "Analyze AI news"]
-
-[ops.ResearchController_getResearch]
-argv = ["research", "get", "research_abc123"]
-
-[ops.ResearchController_listResearch]
-argv = ["research", "list", "--limit", "5"]
-
 [ops.search]
 argv = ["search", "hello world", "--num-results", "5"]
 

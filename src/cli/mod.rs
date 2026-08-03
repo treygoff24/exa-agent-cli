@@ -71,8 +71,7 @@ pub const SEARCH_TYPE_VALUES: &[&str] = &[
 pub enum SearchCategory {
     Company,
     People,
-    #[value(name = "research paper")]
-    ResearchPaper,
+    Publication,
     News,
     #[value(name = "personal site")]
     PersonalSite,
@@ -83,7 +82,7 @@ pub enum SearchCategory {
 pub const SEARCH_CATEGORY_VALUES: &[&str] = &[
     "company",
     "people",
-    "research paper",
+    "publication",
     "news",
     "personal site",
     "financial report",
@@ -94,7 +93,7 @@ impl SearchCategory {
         match self {
             SearchCategory::Company => "company",
             SearchCategory::People => "people",
-            SearchCategory::ResearchPaper => "research paper",
+            SearchCategory::Publication => "publication",
             SearchCategory::News => "news",
             SearchCategory::PersonalSite => "personal site",
             SearchCategory::FinancialReport => "financial report",
@@ -476,7 +475,7 @@ pub struct SearchArgs {
     pub r#type: Option<SearchType>,
     /// Result category.
     ///
-    /// Valid values: company, people, research paper, news, personal site, financial report.
+    /// Valid values: company, people, publication, news, personal site, financial report.
     #[arg(
         long,
         value_name = "CATEGORY",
@@ -610,8 +609,12 @@ pub struct SimilarArgs {
     pub num_results: Option<u32>,
     #[arg(long)]
     pub exclude_source_domain: bool,
-    #[arg(long, value_enum, ignore_case = true)]
-    pub category: Option<SearchCategory>,
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        value_parser = crate::registry::permissive_enum_string_value_parser(SEARCH_CATEGORY_VALUES)
+    )]
+    pub category: Option<String>,
     /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full for uncapped.
     #[arg(
         long,
@@ -629,8 +632,8 @@ fn similar_num_results_flag(value: &Option<u32>) -> Option<String> {
     value.map(|n| n.to_string())
 }
 
-fn similar_category_flag(value: &Option<SearchCategory>) -> Option<String> {
-    value.map(|category| category.as_str().to_string())
+fn similar_category_flag(value: &Option<String>) -> Option<String> {
+    value.clone()
 }
 
 impl SimilarArgs {

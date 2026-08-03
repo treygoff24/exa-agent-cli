@@ -73,7 +73,7 @@ fn corpus_matches_goldens() {
     let manifest = load_manifest();
     let allowed = load_allowed_diffs();
 
-    // Aggregate failures across all 68 ops so a wave that breaks several surfaces them in one
+    // Aggregate failures across all 65 ops so a wave that breaks several surfaces them in one
     // run, rather than one iterate-fix-rerun cycle per op.
     let mut failures: Vec<String> = Vec::new();
     for op in registry::REGISTRY {

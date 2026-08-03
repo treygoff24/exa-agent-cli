@@ -179,19 +179,6 @@ fn modeled_live_invalid_inputs_fail_locally() {
                 ("expected", Str("string")),
             ],
         },
-        InvalidCase {
-            name: "research create missing instructions",
-            args: &[
-                "research",
-                "create",
-                "test query",
-                "--set",
-                "instructions=null",
-                "--compact",
-            ],
-            code: "missing_required_field",
-            details: &[("field", Str("instructions")), ("flag", Str("query"))],
-        },
     ];
 
     for case in cases {

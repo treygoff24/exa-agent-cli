@@ -239,7 +239,6 @@ fn positional_required_allowlist(operation_id: &str) -> &'static [&'static str] 
         // sourced required body properties; never use this to silence a real miss.
         "answer" | "createAgentRun" | "search" => &["query"],
         "findSimilar" => &["url"],
-        "ResearchController_createResearch" => &["instructions"],
         _ => &[],
     }
 }

@@ -317,6 +317,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
             ),
         ),
         (
+            "research_retired",
+            spec(
+                1,
+                "usage",
+                false,
+                "the upstream Research API is retired; use search --type deep-reasoning",
+            ),
+        ),
+        (
             "rate_limited",
             spec(
                 6,

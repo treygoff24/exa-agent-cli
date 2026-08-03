@@ -42,7 +42,7 @@ exa-agent
 ├── websets                        # Websets API: /websets/v0/websets
 │   ├── create                     # POST   /websets/v0/websets                     [create-POST]
 │   ├── list                       # GET    /websets/v0/websets
-│   ├── get                        # GET    /websets/v0/websets/{id}
+│   ├── get                        # GET    /websets/v0/websets/{id}   [--expand items → ?expand=items, 0.5.0]
 │   ├── update                     # POST   /websets/v0/websets/{id}   (POST, not PATCH)
 │   ├── delete                     # DELETE /websets/v0/websets/{id}                [--yes]
 │   ├── cancel                     # POST   /websets/v0/websets/{id}/cancel         [--yes]

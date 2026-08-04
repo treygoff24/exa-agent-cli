@@ -17,7 +17,7 @@ pub mod request;
 pub mod stream;
 pub mod transport;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
@@ -29,10 +29,11 @@ use cli::{
     ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
     MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
     PaginationArgs, PresetCmd, ResearchCmd, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
-    TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
-    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
-    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
-    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    TeamCmd, WebsetEnrichmentFormat, WebsetExportFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsExportsCmd, WebsetsGetArgs, WebsetsImportsCmd, WebsetsListArgs,
+    WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs,
+    WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs,
+    WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -131,7 +132,8 @@ fn handle_clap_error(e: clap::Error) -> i32 {
     use clap::error::{ContextKind, ErrorKind};
     match e.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-            print!("{e}");
+            let text = public_clap_text(e.to_string());
+            print!("{text}");
             0
         }
         kind => {
@@ -194,7 +196,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 _ => "invalid_value",
             };
             let mut details = serde_json::Map::new();
-            let mut message = first_line(&e.to_string());
+            let mut message = public_clap_text(first_line(&e.to_string()));
             let mut suggestion = None;
 
             if kind == ErrorKind::UnknownArgument
@@ -211,6 +213,14 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     serde_json::Value::String("URLS".to_string()),
                 );
                 suggestion = Some("exa-agent contents https://exa.ai [URL...]".to_string());
+            }
+
+            if kind == ErrorKind::UnknownArgument
+                && (message.contains("--csv") || message.contains("--url"))
+                && e.to_string().contains("imports create")
+            {
+                message = "websets imports create no longer accepts --csv or --url; use the documented upload flow".to_string();
+                suggestion = Some("exa-agent websets imports create --help".to_string());
             }
 
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
@@ -276,6 +286,15 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             );
             err.category() as i32
         }
+    }
+}
+
+fn public_clap_text(text: String) -> String {
+    if text.contains("websets exports create") {
+        text.replace("--export-format", "--format")
+            .replace("<EXPORT_FORMAT>", "<FORMAT>")
+    } else {
+        text
     }
 }
 
@@ -2762,7 +2781,7 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
     match sub {
         WebsetsCmd::Create(args) => dispatch_websets_create(args, globals, pretty),
         WebsetsCmd::List(args) => dispatch_websets_list(args, globals, pretty),
-        WebsetsCmd::Get { id } => dispatch_websets_get(id, globals, pretty),
+        WebsetsCmd::Get(args) => dispatch_websets_get(args, globals, pretty),
         WebsetsCmd::Update { id } => dispatch_websets_update(id, globals, pretty),
         WebsetsCmd::Delete { id } => dispatch_websets_delete(id, globals, pretty),
         WebsetsCmd::Cancel { id } => dispatch_websets_cancel(id, globals, pretty),
@@ -2770,6 +2789,7 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
         WebsetsCmd::Items { sub } => dispatch_websets_items(sub, globals, pretty),
         WebsetsCmd::Searches { sub } => dispatch_websets_searches(sub, globals, pretty),
         WebsetsCmd::Enrichments { sub } => dispatch_websets_enrichments(sub, globals, pretty),
+        WebsetsCmd::Exports { sub } => dispatch_websets_exports(sub, globals, pretty),
         WebsetsCmd::Imports { sub } => dispatch_websets_imports(sub, globals, pretty),
         WebsetsCmd::Monitors { sub } => dispatch_websets_monitors(sub, globals, pretty),
         WebsetsCmd::Events { sub } => dispatch_websets_events(sub, globals, pretty),
@@ -2947,11 +2967,79 @@ fn dispatch_websets_list(
     })
 }
 
-fn dispatch_websets_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_websets_get(
+    args: &WebsetsGetArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["websets", "get"]).expect("websets get is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
+        let path = checked_substitute_path(op.api_path, &[("id", args.id.as_str())])?;
+        let query = args
+            .expand
+            .map(|expand| vec![("expand".to_string(), expand.as_str().to_string())])
+            .unwrap_or_default();
+        dispatch_typed_command_routed(
+            spec,
+            globals,
+            pretty,
+            Some(path.as_str()),
+            &query,
+            false,
+            None,
+        )
+    })
+}
+
+fn dispatch_websets_exports(
+    sub: &WebsetsExportsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    match sub {
+        WebsetsExportsCmd::Create {
+            webset_id,
+            export_format,
+        } => dispatch_websets_exports_create(webset_id, *export_format, globals, pretty),
+        WebsetsExportsCmd::Get {
+            webset_id,
+            export_id,
+        } => dispatch_websets_exports_get(webset_id, export_id, globals, pretty),
+    }
+}
+
+fn dispatch_websets_exports_create(
+    webset_id: &str,
+    format: WebsetExportFormat,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "exports", "create"])
+        .expect("websets exports create is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(
+            op,
+            &[("format", Some(format.as_str().to_string()))],
+            globals,
+        )?;
+        let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
+        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    })
+}
+
+fn dispatch_websets_exports_get(
+    webset_id: &str,
+    export_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "exports", "get"])
+        .expect("websets exports get is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(op, &[], globals)?;
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", export_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3458,13 +3546,9 @@ fn dispatch_websets_imports(
     pretty: bool,
 ) -> Result<i32, CliError> {
     match sub {
-        WebsetsImportsCmd::Create { source, url, csv } => dispatch_websets_imports_create(
-            source.as_deref(),
-            url.as_deref(),
-            csv.as_deref(),
-            globals,
-            pretty,
-        ),
+        WebsetsImportsCmd::Create { source } => {
+            dispatch_websets_imports_create(source.as_deref(), globals, pretty)
+        }
         WebsetsImportsCmd::List(pagination) => {
             dispatch_websets_imports_list(pagination, globals, pretty)
         }
@@ -3482,8 +3566,6 @@ fn dispatch_websets_imports(
 
 fn build_websets_imports_create_spec(
     source: Option<&str>,
-    url: Option<&str>,
-    csv: Option<&str>,
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     if source.is_some_and(|source| source != "csv") {
@@ -3494,18 +3576,6 @@ fn build_websets_imports_create_spec(
             )
             .with_suggestion("exa-agent websets imports create --source csv --body @import.json"),
         ));
-    }
-    if csv.is_some() {
-        return Err(CliError::Usage(Diag::new(
-            "not_implemented",
-            "CSV upload convenience via --csv is deferred; build the import body with --body/--set instead",
-        )));
-    }
-    if url.is_some() {
-        return Err(CliError::Usage(Diag::new(
-            "invalid_value",
-            "`--url` upload convenience is deferred; build the import body with --body/--set instead",
-        )));
     }
     let op = registry::lookup_by_segments(&["websets", "imports", "create"])
         .expect("websets imports create is in registry");
@@ -3562,15 +3632,13 @@ fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), C
 
 fn dispatch_websets_imports_create(
     source: Option<&str>,
-    url: Option<&str>,
-    csv: Option<&str>,
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["websets", "imports", "create"])
         .expect("websets imports create is in registry");
     with_typed_error_context(op, globals, || {
-        let spec = build_websets_imports_create_spec(source, url, csv, globals)?;
+        let spec = build_websets_imports_create_spec(source, globals)?;
         dispatch_typed_command(spec, globals, pretty)
     })
 }
@@ -5756,6 +5824,7 @@ fn execute_typed_live<T: Transport>(
         });
     attach_content_metadata(&mut envelope, outcome, content_diagnostics);
     append_warning_next_actions(&mut envelope);
+    append_operation_next_actions(&mut envelope, spec.op, result.path.as_str());
     emit_completed_response(&mut envelope, globals, execution.pretty)?;
     Ok(exit_code)
 }
@@ -6456,6 +6525,49 @@ fn append_warning_next_actions(envelope: &mut serde_json::Value) {
         .collect();
     if !actions.is_empty() {
         envelope["nextActions"] = serde_json::Value::Array(actions);
+    }
+}
+
+fn append_operation_next_actions(
+    envelope: &mut serde_json::Value,
+    operation: &registry::OperationDef,
+    path: &str,
+) {
+    let command = match operation.command().as_str() {
+        "websets imports create" => envelope
+            .get("data")
+            .and_then(|data| data.get("uploadUrl"))
+            .and_then(serde_json::Value::as_str)
+            .map(|upload_url| {
+                serde_json::json!({
+                    "description": "Upload your CSV file",
+                    "command": format!(
+                        "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' '{upload_url}'"
+                    ),
+                })
+            }),
+        "websets exports create" => envelope
+            .get("data")
+            .and_then(|data| data.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|export_id| {
+                let webset_id = path
+                    .strip_prefix("/websets/v0/websets/")?
+                    .strip_suffix("/exports")?;
+                Some(serde_json::json!({
+                    "description": "Poll export status",
+                    "command": format!(
+                        "exa-agent websets exports get {webset_id} {export_id}"
+                    ),
+                }))
+            }),
+        _ => None,
+    };
+    if let Some(command) = command {
+        envelope["nextActions"]
+            .as_array_mut()
+            .expect("response envelopes initialize nextActions as an array")
+            .push(command);
     }
 }
 

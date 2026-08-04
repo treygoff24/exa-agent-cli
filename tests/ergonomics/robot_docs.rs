@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use clap::Parser;
 use exa_agent_cli::cli::Cli;
 use exa_agent_cli::registry;
 

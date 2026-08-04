@@ -2,6 +2,7 @@
 //! collect flags; logic lives in `request`/`exec`/dispatch.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 
 #[derive(Parser)]
 #[command(
@@ -15,6 +16,55 @@ pub struct Cli {
     pub globals: GlobalArgs,
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Clap cannot represent a local option that shadows a global option name. Keep the
+    /// documented export `--format` spelling by normalizing it to an internal id before Clap
+    /// parses the command tree.
+    pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        <Self as Parser>::try_parse_from(normalize_export_format_flag(itr))
+    }
+
+    pub fn try_parse() -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::env::args_os())
+    }
+}
+
+fn normalize_export_format_flag<I, T>(itr: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut export_create = false;
+    let mut command_parts = 0usize;
+    itr.into_iter()
+        .map(Into::into)
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            if !export_create {
+                match (command_parts, text.as_ref()) {
+                    (0, "websets") => command_parts = 1,
+                    (1, "exports") => command_parts = 2,
+                    (2, "create") => export_create = true,
+                    (_, value) if !value.starts_with('-') => command_parts = 0,
+                    _ => {}
+                }
+                return arg;
+            }
+            if text == "--format" {
+                return OsString::from("--export-format");
+            }
+            if let Some(value) = text.strip_prefix("--format=") {
+                return OsString::from(format!("--export-format={value}"));
+            }
+            arg
+        })
+        .collect()
 }
 
 impl std::fmt::Debug for Cli {
@@ -864,7 +914,7 @@ pub enum WebsetsCmd {
     /// GET /websets/v0/websets.
     List(WebsetsListArgs),
     /// GET /websets/v0/websets/{id}.
-    Get { id: String },
+    Get(WebsetsGetArgs),
     /// POST /websets/v0/websets/{id}.
     Update { id: String },
     /// DELETE /websets/v0/websets/{id}.
@@ -888,7 +938,12 @@ pub enum WebsetsCmd {
         #[command(subcommand)]
         sub: WebsetsEnrichmentsCmd,
     },
-    /// CSV/URL imports.
+    /// Webset exports.
+    Exports {
+        #[command(subcommand)]
+        sub: WebsetsExportsCmd,
+    },
+    /// CSV imports.
     Imports {
         #[command(subcommand)]
         sub: WebsetsImportsCmd,
@@ -916,6 +971,13 @@ pub struct WebsetsListArgs {
     pub pagination: PaginationArgs,
     #[arg(long)]
     pub search: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct WebsetsGetArgs {
+    pub id: String,
+    #[arg(long, value_enum, ignore_case = true)]
+    pub expand: Option<WebsetExpand>,
 }
 
 #[derive(Args, Debug)]
@@ -956,6 +1018,20 @@ pub enum WebsetEnrichmentFormat {
     Email,
     Phone,
     Url,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetExpand {
+    Items,
+}
+
+impl WebsetExpand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetExpand::Items => "items",
+        }
+    }
 }
 
 impl WebsetEnrichmentFormat {
@@ -1048,16 +1124,43 @@ pub enum WebsetsEnrichmentsCmd {
     },
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetExportFormat {
+    Csv,
+    Json,
+}
+
+impl WebsetExportFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetExportFormat::Csv => "csv",
+            WebsetExportFormat::Json => "json",
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebsetsExportsCmd {
+    /// POST /websets/v0/websets/{webset}/exports [create-POST].
+    Create {
+        webset_id: String,
+        #[arg(long = "export-format", value_enum, ignore_case = true)]
+        export_format: WebsetExportFormat,
+    },
+    /// GET /websets/v0/websets/{webset}/exports/{id}.
+    Get {
+        webset_id: String,
+        export_id: String,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 pub enum WebsetsImportsCmd {
     /// POST /websets/v0/imports [create-POST].
     Create {
         #[arg(long)]
         source: Option<String>,
-        #[arg(long)]
-        url: Option<String>,
-        #[arg(long)]
-        csv: Option<String>,
     },
     /// GET /websets/v0/imports.
     List(PaginationArgs),
@@ -1585,7 +1688,7 @@ pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
     match sub {
         WebsetsCmd::Create(_) => "websets create".to_string(),
         WebsetsCmd::List(_) => "websets list".to_string(),
-        WebsetsCmd::Get { .. } => "websets get".to_string(),
+        WebsetsCmd::Get(_) => "websets get".to_string(),
         WebsetsCmd::Update { .. } => "websets update".to_string(),
         WebsetsCmd::Delete { .. } => "websets delete".to_string(),
         WebsetsCmd::Cancel { .. } => "websets cancel".to_string(),
@@ -1606,6 +1709,10 @@ pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
             WebsetsEnrichmentsCmd::Update { .. } => "websets enrichments update".to_string(),
             WebsetsEnrichmentsCmd::Delete { .. } => "websets enrichments delete".to_string(),
             WebsetsEnrichmentsCmd::Cancel { .. } => "websets enrichments cancel".to_string(),
+        },
+        WebsetsCmd::Exports { sub } => match sub {
+            WebsetsExportsCmd::Create { .. } => "websets exports create".to_string(),
+            WebsetsExportsCmd::Get { .. } => "websets exports get".to_string(),
         },
         WebsetsCmd::Imports { sub } => match sub {
             WebsetsImportsCmd::Create { .. } => "websets imports create".to_string(),

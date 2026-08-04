@@ -444,6 +444,32 @@ flag = "tokens"
 body_path = "tokensNum"
 kind = "json"
 
+[operations."websets-exports-create"]
+cli_path = "websets exports create"
+namespace = "api"
+defined_by_overlay = true
+method = "POST"
+api_path = "/websets/v0/websets/{webset}/exports"
+source = "exa-docs:exports"
+source_version = "docs-2026-08-03"
+idempotency_sensitive = true
+
+[[operations."websets-exports-create".fields]]
+flag = "format"
+body_path = "format"
+kind = "str"
+required = true
+enum_values = ["csv", "json"]
+
+[operations."websets-exports-get"]
+cli_path = "websets exports get"
+namespace = "api"
+defined_by_overlay = true
+method = "GET"
+api_path = "/websets/v0/websets/{webset}/exports/{id}"
+source = "exa-docs:exports"
+source_version = "docs-2026-08-03"
+
 # --- Request-field maps for spec-derived ops (Phase 1 seeds `search`; rest land per-phase) ---
 [[operations."answer".fields]]
 flag = "question"

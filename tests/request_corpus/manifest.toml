@@ -29,6 +29,12 @@ argv = ["contents", "https://example.com", "--text"]
 [ops.context]
 argv = ["context", "Rust CLI request previews", "--tokens", "1000"]
 
+[ops."websets-exports-create"]
+argv = ["websets", "exports", "create", "webset_abc123", "--format", "csv"]
+
+[ops."websets-exports-get"]
+argv = ["websets", "exports", "get", "webset_abc123", "export_abc123"]
+
 [ops.batchMonitors]
 argv = ["monitor", "batch", "--body", "{\"action\":\"pause\",\"filter\":{\"status\":\"active\"}}"]
 

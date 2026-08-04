@@ -245,9 +245,11 @@ fn positional_required_allowlist(operation_id: &str) -> &'static [&'static str] 
 
 fn known_skips() -> BTreeSet<&'static str> {
     [
-        // Docs-only overlay-defined single-witness command; no upstream OpenAPI
-        // JSON requestBody schema exists to compare.
+        // Docs-only overlay-defined commands; no upstream OpenAPI JSON requestBody
+        // schema exists to compare.
         "context",
+        "websets-exports-create",
+        "websets-exports-get",
     ]
     .into_iter()
     .collect()

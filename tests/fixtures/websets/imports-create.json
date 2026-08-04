@@ -1,0 +1,10 @@
+{
+  "upstream": {
+    "id": "import_123",
+    "status": "pending",
+    "uploadUrl": "https://uploads.example.test/import_123.csv?signature=fixture"
+  },
+  "expected": {
+    "uploadUrl": "https://uploads.example.test/import_123.csv?signature=fixture"
+  }
+}

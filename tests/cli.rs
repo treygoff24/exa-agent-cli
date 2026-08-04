@@ -1,6 +1,5 @@
 //! Parser tests for the v1 typed command tree (Wave 1A/1C skeleton).
 
-use clap::Parser;
 use exa_agent_cli::cli::{command_path, Cli, Command, SEARCH_TYPE_VALUES};
 use exa_agent_cli::registry::{self, ConfirmProtocol};
 use exa_agent_cli::transport;
@@ -5520,6 +5519,21 @@ fn parse_websets_representative_nested() {
     assert_path(&["websets", "list"], "websets list");
     assert_path(&["websets", "get", "webset_abc"], "websets get");
     assert_path(
+        &[
+            "websets",
+            "exports",
+            "create",
+            "webset_abc",
+            "--format",
+            "csv",
+        ],
+        "websets exports create",
+    );
+    assert_path(
+        &["websets", "exports", "get", "webset_abc", "export_abc"],
+        "websets exports get",
+    );
+    assert_path(
         &["websets", "items", "list", "webset_abc"],
         "websets items list",
     );
@@ -5894,6 +5908,21 @@ fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
     );
     assert!(get["data"]["request"]["body"].is_null());
 
+    let expanded = run_ok_json(&[
+        "websets",
+        "get",
+        "ws_abc",
+        "--expand",
+        "ITEMS",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        expanded["data"]["request"]["query"],
+        serde_json::json!([{"name": "expand", "value": "items"}])
+    );
+    assert!(expanded["data"]["request"]["body"].is_null());
+
     let update = run_ok_json(&[
         "websets",
         "update",
@@ -6215,18 +6244,6 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
     let stderr: serde_json::Value = serde_json::from_slice(&source_err.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "invalid_value");
 
-    let url_err = run(&[
-        "websets",
-        "imports",
-        "create",
-        "--url",
-        "https://example.com/data.csv",
-        "--compact",
-    ]);
-    assert_eq!(url_err.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&url_err.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_value");
-
     let csv_err = run(&[
         "websets",
         "imports",
@@ -6237,7 +6254,27 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
     ]);
     assert_eq!(csv_err.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&csv_err.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "not_implemented");
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("websets imports create --help"));
+
+    let url_err = run(&[
+        "websets",
+        "imports",
+        "create",
+        "--url",
+        "https://example.com/data.csv",
+        "--compact",
+    ]);
+    assert_eq!(url_err.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&url_err.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    assert!(stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("websets imports create --help"));
 
     let list = run_ok_json(&[
         "websets",
@@ -6281,6 +6318,130 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
 
     let delete_live = run(&["websets", "imports", "delete", "imp_abc", "--compact"]);
     assert_eq!(delete_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_exports_preview_and_live_next_action() {
+    let help = run(&["websets", "exports", "create", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--format"));
+    assert!(!help.contains("--export-format"));
+
+    let create = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "JSON",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets exports create");
+    assert_eq!(create["data"]["request"]["method"], "POST");
+    assert_eq!(
+        create["data"]["request"]["path"],
+        "/websets/v0/websets/ws_abc/exports"
+    );
+    assert_eq!(create["data"]["request"]["body"]["format"], "json");
+
+    let get = run_ok_json(&[
+        "websets",
+        "exports",
+        "get",
+        "ws_abc",
+        "export_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(get["command"], "websets exports get");
+    assert_eq!(get["data"]["request"]["method"], "GET");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/websets/v0/websets/ws_abc/exports/export_abc"
+    );
+    assert!(get["data"]["request"]["body"].is_null());
+
+    let response = br#"{"id":"export_123","status":"pending"}"#;
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("POST /websets/v0/websets/ws_abc/exports "),
+                "unexpected export request:\n{request}"
+            );
+        },
+        response,
+    );
+    let output = run_owned(&[
+        "websets".into(),
+        "exports".into(),
+        "create".into(),
+        "ws_abc".into(),
+        "--format".into(),
+        "csv".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local export server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        live["nextActions"][0]["command"],
+        "exa-agent websets exports get ws_abc export_123"
+    );
+}
+
+#[test]
+fn websets_imports_create_upload_next_action_uses_fixture_url() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/websets/imports-create.json")).unwrap();
+    let response = fixture["upstream"].to_string();
+    let response: &'static [u8] = Box::leak(response.into_bytes().into_boxed_slice());
+    let upload_url = fixture["expected"]["uploadUrl"].as_str().unwrap();
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("POST /websets/v0/imports "),
+                "unexpected import request:\n{request}"
+            );
+        },
+        response,
+    );
+    let output = run_owned(&[
+        "websets".into(),
+        "imports".into(),
+        "create".into(),
+        "--source".into(),
+        "csv".into(),
+        "--body".into(),
+        r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#.into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local import server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let expected_command = format!(
+        "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' '{upload_url}'"
+    );
+    assert_eq!(live["nextActions"][0]["command"], expected_command);
 }
 
 #[test]

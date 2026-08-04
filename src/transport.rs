@@ -1753,7 +1753,6 @@ fn trace_timestamp() -> u64 {
 mod tests {
     use super::*;
     use crate::auth::{self, NoopKeyring};
-    use clap::Parser;
 
     #[test]
     fn build_url_joins_base_path_and_query() {

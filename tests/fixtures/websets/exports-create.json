@@ -1,0 +1,9 @@
+{
+  "upstream": {
+    "id": "export/123",
+    "status": "pending"
+  },
+  "expected": {
+    "format": "csv"
+  }
+}

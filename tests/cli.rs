@@ -5923,6 +5923,62 @@ fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
     );
     assert!(expanded["data"]["request"]["body"].is_null());
 
+    let (base_url, server) = local_json_server(
+        |request| {
+            let (head, body) = request
+                .split_once("\r\n\r\n")
+                .expect("request headers and body");
+            assert!(
+                head.starts_with("GET /websets/v0/websets/ws_abc?expand=items "),
+                "unexpected websets get request:\n{request}"
+            );
+            assert!(
+                body.is_empty(),
+                "GET request unexpectedly had body: {body:?}"
+            );
+        },
+        br#"{"id":"ws_abc"}"#,
+    );
+    let body_expand = run_owned(&[
+        "websets".into(),
+        "get".into(),
+        "ws_abc".into(),
+        "--set".into(),
+        "expand=items".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local websets get server panicked");
+    assert!(
+        body_expand.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&body_expand.stdout),
+        String::from_utf8_lossy(&body_expand.stderr)
+    );
+
+    let conflicting_expand = run(&[
+        "websets",
+        "get",
+        "ws_abc",
+        "--expand",
+        "items",
+        "--set",
+        "expand=items",
+        "--compact",
+    ]);
+    assert_eq!(conflicting_expand.status.code(), Some(1));
+    let conflicting_error = stderr_json(&conflicting_expand);
+    assert_eq!(
+        conflicting_error["error"]["code"],
+        "invalid_flag_combination"
+    );
+    let conflicting_message = conflicting_error["error"]["message"].as_str().unwrap();
+    assert!(conflicting_message.contains("--expand"));
+    assert!(conflicting_message.contains("expand"));
+
     let update = run_ok_json(&[
         "websets",
         "update",
@@ -6327,6 +6383,41 @@ fn websets_exports_preview_and_live_next_action() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("--format"));
     assert!(!help.contains("--export-format"));
+    assert!(help.contains("Export file format (csv|json)."));
+    assert_eq!(
+        help.lines()
+            .filter(|line| line.trim_start().starts_with("--format "))
+            .count(),
+        1
+    );
+
+    let invalid = run(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "ndjson",
+        "--compact",
+    ]);
+    assert_eq!(invalid.status.code(), Some(1));
+    let invalid_error = stderr_json(&invalid);
+    assert_eq!(invalid_error["error"]["code"], "invalid_value");
+    let invalid_message = invalid_error["error"]["message"].as_str().unwrap();
+    assert!(invalid_message.contains("--format"));
+    assert!(invalid_message.contains("csv"));
+    assert!(invalid_message.contains("json"));
+    assert!(!String::from_utf8_lossy(&invalid.stderr).contains("--export-format"));
+
+    let missing = run(&["websets", "exports", "create", "ws_abc", "--compact"]);
+    assert_eq!(missing.status.code(), Some(1));
+    let missing_error = stderr_json(&missing);
+    assert_eq!(missing_error["error"]["code"], "missing_required_argument");
+    let missing_message = missing_error["error"]["message"].as_str().unwrap();
+    assert!(missing_message.contains("--format"));
+    assert!(missing_message.contains("--body"));
+    assert!(missing_message.contains("--set"));
+    assert!(!String::from_utf8_lossy(&missing.stderr).contains("--export-format"));
 
     let create = run_ok_json(&[
         "websets",
@@ -6346,6 +6437,35 @@ fn websets_exports_preview_and_live_next_action() {
     );
     assert_eq!(create["data"]["request"]["body"]["format"], "json");
 
+    let body_format = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--body",
+        r#"{"format":"csv"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(body_format["data"]["request"]["body"]["format"], "csv");
+
+    let later_global_format = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "csv",
+        "--format",
+        "json",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        later_global_format["data"]["request"]["body"]["format"],
+        "csv"
+    );
+
     let get = run_ok_json(&[
         "websets",
         "exports",
@@ -6363,12 +6483,27 @@ fn websets_exports_preview_and_live_next_action() {
     );
     assert!(get["data"]["request"]["body"].is_null());
 
-    let response = br#"{"id":"export_123","status":"pending"}"#;
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/websets/exports-create.json")).unwrap();
+    let response = Box::leak(
+        fixture["upstream"]
+            .to_string()
+            .into_bytes()
+            .into_boxed_slice(),
+    );
+    let expected_format = fixture["expected"]["format"].as_str().unwrap().to_string();
     let (base_url, server) = local_json_server(
-        |request| {
+        move |request| {
             assert!(
-                request.starts_with("POST /websets/v0/websets/ws_abc/exports "),
+                request.starts_with("POST /websets/v0/websets/ws%2Fabc/exports "),
                 "unexpected export request:\n{request}"
+            );
+            let (_, body) = request
+                .split_once("\r\n\r\n")
+                .expect("request headers and body");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                serde_json::json!({"format": expected_format})
             );
         },
         response,
@@ -6377,7 +6512,7 @@ fn websets_exports_preview_and_live_next_action() {
         "websets".into(),
         "exports".into(),
         "create".into(),
-        "ws_abc".into(),
+        "ws/abc".into(),
         "--format".into(),
         "csv".into(),
         "--base-url".into(),
@@ -6396,7 +6531,7 @@ fn websets_exports_preview_and_live_next_action() {
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         live["nextActions"][0]["command"],
-        "exa-agent websets exports get ws_abc export_123"
+        "exa-agent websets exports get 'ws/abc' 'export/123'"
     );
 }
 
@@ -6438,10 +6573,49 @@ fn websets_imports_create_upload_next_action_uses_fixture_url() {
         String::from_utf8_lossy(&output.stderr)
     );
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let quoted_upload_url = format!("'{}'", upload_url.replace('\'', "'\\''"));
     let expected_command = format!(
-        "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' '{upload_url}'"
+        "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' {quoted_upload_url}"
     );
     assert_eq!(live["nextActions"][0]["command"], expected_command);
+}
+
+#[test]
+fn websets_imports_create_missing_upload_url_warns_with_recovery() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("POST /websets/v0/imports "),
+                "unexpected import request:\n{request}"
+            );
+        },
+        br#"{"id":"import/123","status":"pending"}"#,
+    );
+    let output = run_owned(&[
+        "websets".into(),
+        "imports".into(),
+        "create".into(),
+        "--source".into(),
+        "csv".into(),
+        "--body".into(),
+        r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#.into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local malformed import server panicked");
+    assert!(output.status.success());
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(live["nextActions"].as_array().unwrap().is_empty());
+    assert_eq!(live["warnings"][0]["code"], "upstream_malformed");
+    assert_eq!(
+        live["warnings"][0]["suggestedCommand"],
+        "exa-agent websets imports get 'import/123'"
+    );
 }
 
 #[test]

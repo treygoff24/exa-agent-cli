@@ -2,9 +2,9 @@
   "upstream": {
     "id": "import_123",
     "status": "pending",
-    "uploadUrl": "https://uploads.example.test/import_123.csv?signature=fixture"
+    "uploadUrl": "https://uploads.example.test/import_123.csv?signature=fi'xture"
   },
   "expected": {
-    "uploadUrl": "https://uploads.example.test/import_123.csv?signature=fixture"
+    "uploadUrl": "https://uploads.example.test/import_123.csv?signature=fi'xture"
   }
 }

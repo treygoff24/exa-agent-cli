@@ -144,6 +144,7 @@ fn assert_registry_inputs_match_clap(command_path: &str) {
         let arg = match input_kind {
             registry::InputKind::Flag => {
                 let arg = leaf.get_arguments().find(|arg| {
+                    // The format <-> export-format alias is the load-bearing half of normalization.
                     arg.get_long() == Some(field.flag)
                         || (command_path == "websets exports create"
                             && field.flag == "format"

@@ -103,6 +103,7 @@ struct TypedExecution<'a> {
 struct LiveExtras<'a> {
     secret_output: Option<SecretOutputReservation>,
     extra_warnings: &'a [serde_json::Value],
+    next_action_webset_id: Option<&'a str>,
 }
 
 /// Parse args, dispatch, and return the process exit code.
@@ -224,9 +225,15 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             }
 
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
-                let missing = clap_ctx_strings(&e, ContextKind::InvalidArg);
+                let missing: Vec<_> = clap_ctx_strings(&e, ContextKind::InvalidArg)
+                    .into_iter()
+                    .map(public_clap_text)
+                    .collect();
                 if !missing.is_empty() {
-                    message = format!("missing required argument(s): {}", missing.join(", "));
+                    message = public_clap_text(format!(
+                        "missing required argument(s): {}",
+                        missing.join(", ")
+                    ));
                     details.insert("missing".to_string(), serde_json::json!(missing));
                 }
             }
@@ -258,6 +265,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     // invents false matches for nonsense input and can point an agent at a
                     // destructive command (`websets event` → `delete`).
                     if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
+                        let did_you_mean = public_clap_text(did_you_mean);
                         details.insert(
                             "didYouMean".to_string(),
                             serde_json::Value::String(did_you_mean.clone()),
@@ -290,12 +298,39 @@ fn handle_clap_error(e: clap::Error) -> i32 {
 }
 
 fn public_clap_text(text: String) -> String {
-    if text.contains("websets exports create") {
-        text.replace("--export-format", "--format")
-            .replace("<EXPORT_FORMAT>", "<FORMAT>")
-    } else {
-        text
+    let had_export_help = text.contains("--export-format") && text.contains("Global options:");
+    let had_trailing_newline = text.ends_with('\n');
+    let text = text
+        .replace("--export-format", "--format")
+        .replace("<EXPORT_FORMAT>", "<FORMAT>");
+    if !had_export_help {
+        return text;
     }
+
+    let mut output = Vec::new();
+    let mut in_globals = false;
+    let mut skip_global_format_help = false;
+    for line in text.lines() {
+        if line == "Global options:" {
+            in_globals = true;
+        }
+        if in_globals && line.trim_start().starts_with("--format <FORMAT>") {
+            skip_global_format_help = true;
+            continue;
+        }
+        if skip_global_format_help {
+            if line.starts_with("          ") {
+                continue;
+            }
+            skip_global_format_help = false;
+        }
+        output.push(line);
+    }
+    let mut text = output.join("\n");
+    if had_trailing_newline {
+        text.push('\n');
+    }
+    text
 }
 
 fn search_num_results_args() -> Option<(String, String, Option<String>)> {
@@ -1444,6 +1479,7 @@ fn dispatch_admin_keys_create(
             LiveExtras {
                 secret_output: Some(secret_output),
                 extra_warnings: &[],
+                ..LiveExtras::default()
             },
         )
     })
@@ -2243,6 +2279,7 @@ fn dispatch_monitor_create(
             LiveExtras {
                 secret_output,
                 extra_warnings: &extra_warnings,
+                ..LiveExtras::default()
             },
         )
     })
@@ -2974,11 +3011,34 @@ fn dispatch_websets_get(
 ) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["websets", "get"]).expect("websets get is in registry");
     with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
+        let mut spec = build_typed_spec(op, &[], globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", args.id.as_str())])?;
+        let body_expand = spec.body.get("expand").cloned();
+        if args.expand.is_some() && body_expand.is_some() {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_flag_combination",
+                "websets get cannot combine --expand with body field `expand`; use one source",
+            )));
+        }
+        let body_expand = body_expand
+            .map(|value| {
+                spec.body
+                    .as_object_mut()
+                    .expect("typed request bodies are JSON objects")
+                    .remove("expand");
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    CliError::Usage(Diag::new(
+                        "invalid_value",
+                        "websets get body field `expand` must be a string",
+                    ))
+                })
+            })
+            .transpose()?;
         let query = args
             .expand
-            .map(|expand| vec![("expand".to_string(), expand.as_str().to_string())])
+            .map(|expand| expand.as_str().to_string())
+            .or(body_expand)
+            .map(|expand| vec![("expand".to_string(), expand)])
             .unwrap_or_default();
         dispatch_typed_command_routed(
             spec,
@@ -3011,7 +3071,7 @@ fn dispatch_websets_exports(
 
 fn dispatch_websets_exports_create(
     webset_id: &str,
-    format: WebsetExportFormat,
+    format: Option<WebsetExportFormat>,
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
@@ -3020,11 +3080,40 @@ fn dispatch_websets_exports_create(
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(
             op,
-            &[("format", Some(format.as_str().to_string()))],
+            &[(
+                "format",
+                Some(
+                    format
+                        .map(|format| format.as_str().to_string())
+                        .unwrap_or_default(),
+                ),
+            )],
             globals,
         )?;
+        let format_missing = match spec.body.get("format") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(value) => value.as_str().is_some_and(str::is_empty),
+        };
+        if format_missing {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "missing_required_argument",
+                    "websets exports create requires format (via --format, --body, or --set)",
+                )
+                .with_suggestion("exa-agent websets exports create <webset> --format csv"),
+            ));
+        }
         let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+        dispatch_typed_command_with_next_action_context(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions {
+                path_override: Some(path.as_str()),
+                ..TypedDispatchOptions::default()
+            },
+            webset_id,
+        )
     })
 }
 
@@ -4311,6 +4400,7 @@ fn dispatch_websets_webhooks_create(
             LiveExtras {
                 secret_output,
                 extra_warnings: &extra_warnings,
+                ..LiveExtras::default()
             },
         )
     })
@@ -5022,6 +5112,25 @@ fn dispatch_typed_command_routed(
     )
 }
 
+fn dispatch_typed_command_with_next_action_context(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    options: TypedDispatchOptions<'_>,
+    webset_id: &str,
+) -> Result<i32, CliError> {
+    dispatch_typed_command_with_extras(
+        spec,
+        globals,
+        pretty,
+        options,
+        LiveExtras {
+            next_action_webset_id: Some(webset_id),
+            ..LiveExtras::default()
+        },
+    )
+}
+
 fn dispatch_typed_command_with_options(
     spec: request::RequestSpec,
     globals: &GlobalArgs,
@@ -5677,7 +5786,7 @@ fn execute_typed_live<T: Transport>(
             method: spec.op.method.as_str(),
             path: execution.route.path,
             query_raw: &query_raw,
-            body,
+            body: body.clone(),
             globals,
             credential,
             request_id: execution.request_id.to_string(),
@@ -5698,6 +5807,8 @@ fn execute_typed_live<T: Transport>(
                 globals,
                 execution.request_id,
                 execution.route.path,
+                extras.next_action_webset_id,
+                &body,
             )),
         };
     }
@@ -5722,6 +5833,8 @@ fn execute_typed_live<T: Transport>(
                 globals,
                 execution.request_id,
                 execution.route.path,
+                extras.next_action_webset_id,
+                &body,
             ));
         }
     };
@@ -5824,7 +5937,7 @@ fn execute_typed_live<T: Transport>(
         });
     attach_content_metadata(&mut envelope, outcome, content_diagnostics);
     append_warning_next_actions(&mut envelope);
-    append_operation_next_actions(&mut envelope, spec.op, result.path.as_str());
+    append_operation_next_actions(&mut envelope, spec.op, extras.next_action_webset_id);
     emit_completed_response(&mut envelope, globals, execution.pretty)?;
     Ok(exit_code)
 }
@@ -6037,12 +6150,14 @@ fn maybe_record_pending_run_on_create_failure(
     globals: &GlobalArgs,
     request_id: &str,
     path: &str,
+    webset_id: Option<&str>,
+    body: &serde_json::Value,
 ) -> CliError {
     if !should_write_pending_run(&err, spec, globals) {
         return err;
     }
 
-    let suggested = pending_recovery_command(spec.op);
+    let suggested = pending_recovery_command(spec.op, webset_id, body);
     let pending_path = pending::pending_runs_path();
     let record = pending::PendingRunRecord::for_operation(
         spec.op,
@@ -6069,9 +6184,23 @@ fn should_write_pending_run(
         )
 }
 
-fn pending_recovery_command(op: &'static registry::OperationDef) -> String {
+fn pending_recovery_command(
+    op: &'static registry::OperationDef,
+    webset_id: Option<&str>,
+    body: &serde_json::Value,
+) -> String {
     match op.command().as_str() {
         "agent runs create" => "exa-agent agent runs list --limit 10".to_string(),
+        "websets exports create" => format!(
+            "exa-agent websets exports create {} --format {} --idempotency-key <stable-key>",
+            webset_id
+                .map(shell_quote)
+                .unwrap_or_else(|| "<webset-id>".to_string()),
+            body.get("format")
+                .and_then(serde_json::Value::as_str)
+                .map(shell_quote)
+                .unwrap_or_else(|| "<format>".to_string()),
+        ),
         other => format!("exa-agent {other} --idempotency-key <stable-key>"),
     }
 }
@@ -6531,43 +6660,61 @@ fn append_warning_next_actions(envelope: &mut serde_json::Value) {
 fn append_operation_next_actions(
     envelope: &mut serde_json::Value,
     operation: &registry::OperationDef,
-    path: &str,
+    webset_id: Option<&str>,
 ) {
-    let command = match operation.command().as_str() {
-        "websets imports create" => envelope
-            .get("data")
-            .and_then(|data| data.get("uploadUrl"))
-            .and_then(serde_json::Value::as_str)
-            .map(|upload_url| {
-                serde_json::json!({
-                    "description": "Upload your CSV file",
-                    "command": format!(
-                        "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' '{upload_url}'"
-                    ),
-                })
-            }),
-        "websets exports create" => envelope
-            .get("data")
-            .and_then(|data| data.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|export_id| {
-                let webset_id = path
-                    .strip_prefix("/websets/v0/websets/")?
-                    .strip_suffix("/exports")?;
-                Some(serde_json::json!({
-                    "description": "Poll export status",
-                    "command": format!(
-                        "exa-agent websets exports get {webset_id} {export_id}"
-                    ),
-                }))
-            }),
-        _ => None,
+    let Some(data) = envelope.get("data").cloned() else {
+        return;
     };
-    if let Some(command) = command {
-        envelope["nextActions"]
-            .as_array_mut()
-            .expect("response envelopes initialize nextActions as an array")
-            .push(command);
+    match operation.command().as_str() {
+        "websets imports create" => {
+            if let Some(upload_url) = data.get("uploadUrl").and_then(serde_json::Value::as_str) {
+                envelope["nextActions"]
+                    .as_array_mut()
+                    .expect("response envelopes initialize nextActions as an array")
+                    .push(serde_json::json!({
+                        "description": "Upload your CSV file",
+                        "command": format!(
+                            "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' {}",
+                            shell_quote(upload_url)
+                        ),
+                    }));
+            } else {
+                let import_id = data
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<id>");
+                envelope["warnings"]
+                    .as_array_mut()
+                    .expect("response envelopes initialize warnings as an array")
+                    .push(serde_json::json!({
+                        "code": "upstream_malformed",
+                        "message": "websets imports create response did not include string `uploadUrl`; upload step could not be prepared",
+                        "suggestedCommand": format!(
+                            "exa-agent websets imports get {}",
+                            shell_quote(import_id)
+                        ),
+                    }));
+            }
+        }
+        "websets exports create" => {
+            let Some(webset_id) = webset_id else {
+                return;
+            };
+            if let Some(export_id) = data.get("id").and_then(serde_json::Value::as_str) {
+                envelope["nextActions"]
+                    .as_array_mut()
+                    .expect("response envelopes initialize nextActions as an array")
+                    .push(serde_json::json!({
+                        "description": "Poll export status",
+                        "command": format!(
+                            "exa-agent websets exports get {} {}",
+                            shell_quote(webset_id),
+                            shell_quote(export_id)
+                        ),
+                    }));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -9453,6 +9600,7 @@ mod tests {
             LiveExtras {
                 secret_output: Some(reservation),
                 extra_warnings: &[],
+                ..LiveExtras::default()
             },
         )
         .unwrap();
@@ -9544,6 +9692,7 @@ mod tests {
             LiveExtras {
                 secret_output: Some(reservation),
                 extra_warnings: &[],
+                ..LiveExtras::default()
             },
         )
         .unwrap_err();

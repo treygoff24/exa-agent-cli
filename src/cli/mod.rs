@@ -41,6 +41,8 @@ where
     T: Into<OsString> + Clone,
 {
     let mut export_create = false;
+    let mut export_format_value_pending = false;
+    let mut export_format_consumed = false;
     let mut command_parts = 0usize;
     itr.into_iter()
         .map(Into::into)
@@ -56,10 +58,20 @@ where
                 }
                 return arg;
             }
+            if export_format_value_pending {
+                export_format_value_pending = false;
+                export_format_consumed = true;
+                return arg;
+            }
+            if export_format_consumed {
+                return arg;
+            }
             if text == "--format" {
+                export_format_value_pending = true;
                 return OsString::from("--export-format");
             }
             if let Some(value) = text.strip_prefix("--format=") {
+                export_format_consumed = true;
                 return OsString::from(format!("--export-format={value}"));
             }
             arg
@@ -1145,8 +1157,13 @@ pub enum WebsetsExportsCmd {
     /// POST /websets/v0/websets/{webset}/exports [create-POST].
     Create {
         webset_id: String,
-        #[arg(long = "export-format", value_enum, ignore_case = true)]
-        export_format: WebsetExportFormat,
+        #[arg(
+            long = "export-format",
+            value_enum,
+            ignore_case = true,
+            help = "Export file format (csv|json). On this command --format selects the export format; select envelope output with --json/--ndjson."
+        )]
+        export_format: Option<WebsetExportFormat>,
     },
     /// GET /websets/v0/websets/{webset}/exports/{id}.
     Get {

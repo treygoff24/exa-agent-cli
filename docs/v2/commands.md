@@ -477,7 +477,7 @@ Guard: `monitor create` with `--webhook-url` but no `--secret-output` and a non-
 exa-agent websets create   --query TEXT --count N
                            --body @webset.json --set path=value      # [create-POST]
 exa-agent websets list     --limit N --cursor TOKEN --all
-exa-agent websets get      ID
+exa-agent websets get      ID --expand items
 exa-agent websets update   ID --set path=value --body @file          # POST upstream, not PATCH
 exa-agent websets delete   ID --yes
 exa-agent websets cancel   ID --yes                                  # discards running work
@@ -506,6 +506,10 @@ exa-agent websets enrichments get    WEBSET ENRICHMENT_ID
 exa-agent websets enrichments update WEBSET ENRICHMENT_ID --set path=value
 exa-agent websets enrichments delete WEBSET ENRICHMENT_ID --yes
 exa-agent websets enrichments cancel WEBSET ENRICHMENT_ID --yes
+
+# exports
+exa-agent websets exports create WEBSET --format csv|json       # [create-POST]
+exa-agent websets exports get    WEBSET EXPORT_ID
 
 # imports
 exa-agent websets imports create --set format=csv …                 # [create-POST]; returns uploadUrl + nextActions PUT template (D40d)

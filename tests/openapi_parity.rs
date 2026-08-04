@@ -249,7 +249,6 @@ fn known_skips() -> BTreeSet<&'static str> {
         // schema exists to compare.
         "context",
         "websets-exports-create",
-        "websets-exports-get",
     ]
     .into_iter()
     .collect()

@@ -367,7 +367,7 @@ pub enum Command {
         #[command(subcommand)]
         sub: AgentCmd,
     },
-    /// Legacy research API (/research/v1).
+    /// Retired Research API; use `search --type deep-reasoning`.
     Research {
         #[command(subcommand)]
         sub: ResearchCmd,
@@ -842,11 +842,11 @@ pub enum AgentRunsCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ResearchCmd {
-    /// POST /research/v1 [create-POST].
+    /// Retired; use `exa-agent search --type deep-reasoning`.
     Create(ResearchCreateArgs),
-    /// GET /research/v1.
+    /// Retired; use `exa-agent search --help`.
     List(PaginationArgs),
-    /// GET /research/v1/{researchId}.
+    /// Retired; use `exa-agent search --help`.
     Get { research_id: String },
 }
 

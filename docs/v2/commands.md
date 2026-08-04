@@ -272,9 +272,9 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 
 ### Input forgiveness (coerce at the edges, stay deterministic)
 
-Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest of the program sees only canonical values (design-principle "Input forgiveness"; architecture §6):
+Normalization happens at the parse boundary and in post-parse coercion so the rest of the program sees canonical values (design-principle "Input forgiveness"; architecture §6):
 
-- **Enums are case-insensitive.** Every `ValueEnum` flag (`--type`, `--format`, `--effort`, `--category`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) sets `ignore_case = true`, so `--type Fast`, `--format JSON`, `--effort Medium` all resolve; an invalid choice lists the valid values (clap's possible-value suggestion). `--category` is a `ValueEnum` with multi-word variants (`research paper`), not a free string, so typos get suggestions too. The canonical (lowercase/kebab) spelling is what reaches the body.
+- **Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
 - **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..10000`; `--highlights[=N]` accepts a positive character cap.
 - **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
 - **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
@@ -285,7 +285,7 @@ Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest o
 
 Universal flags (§3) are assumed throughout; only command-specific flags are listed. Local validation guards run **before** the API call and exit 1 (usage) with a copy-pasteable `suggestedCommand`.
 
-**Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `research create` → `research get <id>`; `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand` — the agent never has to guess the next call.
+**Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand` — the agent never has to guess the next call.
 
 ### `search` — `POST /search`
 
@@ -294,7 +294,7 @@ exa-agent search QUERY
   --type auto|fast|instant|deep-lite|deep|deep-reasoning   # default auto
   --fast | --instant | --deep | --deep-reasoning           # shortcuts for --type
   --num-results N                                           # maps numResults; 1..100. Short alias: -n. NOT --limit
-  --category 'company|people|research paper|news|personal site|financial report'
+  --category 'company|people|publication|news|personal site|financial report' # legacy 'research paper' coerces to publication
   --include-domain DOMAIN        # repeatable; includeDomains[]; supports paths + wildcards
   --exclude-domain DOMAIN        # repeatable; excludeDomains[]
   --start-published-date ISO     # alias --published-after
@@ -382,7 +382,7 @@ Guards:
 ```text
 exa-agent similar URL
   --exclude-source-domain
-  --category ...               --num-results N
+  --category 'company|people|publication|news|personal site|financial report' --num-results N # legacy 'research paper' coerces to publication
   --include-domain DOMAIN      --exclude-domain DOMAIN
   --start/end-published-date   --start/end-crawl-date
   # content-extraction + freshness flags from `search` apply
@@ -443,15 +443,15 @@ Guards / notes:
 - `--data-source` count > 5 → exit 1.
 - Surface `stopReason` in output; treat `budget_reached` as not-fully-complete (do not silently report success).
 
-### `research` — `/research/v1` (legacy)
+### `research` — `/research/v1` (retired upstream)
 
 ```text
-exa-agent research create QUERY   # [create-POST]; --stream where supported
-exa-agent research list           --limit N --cursor TOKEN --all
+exa-agent research create QUERY
+exa-agent research list
 exa-agent research get RESEARCH_ID
 ```
 
-Emits a non-fatal `warnings[]` entry: research v1 is legacy; new work should target `agent`. Kept for breadth.
+All three verbs are local stubs: they make no network call, exit 1 with `research_retired`, and are absent from `capabilities`. `create` suggests `exa-agent search "QUERY" --type deep-reasoning`; `list` and `get` suggest `exa-agent search --help`, while `get` preserves the supplied id in `error.details.researchId`.
 
 ### `monitor` — top-level Search Monitors `/monitors`
 
@@ -602,14 +602,14 @@ Notes:
 
 ## 5. Deprecations
 
-Kept for breadth; each warns on stderr (`warnings[]`) with the recommended replacement.
+Kept for breadth where upstream still exists; deprecated surfaces warn on stderr (`warnings[]`). The retired `research` stub returns a structured usage error instead.
 
 | Surface / flag | Status | Replacement |
 |---|---|---|
 | `similar` / `POST /findSimilar` | Deprecated upstream | `search --similar-to URL` |
 | `--livecrawl never\|always\|fallback\|preferred` | Deprecated | `--max-age-hours N` / `--fresh` / `--cache-only` |
 | `--context` / `--context-max-characters` | Deprecated | `--highlights` / `--text` |
-| `research` / `/research/v1` | Legacy | `agent run` |
+| `research` / `/research/v1` | Retired | `search --type deep-reasoning` |
 | `useAutoprompt` | Removed from schema | not exposed; not a flag |
 | legacy highlight count/sentence sizing | Deprecated | `--highlights N` / `--highlight-max-characters` |
 | `resolvedSearchType`, response `context` | Deprecated upstream fields | ignore; not surfaced as flags |

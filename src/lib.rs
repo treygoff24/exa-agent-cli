@@ -409,6 +409,7 @@ fn static_subcommands(parent: &str) -> &'static [&'static str] {
         "preset" | "macro" => &["list", "show"],
         "agent" => &["run", "runs"],
         "agent runs" => &["create", "list", "get", "events", "cancel", "delete"],
+        "research" => &["create", "list", "get"],
         _ => &[],
     }
 }
@@ -1862,10 +1863,13 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
     }
     let mut sources = Vec::with_capacity(providers.len());
     for provider in providers {
-        let provider = match provider.trim() {
-            "fiber_ai" => "fiber",
-            "particle_news" => "particle",
-            provider => provider,
+        let provider = provider.trim();
+        let provider = if provider.eq_ignore_ascii_case("fiber_ai") {
+            "fiber"
+        } else if provider.eq_ignore_ascii_case("particle_news") {
+            "particle"
+        } else {
+            provider
         };
         if provider.is_empty() {
             return Err(CliError::Usage(Diag::new(
@@ -1895,10 +1899,13 @@ fn typed_provider_alias_warnings(
     given
         .iter()
         .filter_map(|raw| {
-            let (canonical, sent_value) = match raw.trim() {
-                "fiber_ai" => ("fiber", "fiber"),
-                "particle_news" => ("particle", "particle"),
-                _ => return None,
+            let value = raw.trim();
+            let (canonical, sent_value) = if value.eq_ignore_ascii_case("fiber_ai") {
+                ("fiber", "fiber")
+            } else if value.eq_ignore_ascii_case("particle_news") {
+                ("particle", "particle")
+            } else {
+                return None;
             };
             sent.contains(&sent_value).then_some(serde_json::json!({
                 "code": "legacy_value_coerced",
@@ -2059,16 +2066,18 @@ fn globals_with_extra_headers(globals: &GlobalArgs, extra: &[(String, String)]) 
 
 fn dispatch_research(
     sub: &ResearchCmd,
-    _globals: &GlobalArgs,
+    globals: &GlobalArgs,
     _pretty: bool,
 ) -> Result<i32, CliError> {
-    match sub {
+    let op =
+        registry::lookup_by_segments(&["search"]).expect("search is the research stub context");
+    with_typed_error_context(op, globals, || match sub {
         ResearchCmd::Create(args) => Err(research_retired_error("create", Some(&args.query), None)),
         ResearchCmd::List(_) => Err(research_retired_error("list", None, None)),
         ResearchCmd::Get { research_id } => {
             Err(research_retired_error("get", None, Some(research_id)))
         }
-    }
+    })
 }
 
 fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliError> {
@@ -2118,6 +2127,7 @@ fn research_retired_error(verb: &str, query: Option<&str>, research_id: Option<&
 }
 
 fn shell_double_quote(value: &str) -> String {
+    let value = value.replace("\r\n", " ").replace(['\n', '\r'], " ");
     format!(
         "\"{}\"",
         value
@@ -4499,7 +4509,6 @@ fn is_placeholder_token(value: &str) -> bool {
 fn placeholder_example_command(arg_name: &str) -> &'static str {
     match arg_name {
         "path" => "exa-agent raw GET /search --dry-run",
-        "researchId" => "exa-agent research get research_123 --dry-run",
         "runId" => "exa-agent monitor runs get mon_123 run_123 --dry-run",
         "monitor" => "exa-agent websets monitors get mon_123 --dry-run",
         _ => "exa-agent websets get webset_123 --dry-run",

@@ -3605,6 +3605,22 @@ fn category_aliases_coerce_only_on_typed_flags() {
             "--dry-run",
             "--compact",
         ],
+        vec![
+            "search",
+            "q",
+            "--set",
+            "category=research paper",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--body",
+            r#"{"category":"research paper"}"#,
+            "--dry-run",
+            "--compact",
+        ],
     ] {
         let json = run_ok_json(&args);
         assert_eq!(
@@ -3653,11 +3669,25 @@ fn research_stub_is_local_and_actionable() {
         );
     }
 
-    let create = run(&["research", "create", "legacy topic", "--compact"]);
+    let create = run_with_env(
+        &[
+            "research",
+            "create",
+            "legacy topic",
+            "--correlation-id",
+            "research-stub-test",
+            "--compact",
+        ],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
     assert_eq!(create.status.code(), Some(1));
     assert!(create.stdout.is_empty());
     let stderr = stderr_json(&create);
     assert_eq!(stderr["error"]["code"], "research_retired");
+    assert_eq!(stderr["error"]["category"], "usage");
+    assert_eq!(stderr["error"]["exitCode"], 1);
+    assert_eq!(stderr["error"]["retryable"], false);
+    assert_eq!(stderr["request"]["correlationId"], "research-stub-test");
     assert_eq!(
         stderr["error"]["suggestedCommand"],
         "exa-agent search \"legacy topic\" --type deep-reasoning"
@@ -3669,16 +3699,36 @@ fn research_stub_is_local_and_actionable() {
 
     for (args, id) in [
         (
-            &["research", "get", "research/abc", "--compact"][..],
+            &[
+                "research",
+                "get",
+                "research/abc",
+                "--correlation-id",
+                "research-stub-test",
+                "--compact",
+            ][..],
             Some("research/abc"),
         ),
-        (&["research", "list", "--compact"][..], None),
+        (
+            &[
+                "research",
+                "list",
+                "--correlation-id",
+                "research-stub-test",
+                "--compact",
+            ][..],
+            None,
+        ),
     ] {
-        let output = run(args);
+        let output = run_with_env(args, &[("EXA_AGENT_NO_NETWORK", "1")]);
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         let stderr = stderr_json(&output);
         assert_eq!(stderr["error"]["code"], "research_retired");
+        assert_eq!(stderr["error"]["category"], "usage");
+        assert_eq!(stderr["error"]["exitCode"], 1);
+        assert_eq!(stderr["error"]["retryable"], false);
+        assert_eq!(stderr["request"]["correlationId"], "research-stub-test");
         assert_eq!(
             stderr["error"]["suggestedCommand"],
             "exa-agent search --help"
@@ -3688,6 +3738,29 @@ fn research_stub_is_local_and_actionable() {
             None => assert!(stderr["error"]["details"].get("researchId").is_none()),
         }
     }
+
+    let escaped = run_with_env(
+        &[
+            "research",
+            "create",
+            r#"legacy "topic" $HOME `now`"#,
+            "--compact",
+        ],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
+    assert_eq!(
+        stderr_json(&escaped)["error"]["suggestedCommand"],
+        r#"exa-agent search "legacy \"topic\" \$HOME \`now\`" --type deep-reasoning"#
+    );
+
+    let newlines = run_with_env(
+        &["research", "create", "legacy\nline\rnext", "--compact"],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
+    assert_eq!(
+        stderr_json(&newlines)["error"]["suggestedCommand"],
+        "exa-agent search \"legacy line next\" --type deep-reasoning"
+    );
 }
 
 #[test]
@@ -3763,6 +3836,7 @@ fn bare_parent_commands_emit_missing_subcommand_details() {
         (&["websets"][..], "list"),
         (&["robot-docs"][..], "guide"),
         (&["schema"][..], "list"),
+        (&["research"][..], "create"),
     ] {
         let output = run(argv);
         assert_eq!(output.status.code(), Some(1), "{argv:?}");
@@ -4367,6 +4441,29 @@ fn agent_provider_aliases_coerce_and_set_passes_through() {
     assert_eq!(warning["details"]["field"], "provider");
     assert_eq!(warning["details"]["given"], "particle_news");
     assert_eq!(warning["details"]["sent"], "particle");
+
+    let case_insensitive = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        " FIBER_AI ",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        case_insensitive["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"fiber"}])
+    );
+    let warning = case_insensitive["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "legacy_value_coerced")
+        .expect("case-insensitive legacy provider warning");
+    assert_eq!(warning["details"]["given"], " FIBER_AI ");
+    assert_eq!(warning["details"]["sent"], "fiber");
 
     let pass_through = run_ok_json(&[
         "agent",

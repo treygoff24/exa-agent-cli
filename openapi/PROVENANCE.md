@@ -32,6 +32,6 @@ the research copy and is identical — there is no newer published version; "sta
 ## Carry-over runtime validations (not blockers)
 
 Resolved in the phase that touches the surface, via `raw`/`--body`/`--set`/`schema refresh`:
-Research v1/v0 status; OpenAI `/responses` model names; whether 429
-returns `Retry-After`; whether key-create returns a one-time secret; admin `rateLimit`
+OpenAI `/responses` model names; whether 429 returns `Retry-After`; whether key-create returns a
+one-time secret; admin `rateLimit`
 semantics; whether Exa honors a client `Idempotency-Key` header (D25, Phase 3).

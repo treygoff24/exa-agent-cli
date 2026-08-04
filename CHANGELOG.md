@@ -17,7 +17,8 @@ Restores typed parity with the current Exa API under D16/D40: the surface now ma
 - **`websets get --expand items`** — a real query-string parameter; `--set expand=items` is also lifted into the query for this command instead of landing in a GET body.
 - **Named flags**: `search --output-schema`, `search --system-prompt`, `agent runs create --system-prompt`, `contents --highlights [QUERY]`.
 - **Category `publication`** accepted on `search`/`similar` (the canonical spelling upstream renamed from `research paper`). Legacy spellings on typed flags — `research paper`, `fiber_ai`, `particle_news` — are coerced to canonical and flagged with a structured `legacy_value_coerced` warning; `--body`/`--set` values pass through untouched.
-- **`-o`/`--output FILE`** writes the full response envelope to a file; stdout receives a small confirmation envelope instead, independent of the automatic spill-on-size behavior.
+- **`-o`/`--output FILE`** writes the full response envelope to a file; stdout receives a small confirmation envelope instead, independent of the automatic spill-on-size behavior. Same-path collisions with `--secret-output` are refused before any request is sent.
+- Live `contents`/`fetch` and `answer`/`ask` envelopes carry the `outcome` field (`full`/`partial`/`no_content`) plus per-item `contentDiagnostics[]` (crawl status, error tag, HTTP status, inferred content type); answer/ask emit an empty diagnostics array because the upstream response exposes no per-citation crawl data.
 - New exit code `13` (`billing`) and error code `insufficient_credits` for HTTP 402. An
   out-of-credits account previously surfaced as `invalid_value` / exit `1` — a *usage* error —
   so callers read it as "my flags were wrong" and retried with different arguments against an

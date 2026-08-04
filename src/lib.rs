@@ -300,6 +300,9 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                         command_path_from_error(&e)
                             .map(|command| unknown_flag_suggestion(&command, flag.as_deref()))
                     })
+                    // Total fallback: a flag placed before any subcommand has no usage line
+                    // to recover a command path from, but the agent still needs a move.
+                    .or_else(|| Some("exa-agent capabilities --compact".to_string()))
                     .or(suggestion);
             }
             if replaceable && matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
@@ -547,29 +550,57 @@ fn rejected_value_suggestion(e: &clap::Error) -> Option<String> {
         // With a handful of accepted values any of them is a fair demonstration; with a long
         // enum, picking one would read as a recommendation the CLI cannot make.
         .or_else(|| (valid.len() <= 3).then(|| valid.first().cloned()).flatten())?;
-    rewrite_argv_value(&invalid, &replacement)
+    let owner = clap_ctx_strings(e, ContextKind::InvalidArg).into_iter().next();
+    rewrite_argv_value_for(&invalid, &replacement, owner.as_deref())
 }
 
 fn rewrite_argv_value(invalid: &str, replacement: &str) -> Option<String> {
+    rewrite_argv_value_for(invalid, replacement, None)
+}
+
+/// Rewrite the argv occurrence of `invalid` that belongs to `owner_flag` (clap's InvalidArg,
+/// e.g. `--expand <EXPAND>`), not merely the first token that happens to equal the value —
+/// `websets get item --expand item` must correct the flag value, not the positional id.
+fn rewrite_argv_value_for(
+    invalid: &str,
+    replacement: &str,
+    owner_flag: Option<&str>,
+) -> Option<String> {
     let mut args: Vec<String> = std::env::args().collect();
     if args.is_empty() {
         return None;
     }
     args[0] = "exa-agent".to_string();
+    let owner_long = owner_flag.and_then(|owner| {
+        owner
+            .split_whitespace()
+            .next()
+            .filter(|token| token.starts_with('-'))
+            // clap knows the internal spelling; argv holds the public one.
+            .map(|token| token.replace("--export-format", "--format"))
+    });
     let mut replaced = false;
+    let mut previous: Option<String> = None;
     for arg in args.iter_mut().skip(1) {
-        if arg == invalid {
+        let bound_to_owner = match (&owner_long, &previous) {
+            (Some(owner), Some(prev)) => prev == owner,
+            // No owner flag recoverable: any match is the best we can do (old behavior).
+            (None, _) => true,
+            _ => false,
+        };
+        if arg == invalid && bound_to_owner {
             *arg = replacement.to_string();
             replaced = true;
             break;
         }
         if let Some((flag, value)) = arg.split_once('=') {
-            if value == invalid {
+            if value == invalid && owner_long.as_deref().is_none_or(|owner| flag == owner) {
                 *arg = format!("{flag}={replacement}");
                 replaced = true;
                 break;
             }
         }
+        previous = Some(arg.clone());
     }
     replaced.then(|| {
         args.iter()
@@ -865,7 +896,7 @@ fn build_search_spec(
         *value = args
             .output_schema
             .as_deref()
-            .map(read_output_schema_arg)
+            .map(|raw| read_output_schema_arg(raw, SEARCH_SCHEMA_EXAMPLE))
             .transpose()?
             .map(|value| value.to_string());
     }
@@ -1442,7 +1473,7 @@ fn build_answer_spec(
     let output_schema = args
         .output_schema
         .as_deref()
-        .map(read_output_schema_arg)
+        .map(|raw| read_output_schema_arg(raw, ANSWER_SCHEMA_EXAMPLE))
         .transpose()?
         .map(|value| value.to_string());
     let mut flag_values = args.into_flag_values();
@@ -1714,6 +1745,9 @@ fn dispatch_admin_keys_create(
             )));
         }
         let spec = build_admin_keys_create_spec(args, globals)?;
+        if let Some(secret_path) = args.secret_output.as_deref() {
+            ensure_output_targets_distinct(globals, secret_path)?;
+        }
         if globals.print_request || globals.dry_run {
             return dispatch_typed_command(spec, globals, pretty);
         }
@@ -2113,7 +2147,7 @@ fn build_agent_run_spec(
     let output_schema = args
         .output_schema
         .as_deref()
-        .map(read_output_schema_arg)
+        .map(|raw| read_output_schema_arg(raw, AGENT_SCHEMA_EXAMPLE))
         .transpose()?
         .map(|value| value.to_string());
     let input = args
@@ -2536,6 +2570,9 @@ fn dispatch_monitor_create(
             )));
         }
         let spec = build_monitor_create_spec(args, globals)?;
+        if let Some(secret_path) = args.secret_output.as_deref() {
+            ensure_output_targets_distinct(globals, secret_path)?;
+        }
         let extra_warnings = monitor_webhook_secret_warnings(args, &spec.body);
         if globals.print_request || globals.dry_run {
             return dispatch_typed_preview_with_warnings(
@@ -4707,6 +4744,9 @@ fn dispatch_websets_webhooks_create(
             )));
         }
         let spec = build_websets_webhooks_create_spec(args, globals)?;
+        if let Some(secret_path) = args.secret_output.as_deref() {
+            ensure_output_targets_distinct(globals, secret_path)?;
+        }
         let extra_warnings = websets_webhook_secret_warnings(args);
         if globals.print_request || globals.dry_run {
             return dispatch_typed_preview_with_warnings(
@@ -5103,7 +5143,14 @@ fn shell_join(args: &[String]) -> String {
 
 /// `outputSchema` is a JSON Schema object upstream. Accepting `[1]` or `"x"` here only defers
 /// the rejection to a paid round-trip with an opaque upstream message.
-fn read_output_schema_arg(raw: &str) -> Result<serde_json::Value, CliError> {
+const SEARCH_SCHEMA_EXAMPLE: &str =
+    r#"exa-agent search "<query>" --output-schema '{"type":"object","properties":{}}'"#;
+const ANSWER_SCHEMA_EXAMPLE: &str =
+    r#"exa-agent answer "<question>" --output-schema '{"type":"object","properties":{}}'"#;
+const AGENT_SCHEMA_EXAMPLE: &str =
+    r#"exa-agent agent runs create "<query>" --output-schema '{"type":"object","properties":{}}'"#;
+
+fn read_output_schema_arg(raw: &str, example: &str) -> Result<serde_json::Value, CliError> {
     let value = request::read_json_value_arg(raw, "output-schema")?;
     if value.is_object() {
         return Ok(value);
@@ -5120,9 +5167,7 @@ fn read_output_schema_arg(raw: &str) -> Result<serde_json::Value, CliError> {
             "expected": "object",
             "received": value,
         }))
-        .with_suggestion(
-            r#"exa-agent search "<query>" --output-schema '{"type":"object","properties":{}}'"#,
-        ),
+        .with_suggestion(example),
     ))
 }
 
@@ -8339,9 +8384,12 @@ fn registry_validation_error(outcome: ValidateInputOutcome) -> CliError {
     // `details.issue` is the fine-grained validator label; `error.code` must stay inside the
     // published §5.1 dictionary, so a rejected enum reads as `invalid_value` on every command
     // rather than `invalid_value` on typed flags and `invalid_enum_value` on registry ones.
+    // Fail closed: only dictionary members may escape as `error.code`; anything the
+    // validator invents later still surfaces in `details.issue`.
     let code = match issue {
-        "invalid_enum_value" => "invalid_value",
-        other => other,
+        "missing_required_field" => "missing_required_argument",
+        "invalid_field_type" => "invalid_field_type",
+        _ => "invalid_value",
     };
     let mut diag = Diag::new(code, message).with_details(details);
     if let Some(suggestion) = outcome.suggested_command {
@@ -9125,7 +9173,8 @@ fn emit_completed_response(
                 // write turns a completed create into an invisible duplicate risk, so fall back
                 // to the full inline envelope and still exit non-zero.
                 push_output_write_warning(envelope, path, &err);
-                apply_output_ceiling(envelope, globals.max_output_bytes);
+                // No ceiling here: the promise is the FULL inline response after a write
+                // failure — spilling would need the same filesystem that just failed.
                 emit_response_value(envelope, globals, pretty);
                 return Err(err);
             }
@@ -9218,7 +9267,12 @@ fn emit_raw_result(
             ))
         });
     };
-    write_requested_output(path, &result.response.body)?;
+    if let Err(err) = write_requested_output(path, &result.response.body) {
+        // Same recovery contract as the structured path: the upstream bytes are the only
+        // copy, so emit them to stdout before reporting the failed write.
+        let _ = emit_raw(&result.response.body);
+        return Err(err);
+    }
     let data = transport::parse_response_data(&result.response.body);
     let mut confirmation = response_envelope(ResponseEnvelopeArgs {
         command,

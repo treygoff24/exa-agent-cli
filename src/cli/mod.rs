@@ -50,6 +50,31 @@ where
     let mut abandoned = false;
     let mut index = 0usize;
     let mut previous_was_flag = false;
+    // Global options whose separate next token is a VALUE, not a command word. Mirrors the
+    // value-taking fields of `GlobalArgs`; boolean globals (--json, --raw, --yes, …) are
+    // deliberately absent so `--json websets exports create` still matches the command path.
+    const VALUE_TAKING_GLOBALS: &[&str] = &[
+        "-o",
+        "--output",
+        "--format",
+        "--max-output-bytes",
+        "--correlation-id",
+        "--api-key",
+        "--service-key",
+        "--profile",
+        "--base-url",
+        "--header",
+        "--beta",
+        "--timeout",
+        "--connect-timeout",
+        "--retry",
+        "--idempotency-key",
+        "--input",
+        "--input-format",
+        "--set",
+        "--body",
+        "--trace",
+    ];
     itr.into_iter()
         .map(Into::into)
         .map(|arg| {
@@ -57,19 +82,25 @@ where
             if !export_create {
                 let is_flag = text.starts_with('-');
                 let was_flag = previous_was_flag;
-                previous_was_flag = is_flag && !text.contains('=');
+                previous_was_flag = is_flag
+                    && !text.contains('=')
+                    && VALUE_TAKING_GLOBALS.contains(&text.as_ref());
                 // argv[0] is the binary name, never part of the command path.
                 let skip = index == 0;
                 index += 1;
                 if abandoned || skip || is_flag {
                     return arg;
                 }
+                // A token bound to the preceding value-taking global is data, never a command
+                // word — checked BEFORE the command arms so `--profile websets` can't advance
+                // the match (it used to, leaving `--format csv` parsed as the global format).
+                if was_flag {
+                    return arg;
+                }
                 match (command_parts, text.as_ref()) {
                     (0, "websets") => command_parts = 1,
                     (1, "exports") => command_parts = 2,
                     (2, "create") => export_create = true,
-                    // A positional right after a flag is that flag's value, not a command word.
-                    _ if was_flag => {}
                     _ => abandoned = true,
                 }
                 return arg;

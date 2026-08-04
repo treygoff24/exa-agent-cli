@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 67 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `raw` prints the upstream bytes as-is, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 67 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints the upstream bytes as-is, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 

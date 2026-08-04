@@ -274,7 +274,7 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 
 Normalization happens at the parse boundary and in post-parse coercion so the rest of the program sees canonical values (design-principle "Input forgiveness"; architecture §6):
 
-- **Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
+- **Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--enrichment-format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
 - **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..10000`; `--highlights[=N]` accepts a positive character cap.
 - **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
 - **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
@@ -284,6 +284,8 @@ Normalization happens at the parse boundary and in post-parse coercion so the re
 ## 4. Per-command flag reference
 
 Universal flags (§3) are assumed throughout; only command-specific flags are listed. Local validation guards run **before** the API call and exit 1 (usage) with a copy-pasteable `suggestedCommand`.
+
+> The per-command blocks below are design targets and may drift from what has shipped. `exa-agent capabilities [COMMAND]` reflects the actual flags, types, and metadata of the running binary and is the source of truth when this document and the binary disagree.
 
 **Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand` — the agent never has to guess the next call.
 
@@ -496,13 +498,13 @@ exa-agent websets items get    WEBSET ITEM_ID
 exa-agent websets items delete WEBSET ITEM_ID --yes
 
 # searches
-exa-agent websets searches create WEBSET --query TEXT --count N --criteria TEXT --scope JSON|@file  # [create-POST]
+exa-agent websets searches create WEBSET --query TEXT --count N --criteria TEXT  # [create-POST]
 exa-agent websets searches get    WEBSET SEARCH_ID
 exa-agent websets searches cancel WEBSET SEARCH_ID
 
 # enrichments
 exa-agent websets enrichments create WEBSET --description TEXT \
-    --format text|number|date|boolean|options --body @json          # [create-POST]
+    --enrichment-format text|date|number|options|email|phone|url --body @json  # [create-POST]
 exa-agent websets enrichments get    WEBSET ENRICHMENT_ID
 exa-agent websets enrichments update WEBSET ENRICHMENT_ID --set path=value
 exa-agent websets enrichments delete WEBSET ENRICHMENT_ID --yes

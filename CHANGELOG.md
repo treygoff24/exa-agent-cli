@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 
 ## 0.5.0 — 2026-08-04
 
-Restores typed parity with the current Exa API under D16/D40: the surface now matches the live spec (2.0.0 as served 2026-08-03) and the documented docs-only endpoints, with OpenAI-compat routes and MPP/x402 access modes intentionally deferred (`raw` covers them; see decisions.md D40).
+Restores typed parity with the current Exa API under D16/D40: the surface now matches the live spec (2.0.0 as served 2026-08-03) and the documented docs-only endpoints. OpenAI-compatible routes remain raw-only; MPP/x402 remain unsupported (`raw` covers them; see decisions.md D40).
 
 ### Breaking
 
@@ -17,15 +17,7 @@ Restores typed parity with the current Exa API under D16/D40: the surface now ma
 - **`websets get --expand items`** — a real query-string parameter; `--set expand=items` is also lifted into the query for this command instead of landing in a GET body.
 - **Named flags**: `search --output-schema`, `search --system-prompt`, `agent runs create --system-prompt`, `contents --highlights [QUERY]`.
 - **Category `publication`** accepted on `search`/`similar` (the canonical spelling upstream renamed from `research paper`). Legacy spellings on typed flags — `research paper`, `fiber_ai`, `particle_news` — are coerced to canonical and flagged with a structured `legacy_value_coerced` warning; `--body`/`--set` values pass through untouched.
-
-### Changed
-
-- Re-vendored both OpenAPI snapshots (drift absorbed: crawl-date fields now marked deprecated upstream, `evaluate` on webset import scoping, `scopeId`, integer `limit`/`employees` types, entity research fields, publication `abstract`/`doi`, 402 responses on search/contents).
-
-## Unreleased
-
-### Added
-
+- **`-o`/`--output FILE`** writes the full response envelope to a file; stdout receives a small confirmation envelope instead, independent of the automatic spill-on-size behavior.
 - New exit code `13` (`billing`) and error code `insufficient_credits` for HTTP 402. An
   out-of-credits account previously surfaced as `invalid_value` / exit `1` — a *usage* error —
   so callers read it as "my flags were wrong" and retried with different arguments against an
@@ -37,15 +29,20 @@ Restores typed parity with the current Exa API under D16/D40: the surface now ma
   from both acceptance and rejection. The Exa API publishes no balance endpoint, so this
   billing-free probe is the only credit preflight available.
 
+### Changed
+
+- Re-vendored both OpenAPI snapshots (drift absorbed: crawl-date fields now marked deprecated upstream, `evaluate` on webset import scoping, `scopeId`, integer `limit`/`employees` types, entity research fields, publication `abstract`/`doi`, 402 responses on search/contents).
+
 ### Fixed
 
 - Rejected enum flag values now name the accepted set. `similar --category github` reported only
   `invalid value 'github' for '--category <CATEGORY>'`; it now lists the six valid categories.
   (`search --category` already did this.)
-- `contents` rows whose upstream crawl failed with an empty `error: {}` now carry
+- `contents` and `fetch` rows whose upstream crawl failed with an empty `error: {}` now carry
   `error_reason: "upstream_reason_unavailable"` in `contentDiagnostics[]` instead of a bare
   `crawl_status: "error"` with no reason at all. The matching per-URL warning label no longer
-  depends on a fallback command being constructible.
+  depends on a fallback command being constructible. This complements the 0.4.0 `outcome` field
+  (`full`/`partial`/`no_content`) on the same result rows.
 - `probe_inconclusive` and `invalid_field_type` were emitted but missing from the published
   `errorCodes` dictionary; both are now declared.
 

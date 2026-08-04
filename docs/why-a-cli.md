@@ -1,6 +1,6 @@
 # Why a CLI when the Exa MCP exists?
 
-The Exa MCP is good at what it does. For a Claude Desktop or Cursor user who wants web search in their assistant, it is the right level of simplicity. We built `exa-agent` because we kept wanting things from the Exa API that an MCP server, by its nature, is not positioned to give an autonomous coding agent. 
+The Exa MCP is good at what it does. For a Claude Desktop or Cursor user who wants web search in their assistant, it is the right level of simplicity. We built `exa-agent` because we kept wanting things from the Exa API that an MCP server, by its nature, is not positioned to give an autonomous coding agent.
 
 ## 1. Surface coverage
 
@@ -22,15 +22,14 @@ We measured this before building: early sessions with uncapped output were burni
 
 The MCP returns what the server returns. `exa-agent` commits to a contract an autonomous caller can build on:
 
-- One JSON envelope schema on every command (`exa.cli.response.v1`), with a published error-code dictionary and stable exit codes.
+- One JSON envelope schema (`exa.cli.response.v1`) on every structured success response, with a published error-code dictionary and stable exit codes. (`raw` mode prints upstream bytes as-is; streaming and human-format output differ by design.)
 - Offline self-description: `capabilities --json`, `schema`, and `robot-docs` let an agent learn the full surface with zero network calls and zero tokens of preloaded schema.
 - Mutation safety: create-POSTs are never auto-retried without an idempotency key; an ambiguous create leaves a pending-run record and a recovery command instead of a maybe-duplicate.
 - Destructive-operation gates: deletes and key admin require explicit confirmation flags, and `capabilities` labels every command's blast radius so an agent can know before it acts.
-- Cost visibility: every envelope carries `costDollars`, so an agent (or its supervisor) can meter spend per call.
+- Cost visibility: every structured success envelope carries `costDollars`, so an agent (or its supervisor) can meter spend per call.
 
 This is what any of us would want from a tool our unattended agents drive hundreds of times a day. It is a different set of requirements than "give my chat assistant web search," and it pulls toward a different shape.
 
 ## Same API, different users
 
 The MCP's primary user is a person with an assistant; `exa-agent`'s primary user is a program. The MCP optimizes for install friction and works beautifully there. The CLI optimizes for full surface, bounded context, and contractual behavior under automation, and pays for it with a `brew install` and an API key.
-

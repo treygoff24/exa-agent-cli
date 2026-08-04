@@ -106,6 +106,10 @@ struct LiveExtras<'a> {
     next_action_webset_id: Option<&'a str>,
 }
 
+/// The one `websets imports create` invocation that actually succeeds. Both the rejected
+/// `--csv`/`--url` flags and the missing-field check point straight at it rather than at `--help`.
+const IMPORTS_CREATE_BODY_EXAMPLE: &str = r#"exa-agent websets imports create --source csv --body '{"size":1024,"count":10,"entity":{"type":"company"}}'"#;
+
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
     let cli = match Cli::try_parse() {
@@ -221,7 +225,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 && e.to_string().contains("imports create")
             {
                 message = "websets imports create no longer accepts --csv or --url; use the documented upload flow".to_string();
-                suggestion = Some("exa-agent websets imports create --help".to_string());
+                suggestion = Some(IMPORTS_CREATE_BODY_EXAMPLE.to_string());
             }
 
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
@@ -272,6 +276,35 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                         );
                         suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
                     }
+                }
+            }
+
+            // A prose "Did you mean ...?" is not a command an agent can run. Where the shape of
+            // the fix is knowable, replace it with a runnable `suggestedCommand`.
+            let replaceable = suggestion
+                .as_deref()
+                .is_none_or(|current| current.starts_with("Did you mean"));
+            if replaceable && kind == ErrorKind::UnknownArgument {
+                let flag = clap_ctx_strings(&e, ContextKind::InvalidArg)
+                    .into_iter()
+                    .next();
+                let corrected = clap_ctx_strings(&e, ContextKind::SuggestedArg)
+                    .into_iter()
+                    .last()
+                    .map(public_clap_text);
+                suggestion = flag
+                    .as_deref()
+                    .zip(corrected.as_deref())
+                    .and_then(|(flag, corrected)| rewrite_argv_value(flag, corrected))
+                    .or_else(|| {
+                        command_path_from_error(&e)
+                            .map(|command| unknown_flag_suggestion(&command, flag.as_deref()))
+                    })
+                    .or(suggestion);
+            }
+            if replaceable && matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
+                if let Some(rewritten) = rejected_value_suggestion(&e) {
+                    suggestion = Some(rewritten);
                 }
             }
 
@@ -326,11 +359,73 @@ fn public_clap_text(text: String) -> String {
         }
         output.push(line);
     }
-    let mut text = output.join("\n");
+    let mut text = realign_options_block(&output).join("\n");
     if had_trailing_newline {
         text.push('\n');
     }
     text
+}
+
+/// clap lays the local `Options:` table out around `--export-format <EXPORT_FORMAT>`; renaming it
+/// to `--format <FORMAT>` afterwards leaves every description column and wrapped continuation line
+/// indented for a flag that is 14 characters wider. Re-columnize the block.
+fn realign_options_block(lines: &[&str]) -> Vec<String> {
+    let Some(start) = lines.iter().position(|line| *line == "Options:") else {
+        return lines.iter().map(|line| line.to_string()).collect();
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.trim().is_empty())
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(lines.len());
+
+    let rows: Vec<(usize, usize, &str, &str)> = lines[start + 1..end]
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, line)| {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('-') {
+                return None;
+            }
+            let indent = line.len() - trimmed.len();
+            let (flags, description) = trimmed.split_once("  ")?;
+            Some((start + 1 + offset, indent, flags, description.trim_start()))
+        })
+        .collect();
+    if rows.is_empty() {
+        return lines.iter().map(|line| line.to_string()).collect();
+    }
+
+    let column = rows
+        .iter()
+        .map(|(_, indent, flags, _)| indent + flags.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+    let mut in_description = false;
+    let mut row_iter = rows.iter().peekable();
+    for (index, line) in out.iter_mut().enumerate().take(end).skip(start + 1) {
+        if row_iter.peek().is_some_and(|(row, ..)| *row == index) {
+            let (_, indent, flags, description) = row_iter.next().expect("peeked row exists");
+            *line = format!(
+                "{:indent$}{flags}{}{description}",
+                "",
+                " ".repeat(column - indent - flags.len())
+            );
+            in_description = true;
+        } else if in_description {
+            // Wrapped description lines can themselves begin with `--`, so identify them by
+            // position in the table rather than by their first character.
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                in_description = false;
+            } else {
+                *line = format!("{:column$}{trimmed}", "");
+            }
+        }
+    }
+    out
 }
 
 fn search_num_results_args() -> Option<(String, String, Option<String>)> {
@@ -392,6 +487,135 @@ fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Opti
             .with_details(details)
             .with_suggestion(suggestion),
     ))
+}
+
+/// A rejected flag is the stale-knowledge agent's most common dead end. When the flag names a
+/// request-body field the registry knows about, `--set` reaches it; otherwise send the agent to
+/// the shipped truth for that command rather than to a guess.
+fn unknown_flag_suggestion(command: &str, flag: Option<&str>) -> String {
+    match flag.and_then(|flag| registry_body_path_for_flag(command, flag)) {
+        Some(body_path) => format!("exa-agent {command} --set {body_path}=VALUE"),
+        None => format!("exa-agent capabilities {command} --compact"),
+    }
+}
+
+fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {
+    let token = flag
+        .trim()
+        .split('=')
+        .next()?
+        .trim()
+        .trim_start_matches('-');
+    if token.is_empty() {
+        return None;
+    }
+    let camel = kebab_to_camel(token);
+    registry::lookup_by_command(command)?
+        .fields
+        .iter()
+        .map(|field| field.body_path)
+        .find(|path| *path == camel || path.rsplit('.').next() == Some(camel.as_str()))
+}
+
+fn kebab_to_camel(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut upper_next = false;
+    for ch in token.chars() {
+        if ch == '-' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Rewrite the invocation the agent actually typed with an accepted value, so the suggestion is
+/// a command it can rerun rather than a fragment it has to reassemble.
+fn rejected_value_suggestion(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+    let invalid = clap_ctx_strings(e, ContextKind::InvalidValue)
+        .into_iter()
+        .next()?;
+    let valid = clap_ctx_strings(e, ContextKind::ValidValue);
+    let replacement = clap_ctx_strings(e, ContextKind::SuggestedValue)
+        .into_iter()
+        .last()
+        // With a handful of accepted values any of them is a fair demonstration; with a long
+        // enum, picking one would read as a recommendation the CLI cannot make.
+        .or_else(|| (valid.len() <= 3).then(|| valid.first().cloned()).flatten())?;
+    rewrite_argv_value(&invalid, &replacement)
+}
+
+fn rewrite_argv_value(invalid: &str, replacement: &str) -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    if args.is_empty() {
+        return None;
+    }
+    args[0] = "exa-agent".to_string();
+    let mut replaced = false;
+    for arg in args.iter_mut().skip(1) {
+        if arg == invalid {
+            *arg = replacement.to_string();
+            replaced = true;
+            break;
+        }
+        if let Some((flag, value)) = arg.split_once('=') {
+            if value == invalid {
+                *arg = format!("{flag}={replacement}");
+                replaced = true;
+                break;
+            }
+        }
+    }
+    replaced.then(|| {
+        args.iter()
+            .map(|arg| display_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+fn display_arg(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "-_./:=@+".contains(ch));
+    if plain {
+        arg.to_string()
+    } else {
+        shell_quote(arg)
+    }
+}
+
+/// The full command path from a clap usage line, e.g. `websets exports create`.
+fn command_path_from_error(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+    let usage = clap_ctx_strings(e, ContextKind::Usage)
+        .into_iter()
+        .next()
+        .or_else(|| {
+            e.to_string()
+                .lines()
+                .find(|line| line.contains("Usage:"))
+                .map(ToOwned::to_owned)
+        })?;
+    let usage = strip_ansi(&usage);
+    let usage = usage.trim().strip_prefix("Usage: ")?;
+    let usage = usage.strip_prefix("exa-agent ")?;
+    let parts: Vec<&str> = usage
+        .split_whitespace()
+        .take_while(|token| {
+            token
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+                && !token.starts_with('-')
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn parent_command_from_error(e: &clap::Error) -> Option<String> {
@@ -506,11 +730,16 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
     match &cli.command {
         Command::Capabilities(args) => {
-            emit_stdout(&capabilities_for(args)?, pretty);
+            emit_document(
+                &capabilities_for(args)?,
+                "capabilities",
+                &cli.globals,
+                pretty,
+            )?;
             Ok(0)
         }
         Command::Schema { sub } => dispatch_schema(sub, &cli.globals, pretty),
-        Command::RobotDocs { sub } => dispatch_robot_docs(sub, pretty),
+        Command::RobotDocs { sub } => dispatch_robot_docs(sub, &cli.globals, pretty),
         Command::Doctor(args) => {
             let checks = parse_checks(&args.check);
             doctor::validate_check_ids(&checks)?;
@@ -636,7 +865,7 @@ fn build_search_spec(
         *value = args
             .output_schema
             .as_deref()
-            .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+            .map(read_output_schema_arg)
             .transpose()?
             .map(|value| value.to_string());
     }
@@ -1213,7 +1442,7 @@ fn build_answer_spec(
     let output_schema = args
         .output_schema
         .as_deref()
-        .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+        .map(read_output_schema_arg)
         .transpose()?
         .map(|value| value.to_string());
     let mut flag_values = args.into_flag_values();
@@ -1508,6 +1737,7 @@ fn dispatch_admin_keys_create(
                 ),
             ));
         };
+        ensure_output_targets_distinct(globals, secret_path)?;
         let secret_output = reserve_webhook_secret_file(secret_path)?;
         dispatch_typed_command_with_extras(
             spec,
@@ -1883,7 +2113,7 @@ fn build_agent_run_spec(
     let output_schema = args
         .output_schema
         .as_deref()
-        .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+        .map(read_output_schema_arg)
         .transpose()?
         .map(|value| value.to_string());
     let input = args
@@ -2168,15 +2398,30 @@ fn dispatch_research(
     globals: &GlobalArgs,
     _pretty: bool,
 ) -> Result<i32, CliError> {
-    let op =
-        registry::lookup_by_segments(&["search"]).expect("search is the research stub context");
-    with_typed_error_context(op, globals, || match sub {
-        ResearchCmd::Create(args) => Err(research_retired_error("create", Some(&args.query), None)),
-        ResearchCmd::List(_) => Err(research_retired_error("list", None, None)),
-        ResearchCmd::Get { research_id } => {
-            Err(research_retired_error("get", None, Some(research_id)))
-        }
-    })
+    let err = match sub {
+        ResearchCmd::Create(args) => research_retired_error("create", Some(&args.query), None),
+        ResearchCmd::List(_) => research_retired_error("list", None, None),
+        ResearchCmd::Get { research_id } => research_retired_error("get", None, Some(research_id)),
+    };
+    Ok(emit_local_error(err, globals))
+}
+
+/// Emit an error for a command that never reaches the network, keeping request identity while
+/// leaving `operation.method`/`operation.path` null.
+fn emit_local_error(err: CliError, globals: &GlobalArgs) -> i32 {
+    let code = err.category() as i32;
+    let request_id = if globals.print_request || globals.dry_run {
+        "req_dry_run".to_string()
+    } else {
+        transport::new_request_id()
+    };
+    let env = ErrorEnvelope::from_error(&err)
+        .with_request_context(request_id, globals.correlation_id.clone());
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+    );
+    code
 }
 
 fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliError> {
@@ -2313,7 +2558,10 @@ fn dispatch_monitor_create(
         let secret_output = args
             .secret_output
             .as_deref()
-            .map(reserve_webhook_secret_file)
+            .map(|path| {
+                ensure_output_targets_distinct(globals, path)?;
+                reserve_webhook_secret_file(path)
+            })
             .transpose()?;
         dispatch_typed_command_with_extras(
             spec,
@@ -2492,6 +2740,53 @@ impl Drop for SecretOutputReservation {
             let _ = std::fs::remove_file(&self.target);
         }
     }
+}
+
+/// `--output` and `--secret-output` must never name the same file. The response write happens
+/// after the secret is committed, so an equivalent target silently overwrites the only copy of a
+/// one-time secret and still exits 0. Reject the combination before anything is reserved or sent.
+fn ensure_output_targets_distinct(globals: &GlobalArgs, secret_path: &str) -> Result<(), CliError> {
+    let Some(output_path) = globals.output.as_deref() else {
+        return Ok(());
+    };
+    if !paths_target_same_file(output_path, secret_path) {
+        return Ok(());
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_flag_combination",
+            format!(
+                "--output `{output_path}` and --secret-output `{secret_path}` resolve to the same file; the response write would overwrite the one-time secret"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "outputPath": output_path,
+            "secretOutputPath": secret_path,
+        })),
+    ))
+}
+
+fn paths_target_same_file(left: &str, right: &str) -> bool {
+    let (left, right) = (std::path::Path::new(left), std::path::Path::new(right));
+    match (
+        canonical_output_target(left),
+        canonical_output_target(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Canonicalize the existing parent directory and re-attach the file name, so two spellings of a
+/// file that does not exist yet (`x` and `./x`) compare equal.
+fn canonical_output_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    Some(std::fs::canonicalize(parent).ok()?.join(name))
 }
 
 fn reserve_webhook_secret_file(path: &str) -> Result<SecretOutputReservation, CliError> {
@@ -3755,7 +4050,7 @@ fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), C
                 ),
             )
             .with_suggestion(
-                r#"exa-agent websets imports create --source csv --body '{"size":1024,"count":10,"entity":{"type":"company"}}'"#,
+                IMPORTS_CREATE_BODY_EXAMPLE,
             ),
         ));
     }
@@ -4434,7 +4729,10 @@ fn dispatch_websets_webhooks_create(
         let secret_output = args
             .secret_output
             .as_deref()
-            .map(reserve_webhook_secret_file)
+            .map(|path| {
+                ensure_output_targets_distinct(globals, path)?;
+                reserve_webhook_secret_file(path)
+            })
             .transpose()?;
         dispatch_typed_command_with_extras(
             spec,
@@ -4659,9 +4957,26 @@ fn dispatch_typed_preview_with_warnings(
 
 fn checked_substitute_path(template: &str, params: &[(&str, &str)]) -> Result<String, CliError> {
     for (key, value) in params {
+        reject_empty_path_id(value, key)?;
         reject_placeholder_value(value, key)?;
     }
     Ok(substitute_path(template, params))
+}
+
+/// An empty id collapses the path to its collection root (`/websets/v0/websets/`), which is a
+/// different, often broader, endpoint. Refuse it here rather than sending it.
+fn reject_empty_path_id(value: &str, arg_name: &str) -> Result<(), CliError> {
+    if !value.trim().is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "placeholder_argument",
+            format!("{arg_name} is empty; pass the resource id"),
+        )
+        .with_details(serde_json::json!({ "argument": arg_name, "received": value }))
+        .with_suggestion(placeholder_example_command(arg_name)),
+    ))
 }
 
 fn substitute_path(template: &str, params: &[(&str, &str)]) -> String {
@@ -4786,6 +5101,31 @@ fn shell_join(args: &[String]) -> String {
         .join(" ")
 }
 
+/// `outputSchema` is a JSON Schema object upstream. Accepting `[1]` or `"x"` here only defers
+/// the rejection to a paid round-trip with an opaque upstream message.
+fn read_output_schema_arg(raw: &str) -> Result<serde_json::Value, CliError> {
+    let value = request::read_json_value_arg(raw, "output-schema")?;
+    if value.is_object() {
+        return Ok(value);
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_field_type",
+            "`--output-schema` must be a JSON object (a JSON Schema), not a scalar or array",
+        )
+        .with_details(serde_json::json!({
+            "issue": "invalid_field_type",
+            "field": "outputSchema",
+            "flag": "output-schema",
+            "expected": "object",
+            "received": value,
+        }))
+        .with_suggestion(
+            r#"exa-agent search "<query>" --output-schema '{"type":"object","properties":{}}'"#,
+        ),
+    ))
+}
+
 fn shell_quote(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();
@@ -4868,7 +5208,7 @@ fn normalize_content_flag_values(
                     Some(normalize_highlights_flag(&raw, query)?)
                 }
                 ("contents", "highlights", Some(raw)) => {
-                    Some(normalize_contents_highlights_flag(&raw))
+                    Some(normalize_contents_highlights_flag(&raw)?)
                 }
                 ("search", "category", Some(raw)) | ("similar", "category", Some(raw)) => {
                     Some(coerce_typed_category(&raw))
@@ -4955,19 +5295,48 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
     Ok(default_highlights_value(query, max_characters).to_string())
 }
 
-fn normalize_contents_highlights_flag(raw: &str) -> String {
-    if raw.is_empty() {
-        return "true".to_string();
-    }
+fn normalize_contents_highlights_flag(raw: &str) -> Result<String, CliError> {
     let trimmed = raw.trim();
-    if trimmed.starts_with('{') && trimmed.ends_with('}') {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if value.is_object() {
-                return value.to_string();
-            }
-        }
+    if trimmed.is_empty() {
+        return Ok("true".to_string());
     }
-    serde_json::json!({ "query": raw }).to_string()
+    // A value that opens with `{` was meant as an options object. Silently demoting a malformed
+    // one to `{"query": "{\"numSentences\": ..."}` sends the broken JSON upstream as a search
+    // phrase and returns plausible nonsense.
+    if trimmed.starts_with('{') {
+        let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|err| {
+            CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    format!("`--highlights` looks like a JSON options object but is not valid JSON: {err}"),
+                )
+                .with_details(serde_json::json!({ "received": raw }))
+                .with_suggestion(
+                    r#"exa-agent contents <url-or-id> --highlights '{"query":"pricing","numSentences":3}'"#,
+                ),
+            )
+        })?;
+        if !value.is_object() {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_field_type",
+                    "`--highlights` JSON must be a highlights options object",
+                )
+                .with_details(serde_json::json!({
+                    "issue": "invalid_field_type",
+                    "field": "contents.highlights",
+                    "flag": "highlights",
+                    "expected": "highlights options object",
+                    "received": value,
+                }))
+                .with_suggestion(
+                    r#"exa-agent contents <url-or-id> --highlights '{"query":"pricing","numSentences":3}'"#,
+                ),
+            ));
+        }
+        return Ok(value.to_string());
+    }
+    Ok(serde_json::json!({ "query": raw }).to_string())
 }
 
 fn build_typed_spec(
@@ -5284,21 +5653,23 @@ fn dispatch_typed_inner(
         let mut warnings = typed_command_warnings(spec.op);
         warnings.extend_from_slice(extras.extra_warnings);
         warnings.extend(request_body_warnings(spec.op, &typed_wire_body(spec)));
-        emit_stdout(
-            &redacted_preview_expanded(
-                spec,
-                TypedPreviewOptions {
-                    path,
-                    query: options.query,
-                    expands_to: options.expands_to,
-                    extra_headers: options.extra_headers,
-                    command_override: options.command_override,
-                    globals: Some(globals),
-                    warnings: &warnings,
-                },
-            ),
-            pretty,
+        let preview = redacted_preview_expanded(
+            spec,
+            TypedPreviewOptions {
+                path,
+                query: options.query,
+                expands_to: options.expands_to,
+                extra_headers: options.extra_headers,
+                command_override: options.command_override,
+                globals: Some(globals),
+                warnings: &warnings,
+            },
         );
+        let command = options
+            .command_override
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| spec.op.command());
+        emit_document(&preview, &command, globals, pretty)?;
         return Ok(0);
     }
     transport::ensure_network_allowed()?;
@@ -5999,7 +6370,7 @@ fn execute_typed_live<T: Transport>(
         });
     attach_content_metadata(&mut envelope, outcome, content_diagnostics);
     append_warning_next_actions(&mut envelope);
-    append_operation_next_actions(&mut envelope, spec.op, extras.next_action_webset_id);
+    append_operation_next_actions(&mut envelope, spec.op, extras.next_action_webset_id)?;
     emit_completed_response(&mut envelope, globals, execution.pretty)?;
     Ok(exit_code)
 }
@@ -6020,7 +6391,13 @@ fn execute_streaming_live<T: Transport>(
     let ndjson = !globals.raw && stream_mode == OutputMode::Ndjson;
     let human = !globals.raw && stream_mode == OutputMode::Human;
     let mut seq = 0u64;
-    let mut out = std::io::stdout().lock();
+    // `--output` is a contract-level promise on every surface, streaming included: point the
+    // stream writer at the file and keep stdout for the confirmation envelope.
+    let output_path = globals.output.as_deref();
+    let mut out: Box<dyn std::io::Write> = match output_path {
+        Some(path) => Box::new(std::io::BufWriter::new(create_output_file(path)?)),
+        None => Box::new(std::io::stdout().lock()),
+    };
     let mut on_item = |item: StreamItem<'_>| -> Result<(), CliError> {
         match item {
             StreamItem::Bytes(bytes) if globals.raw => {
@@ -6053,6 +6430,13 @@ fn execute_streaming_live<T: Transport>(
         use std::io::Write;
         out.flush()
             .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+        if let Some(path) = output_path {
+            drop(out);
+            emit_stdout(
+                &output_file_confirmation(command, path, written_output_bytes(path)),
+                pretty,
+            );
+        }
         return Ok(0);
     }
 
@@ -6091,12 +6475,14 @@ fn execute_streaming_live<T: Transport>(
             answer_request_body.as_ref().map(|_| Vec::new()),
         );
         append_warning_next_actions(&mut envelope);
-        apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-        if ndjson {
-            write_ndjson(&mut out, &envelope).map_err(|err| stream_write_error(err, None))?;
+        if let Some(path) = output_path {
+            write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
+            drop(out);
+            elide_data(&mut envelope, path, written_output_bytes(path));
+            emit_response_value(&envelope, globals, pretty);
         } else {
-            write_stdout_value(&mut out, &envelope, pretty)
-                .map_err(|err| stream_write_error(err, None))?;
+            apply_output_ceiling(&mut envelope, globals.max_output_bytes);
+            write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
         }
         return Ok(0);
     }
@@ -6132,19 +6518,40 @@ fn execute_streaming_live<T: Transport>(
         answer_request_body.as_ref().map(|_| Vec::new()),
     );
     append_warning_next_actions(&mut terminal);
-    apply_output_ceiling(&mut terminal, globals.max_output_bytes);
-    if ndjson {
-        write_ndjson(&mut out, &terminal)
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
-    } else if human {
-        use std::io::Write;
-        out.flush()
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+    let last_event_id = last_frame_event_id(&frames);
+    if let Some(path) = output_path {
+        write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
+        drop(out);
+        elide_data(&mut terminal, path, written_output_bytes(path));
+        emit_response_value(&terminal, globals, pretty);
     } else {
-        write_stdout_value(&mut out, &terminal, pretty)
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+        apply_output_ceiling(&mut terminal, globals.max_output_bytes);
+        write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
     }
     Ok(0)
+}
+
+fn write_stream_terminal(
+    out: &mut impl std::io::Write,
+    envelope: &serde_json::Value,
+    ndjson: bool,
+    human: bool,
+    pretty: bool,
+    last_event_id: Option<&str>,
+) -> Result<(), CliError> {
+    if ndjson {
+        write_ndjson(out, envelope).map_err(|err| stream_write_error(err, last_event_id))
+    } else if human {
+        out.flush()
+            .map_err(|err| stream_write_error(err, last_event_id))
+    } else {
+        write_stdout_value(out, envelope, pretty)
+            .map_err(|err| stream_write_error(err, last_event_id))
+    }
+}
+
+fn written_output_bytes(path: &str) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 fn write_stream_event_ndjson(
@@ -6723,9 +7130,9 @@ fn append_operation_next_actions(
     envelope: &mut serde_json::Value,
     operation: &registry::OperationDef,
     webset_id: Option<&str>,
-) {
+) -> Result<(), CliError> {
     let Some(data) = envelope.get("data").cloned() else {
-        return;
+        return Ok(());
     };
     match operation.command().as_str() {
         "websets imports create" => {
@@ -6741,26 +7148,33 @@ fn append_operation_next_actions(
                         ),
                     }));
             } else {
-                let import_id = data
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("<id>");
-                envelope["warnings"]
-                    .as_array_mut()
-                    .expect("response envelopes initialize warnings as an array")
-                    .push(serde_json::json!({
-                        "code": "upstream_malformed",
-                        "message": "websets imports create response did not include string `uploadUrl`; upload step could not be prepared",
-                        "suggestedCommand": format!(
-                            "exa-agent websets imports get {}",
-                            shell_quote(import_id)
-                        ),
-                    }));
+                // Without `uploadUrl` the create half-succeeded: there is nothing to upload to,
+                // so the caller must not read exit 0 as "import ready". `upstream_malformed` is
+                // an exit-5 error in the dictionary, never a warning on a success envelope.
+                let import_id = data.get("id").and_then(serde_json::Value::as_str);
+                let mut details = serde_json::json!({
+                    "field": "uploadUrl",
+                    "command": "websets imports create",
+                });
+                if let Some(import_id) = import_id {
+                    details["importId"] = serde_json::Value::String(import_id.to_string());
+                }
+                return Err(CliError::Upstream(
+                    Diag::new(
+                        "upstream_malformed",
+                        "websets imports create response did not include string `uploadUrl`; the upload step could not be prepared",
+                    )
+                    .with_details(details)
+                    .with_suggestion(format!(
+                        "exa-agent websets imports get {}",
+                        shell_quote(import_id.unwrap_or("<id>"))
+                    )),
+                ));
             }
         }
         "websets exports create" => {
             let Some(webset_id) = webset_id else {
-                return;
+                return Ok(());
             };
             if let Some(export_id) = data.get("id").and_then(serde_json::Value::as_str) {
                 envelope["nextActions"]
@@ -6778,6 +7192,7 @@ fn append_operation_next_actions(
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn append_contents_status_warnings(
@@ -7088,15 +7503,17 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
     match sub {
         SchemaCmd::List => {
             let list = schema_operations();
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_list.v1",
                     "ok": true,
                     "count": list.len(),
                     "operations": list,
                 }),
+                "schema list",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::Show { name } => {
@@ -7111,19 +7528,21 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                         .with_suggestion("exa-agent schema list"),
                     )
                 })?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_show.v1",
                     "ok": true,
                     "operation": operation_schema(op),
                 }),
+                "schema show",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::Export(args) => {
             let target = args.api.as_deref().or(args.cli.as_deref()).unwrap_or("cli");
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_export.v1",
                     "ok": true,
@@ -7136,8 +7555,10 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     },
                     "operations": schema_operations(),
                 }),
+                "schema export",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::ValidateInput(args) => {
@@ -7152,7 +7573,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             })?;
             let body = read_validate_input_body(globals)?;
             let validation = validate_registry_body(op, &body, true, true);
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_validate_input.v1",
                     "ok": true,
@@ -7162,8 +7583,10 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     "suggestedCommand": validation.suggested_command,
                     "note": validation.note,
                 }),
+                "schema validate-input",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::Refresh(args) => {
@@ -7191,7 +7614,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             )?;
             let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
             let current = live_spec_sha256 == registry::EMBEDDED_SPEC_SHA256;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
                     "ok": true,
@@ -7201,14 +7624,20 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
                     "liveSpecSha256": live_spec_sha256,
                 }),
+                "schema refresh",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(i32::from(args.check && !current))
         }
     }
 }
 
-fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_robot_docs(
+    sub: &RobotDocsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     match sub {
         RobotDocsCmd::Guide => emit_robot_docs(
             serde_json::json!({
@@ -7223,7 +7652,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Named output controls include search --output-schema JSON|@file and --system-prompt TEXT|@file, contents --highlights [QUERY|JSON], and agent runs create --system-prompt TEXT|@file.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
-                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `websets exports get WEBSET EXPORT_ID`.",
+                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
                     "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
@@ -7236,7 +7665,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
                     "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (HTTP 402). The key is valid and the command was correct, so do not retry and do not re-guess flags: top up at https://dashboard.exa.ai or switch lanes to `parallel-cli` for the rest of the task.",
-                    "`exa-agent auth test --json` and `doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
+                    "`exa-agent auth test --json` and `exa-agent doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
                     "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
                     "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
@@ -7244,6 +7673,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
                 ],
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Commands => emit_robot_docs(
@@ -7253,6 +7683,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "section": "commands",
                 "commands": schema_operations(),
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Errors => emit_robot_docs(
@@ -7302,6 +7733,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     },
                 ],
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Examples(args) => emit_robot_docs(
@@ -7318,6 +7750,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "exa-agent team info --dry-run --print-request --compact"
                 ],
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Prompts => emit_robot_docs(
@@ -7330,13 +7763,18 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Before live writes, run the same command with `--dry-run --print-request` and inspect the JSON envelope."
                 ],
             }),
+            globals,
             pretty,
         ),
     }
 }
 
-fn emit_robot_docs(value: serde_json::Value, pretty: bool) -> Result<i32, CliError> {
-    emit_stdout(&value, pretty);
+fn emit_robot_docs(
+    value: serde_json::Value,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    emit_document(&value, "robot-docs", globals, pretty)?;
     Ok(0)
 }
 
@@ -7759,6 +8197,17 @@ fn validate_highlights_option_shape(
         }
     }
 
+    if let Some(issue) = validate_positive_integer_field(
+        object.get("numSentences"),
+        field,
+        "numSentences",
+        flag,
+        1,
+        None,
+    ) {
+        return Some(issue);
+    }
+
     validate_positive_integer_field(
         object.get("maxCharacters"),
         field,
@@ -7887,7 +8336,14 @@ fn registry_validation_error(outcome: ValidateInputOutcome) -> CliError {
         _ => format!("field `{field}` (flag `{flag}`) is invalid"),
     };
 
-    let mut diag = Diag::new(issue, message).with_details(details);
+    // `details.issue` is the fine-grained validator label; `error.code` must stay inside the
+    // published §5.1 dictionary, so a rejected enum reads as `invalid_value` on every command
+    // rather than `invalid_value` on typed flags and `invalid_enum_value` on registry ones.
+    let code = match issue {
+        "invalid_enum_value" => "invalid_value",
+        other => other,
+    };
+    let mut diag = Diag::new(code, message).with_details(details);
     if let Some(suggestion) = outcome.suggested_command {
         diag = diag.with_suggestion(suggestion);
     }
@@ -8661,13 +9117,89 @@ fn emit_completed_response(
 ) -> Result<(), CliError> {
     if let Some(path) = globals.output.as_deref() {
         let serialized = serialize_response_output(envelope, globals, pretty)?;
-        write_requested_output(path, &serialized)?;
-        elide_data(envelope, path, serialized.len() as u64);
+        match write_requested_output(path, &serialized) {
+            Ok(()) => elide_data(envelope, path, serialized.len() as u64),
+            Err(err) => {
+                // The upstream call already succeeded and its response is the only copy of ids,
+                // nextActions, and dataHash the caller will ever see. Losing it to a failed file
+                // write turns a completed create into an invisible duplicate risk, so fall back
+                // to the full inline envelope and still exit non-zero.
+                push_output_write_warning(envelope, path, &err);
+                apply_output_ceiling(envelope, globals.max_output_bytes);
+                emit_response_value(envelope, globals, pretty);
+                return Err(err);
+            }
+        }
     } else {
         apply_output_ceiling(envelope, globals.max_output_bytes);
     }
     emit_response_value(envelope, globals, pretty);
     Ok(())
+}
+
+fn push_output_write_warning(envelope: &mut serde_json::Value, path: &str, err: &CliError) {
+    let Some(warnings) = envelope
+        .get_mut("warnings")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    warnings.push(serde_json::json!({
+        "code": "output_write_failed",
+        "message": format!(
+            "failed to write --output file `{path}`; the full response is inline on stdout instead: {}",
+            err.diag().message
+        ),
+        "path": path,
+    }));
+}
+
+/// Route a non-response document (dry-run preview, capabilities, other self-description) through
+/// the same `--output` sink as live responses; stdout then carries the confirmation envelope.
+fn emit_document(
+    value: &serde_json::Value,
+    command: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<(), CliError> {
+    let Some(path) = globals.output.as_deref() else {
+        emit_stdout(value, pretty);
+        return Ok(());
+    };
+    let serialized = serialize_response_output(value, globals, pretty)?;
+    match write_requested_output(path, &serialized) {
+        Ok(()) => {
+            emit_stdout(
+                &output_file_confirmation(command, path, serialized.len() as u64),
+                pretty,
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let mut inline = value.clone();
+            if inline.get("warnings").is_none() {
+                if let Some(object) = inline.as_object_mut() {
+                    object.insert("warnings".to_string(), serde_json::json!([]));
+                }
+            }
+            push_output_write_warning(&mut inline, path, &err);
+            emit_stdout(&inline, pretty);
+            Err(err)
+        }
+    }
+}
+
+/// The documented stdout confirmation for `--output` when there is no response envelope to elide.
+fn output_file_confirmation(command: &str, path: &str, bytes: u64) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "exa.cli.response.v1",
+        "ok": true,
+        "command": command,
+        "data": serde_json::Value::Null,
+        "dataTruncated": true,
+        "dataPath": path,
+        "bytes": bytes,
+    })
 }
 
 fn emit_raw_result(
@@ -8746,12 +9278,18 @@ fn output_serialization_error(err: serde_json::Error) -> CliError {
 }
 
 fn write_requested_output(path: &str, bytes: &[u8]) -> Result<(), CliError> {
-    std::fs::write(path, bytes).map_err(|err| {
-        CliError::Usage(Diag::new(
-            "invalid_value",
-            format!("failed to write --output file `{path}`: {err}"),
-        ))
-    })
+    std::fs::write(path, bytes).map_err(|err| output_write_error(path, &err))
+}
+
+fn create_output_file(path: &str) -> Result<std::fs::File, CliError> {
+    std::fs::File::create(path).map_err(|err| output_write_error(path, &err))
+}
+
+fn output_write_error(path: &str, err: &std::io::Error) -> CliError {
+    CliError::Usage(Diag::new(
+        "invalid_value",
+        format!("failed to write --output file `{path}`: {err}"),
+    ))
 }
 
 fn elide_data(envelope: &mut serde_json::Value, path: &str, bytes: u64) {

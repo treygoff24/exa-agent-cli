@@ -44,17 +44,33 @@ where
     let mut export_format_value_pending = false;
     let mut export_format_consumed = false;
     let mut command_parts = 0usize;
+    // Give up on the first positional that cannot be part of `websets exports create`, rather
+    // than restarting the match. Restarting made the rewrite latch onto the token run wherever
+    // it appeared — including `contents websets exports create` positionals.
+    let mut abandoned = false;
+    let mut index = 0usize;
+    let mut previous_was_flag = false;
     itr.into_iter()
         .map(Into::into)
         .map(|arg| {
             let text = arg.to_string_lossy();
             if !export_create {
+                let is_flag = text.starts_with('-');
+                let was_flag = previous_was_flag;
+                previous_was_flag = is_flag && !text.contains('=');
+                // argv[0] is the binary name, never part of the command path.
+                let skip = index == 0;
+                index += 1;
+                if abandoned || skip || is_flag {
+                    return arg;
+                }
                 match (command_parts, text.as_ref()) {
                     (0, "websets") => command_parts = 1,
                     (1, "exports") => command_parts = 2,
                     (2, "create") => export_create = true,
-                    (_, value) if !value.starts_with('-') => command_parts = 0,
-                    _ => {}
+                    // A positional right after a flag is that flag's value, not a command word.
+                    _ if was_flag => {}
+                    _ => abandoned = true,
                 }
                 return arg;
             }
@@ -1202,7 +1218,7 @@ pub enum WebsetsExportsCmd {
             long = "export-format",
             value_enum,
             ignore_case = true,
-            help = "Export file format (csv|json). On this command --format selects the export format; select envelope output with --json/--ndjson."
+            help = "Export file format (csv|json). On this command --format selects the export format, so the global --format envelope selector is unavailable here: choose the envelope shape with --json or --ndjson (or EXA_OUTPUT)."
         )]
         export_format: Option<WebsetExportFormat>,
     },

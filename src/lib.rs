@@ -7670,7 +7670,7 @@ fn dispatch_robot_docs(
                     "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
-                    "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
+                    "Errors are JSON on stderr with stable error.code values; run exa-agent robot-docs errors for the full dictionary."
                 ],
             }),
             globals,

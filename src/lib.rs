@@ -628,7 +628,19 @@ fn build_search_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     validate_search_intent_args(args)?;
-    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), &args.query)?;
+    let mut flag_values = args.into_flag_values();
+    if let Some((_, value)) = flag_values
+        .iter_mut()
+        .find(|(flag, _)| *flag == "output-schema")
+    {
+        *value = args
+            .output_schema
+            .as_deref()
+            .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+            .transpose()?
+            .map(|value| value.to_string());
+    }
+    let flag_values = normalize_content_flag_values(op, flag_values, &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
@@ -1211,6 +1223,7 @@ fn dispatch_fetch(args: &FetchArgs, globals: &GlobalArgs, pretty: bool) -> Resul
             ids: Vec::new(),
             text: Some(String::new()),
             summary_query: Some("Summarize the page".to_string()),
+            highlights: None,
             chunk_size: None,
         };
         let spec = build_contents_spec(&contents_args, globals)?;
@@ -1871,6 +1884,7 @@ fn build_agent_run_spec(
     let flag_values = [
         ("query", Some(args.query.clone())),
         ("output-schema", output_schema),
+        ("system-prompt", args.system_prompt.clone()),
         ("input", input),
         ("input-row", input_rows),
         ("exclusion", exclusion),
@@ -4823,6 +4837,9 @@ fn normalize_content_flag_values(
                 ("search", "highlights", Some(raw)) => {
                     Some(normalize_highlights_flag(&raw, query)?)
                 }
+                ("contents", "highlights", Some(raw)) => {
+                    Some(normalize_contents_highlights_flag(&raw))
+                }
                 ("search", "category", Some(raw)) | ("similar", "category", Some(raw)) => {
                     Some(coerce_typed_category(&raw))
                 }
@@ -4906,6 +4923,13 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
         )
     };
     Ok(default_highlights_value(query, max_characters).to_string())
+}
+
+fn normalize_contents_highlights_flag(raw: &str) -> String {
+    if raw.is_empty() {
+        return "true".to_string();
+    }
+    serde_json::json!({ "query": raw }).to_string()
 }
 
 fn build_typed_spec(
@@ -7159,6 +7183,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
+                    "Named output controls include search --output-schema JSON and --system-prompt TEXT, contents --highlights [QUERY], and agent runs create --system-prompt TEXT.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
                     "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
@@ -9765,6 +9790,8 @@ mod tests {
         assert_eq!(
             SearchArgs {
                 query: "rust cli".into(),
+                output_schema: None,
+                system_prompt: None,
                 num_results: Some("7".into()),
                 text: Some(String::new()),
                 highlights: Some("2".into()),
@@ -9783,6 +9810,8 @@ mod tests {
             .into_flag_values(),
             vec![
                 ("query", Some("rust cli".to_string())),
+                ("output-schema", None),
+                ("system-prompt", None),
                 ("num-results", Some("7".to_string())),
                 ("text", Some(String::new())),
                 ("highlights", Some("2".to_string())),
@@ -9805,6 +9834,7 @@ mod tests {
                 ids: Vec::new(),
                 text: Some(String::new()),
                 summary_query: Some("summarize".into()),
+                highlights: None,
                 chunk_size: Some(10),
             }
             .into_flag_values(),
@@ -9813,6 +9843,7 @@ mod tests {
                 ("ids", None),
                 ("text", Some(String::new())),
                 ("summary-query", Some("summarize".to_string())),
+                ("highlights", None),
             ]
         );
 
@@ -9906,6 +9937,8 @@ mod tests {
             flag_keys(
                 &SearchArgs {
                     query: "q".into(),
+                    output_schema: None,
+                    system_prompt: None,
                     num_results: None,
                     text: None,
                     highlights: None,
@@ -9932,6 +9965,7 @@ mod tests {
                     ids: Vec::new(),
                     text: None,
                     summary_query: None,
+                    highlights: None,
                     chunk_size: None,
                 }
                 .into_flag_values()

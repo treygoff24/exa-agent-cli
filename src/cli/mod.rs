@@ -497,6 +497,20 @@ pub struct SearchArgs {
     /// The search query.
     #[arg(value_name = crate::registry::field_value_name("search", "query").expect("search query metadata"))]
     pub query: String,
+    /// JSON Schema for structured search output; accepts inline JSON or `@file`.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("search", "output-schema").expect("search output-schema metadata"),
+        value_name = crate::registry::field_value_name("search", "output-schema").expect("search output-schema metadata")
+    )]
+    pub output_schema: Option<String>,
+    /// Additional instructions for search output or behavior.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("search", "system-prompt").expect("search system-prompt metadata"),
+        value_name = crate::registry::field_value_name("search", "system-prompt").expect("search system-prompt metadata")
+    )]
+    pub system_prompt: Option<String>,
     /// Number of results, 1..=100 (maps `numResults`). Search is not cursor-paginated.
     #[arg(
         short = 'n',
@@ -592,6 +606,8 @@ impl SearchArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
         vec![
             ("query", Some(self.query.clone())),
+            ("output-schema", self.output_schema.clone()),
+            ("system-prompt", self.system_prompt.clone()),
             ("num-results", self.num_results.clone()),
             ("text", self.text.clone()),
             ("highlights", self.highlights.clone()),
@@ -642,6 +658,15 @@ pub struct ContentsArgs {
         num_args = 1
     )]
     pub summary_query: Option<String>,
+    /// Return highlights, optionally guided by a custom query.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("contents", "highlights").expect("contents highlights metadata"),
+        value_name = crate::registry::field_value_name("contents", "highlights").expect("contents highlights metadata"),
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    pub highlights: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub chunk_size: Option<u32>,
 }
@@ -653,6 +678,7 @@ impl ContentsArgs {
             ("ids", str_array_flag(&self.ids)),
             ("text", self.text.clone()),
             ("summary-query", self.summary_query.clone()),
+            ("highlights", self.highlights.clone()),
         ]
     }
 }
@@ -868,6 +894,12 @@ pub struct AgentRunArgs {
     pub query: String,
     #[arg(long)]
     pub output_schema: Option<String>,
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("agent runs create", "system-prompt").expect("agent system-prompt metadata"),
+        value_name = crate::registry::field_value_name("agent runs create", "system-prompt").expect("agent system-prompt metadata")
+    )]
+    pub system_prompt: Option<String>,
     #[arg(long)]
     pub input: Option<String>,
     #[arg(long)]

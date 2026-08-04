@@ -460,6 +460,28 @@ fn capabilities_describes_search_content_defaults() {
 }
 
 #[test]
+fn capabilities_publish_named_flag_body_paths() {
+    let json = run_ok_json(&["capabilities", "--compact"]);
+    let commands = json["commands"].as_array().unwrap();
+    let field = |command: &str, flag: &str| {
+        commands
+            .iter()
+            .find(|entry| entry["path"] == command)
+            .and_then(|entry| entry["fields"].as_array())
+            .and_then(|fields| fields.iter().find(|entry| entry["flag"] == flag))
+            .unwrap_or_else(|| panic!("missing {command} --{flag} capability"))
+    };
+
+    assert_eq!(field("search", "output-schema")["bodyPath"], "outputSchema");
+    assert_eq!(field("search", "system-prompt")["bodyPath"], "systemPrompt");
+    assert_eq!(
+        field("agent runs create", "system-prompt")["bodyPath"],
+        "systemPrompt"
+    );
+    assert_eq!(field("contents", "highlights")["bodyPath"], "highlights");
+}
+
+#[test]
 fn capabilities_filters_to_command_path() {
     let json = run_ok_json(&["capabilities", "websets", "items", "list", "--compact"]);
     assert_eq!(json["schema"], "exa.cli.capabilities.v1");
@@ -721,7 +743,25 @@ fn search_help_shows_highlight_flags_and_global_options() {
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("--no-highlights"), "help: {help}");
     assert!(help.contains("--highlights"), "help: {help}");
+    assert!(help.contains("--output-schema"), "help: {help}");
+    assert!(help.contains("--system-prompt"), "help: {help}");
     assert!(help.contains("Global options"), "help: {help}");
+}
+
+#[test]
+fn named_flag_help_covers_contents_highlights_and_agent_system_prompt() {
+    let contents_help = run(&["contents", "--help"]);
+    assert!(contents_help.status.success());
+    let contents_help = String::from_utf8_lossy(&contents_help.stdout);
+    assert!(
+        contents_help.contains("--highlights"),
+        "help: {contents_help}"
+    );
+
+    let agent_help = run(&["agent", "runs", "create", "--help"]);
+    assert!(agent_help.status.success());
+    let agent_help = String::from_utf8_lossy(&agent_help.stdout);
+    assert!(agent_help.contains("--system-prompt"), "help: {agent_help}");
 }
 
 #[test]
@@ -1711,6 +1751,154 @@ fn search_defaults_to_query_aware_highlights() {
     assert_eq!(body["contents"]["highlights"]["maxCharacters"], 800);
     assert_eq!(body["contents"]["highlights"].as_object().unwrap().len(), 2);
     assert!(body["contents"].get("text").is_none());
+}
+
+#[test]
+fn search_output_schema_flag_maps_to_output_schema() {
+    let dir = temp_path("search-output-schema");
+    let schema_path = dir.join("schema.json");
+    fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"answer":{"type":"string"}}}"#,
+    )
+    .unwrap();
+
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--output-schema",
+        &format!("@{}", schema_path.display()),
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"object","properties":{"answer":{"type":"string"}}})
+    );
+}
+
+#[test]
+fn search_system_prompt_flag_maps_to_system_prompt() {
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--system-prompt",
+        "Prefer primary sources.",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["systemPrompt"],
+        "Prefer primary sources."
+    );
+}
+
+#[test]
+fn agent_system_prompt_flag_maps_to_system_prompt() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "research accounts",
+        "--system-prompt",
+        "Avoid duplicate results.",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["systemPrompt"],
+        "Avoid duplicate results."
+    );
+}
+
+#[test]
+fn contents_highlights_flag_maps_to_spec_shape() {
+    let queried = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "Key advancements",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        queried["data"]["request"]["body"]["highlights"],
+        serde_json::json!({"query":"Key advancements"})
+    );
+
+    let bare = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(bare["data"]["request"]["body"]["highlights"], true);
+}
+
+#[test]
+fn search_output_schema_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--set",
+        r#"outputSchema={"type":"string"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"string"})
+    );
+}
+
+#[test]
+fn search_system_prompt_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--set",
+        "systemPrompt=from set",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from set");
+}
+
+#[test]
+fn agent_system_prompt_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--set",
+        "systemPrompt=from set",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from set");
+}
+
+#[test]
+fn contents_highlights_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "from flag",
+        "--set",
+        "highlights=false",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["highlights"], false);
 }
 
 #[test]

@@ -290,17 +290,11 @@ fn enum_range_ops_agree_on_verdict_between_validate_input_and_live() {
                 ConstraintKind::Enum => "invalid_enum_value",
                 ConstraintKind::Range => "invalid_value",
             };
-            let expected_live_issue = match (op.operation_id, field.flag, kind) {
-                // KNOWN two-validator drift (tracked follow-up): search `category` is validated on
-                // the live path by a bespoke normalizer emitting `invalid_value` + a rich
-                // "valid categories are ..." message, while `schema validate-input` uses the generic
-                // registry enum check emitting `invalid_enum_value` + a null message. Both paths
-                // correctly REJECT (the verdict parity asserted below is the load-bearing invariant);
-                // only the code/message differ. Codes are pinned per-path so a deliberate
-                // reconciliation of the two validators updates this line on purpose.
-                ("search", "category", ConstraintKind::Enum) => "invalid_value",
-                _ => expected_validate_issue,
-            };
+            // `error.code` must come from the published §5.1 dictionary, which has no
+            // `invalid_enum_value`: every rejected enum surfaces as `invalid_value` on the live
+            // path regardless of which validator caught it. The finer-grained validator label
+            // stays reachable as `details.issue`, asserted below against the same body.
+            let expected_live_issue = "invalid_value";
 
             let base_body =
                 preview_body(manifest_entry(&manifest, op.operation_id), op.operation_id);

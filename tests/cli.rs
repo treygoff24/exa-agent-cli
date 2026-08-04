@@ -3473,13 +3473,25 @@ fn unwritable_output_path_is_a_clear_error_without_false_success() {
     server.join().expect("local test server panicked");
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
     assert!(!output_path.exists());
     let error = stderr_json(&output);
     assert_eq!(error["error"]["code"], "invalid_value");
     let message = error["error"]["message"].as_str().unwrap();
     assert!(message.contains("failed to write --output file"));
     assert!(message.contains(output_path.to_str().unwrap()));
+
+    // The upstream call already succeeded; the response is the only copy of its ids and hashes,
+    // so a failed file write falls back to the full inline envelope instead of discarding it.
+    let inline: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(inline["data"]["results"][0]["text"], "captured");
+    assert_eq!(inline["dataTruncated"], false);
+    let warning = inline["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "output_write_failed")
+        .expect("a warning names the failed --output path");
+    assert_eq!(warning["path"], output_path.to_str().unwrap());
 }
 
 #[test]
@@ -4323,10 +4335,26 @@ fn clap_unknown_flag_includes_did_you_mean() {
         .as_str()
         .unwrap()
         .contains("--num-results"));
-    assert!(stderr["error"]["suggestedCommand"]
-        .as_str()
-        .unwrap()
-        .contains("--num-results"));
+    // A rejected flag must leave behind a command the agent can rerun, not prose it has to
+    // reassemble: the whole invocation comes back with the corrected spelling substituted in.
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent search --num-results 5 q"
+    );
+}
+
+#[test]
+fn clap_unknown_flag_without_a_near_match_points_at_capabilities() {
+    // `--summary` is the classic stale-knowledge guess: no near match exists, so the suggestion
+    // is the shipped truth for that command rather than another guess.
+    let output = run(&["search", "--summary", "x", "q"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent capabilities search --compact"
+    );
 }
 
 #[test]
@@ -6719,10 +6747,11 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
     assert_eq!(csv_err.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&csv_err.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "unknown_flag");
-    assert!(stderr["error"]["suggestedCommand"]
+    let suggested = stderr["error"]["suggestedCommand"]
         .as_str()
-        .unwrap_or_default()
-        .contains("websets imports create --help"));
+        .unwrap_or_default();
+    assert!(suggested.contains("--source csv --body"), "{suggested}");
+    assert!(suggested.contains(r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#));
 
     let url_err = run(&[
         "websets",
@@ -6735,10 +6764,11 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
     assert_eq!(url_err.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&url_err.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "unknown_flag");
-    assert!(stderr["error"]["suggestedCommand"]
+    let suggested = stderr["error"]["suggestedCommand"]
         .as_str()
-        .unwrap_or_default()
-        .contains("websets imports create --help"));
+        .unwrap_or_default();
+    assert!(suggested.contains("--source csv --body"), "{suggested}");
+    assert!(suggested.contains(r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#));
 
     let list = run_ok_json(&[
         "websets",
@@ -7016,12 +7046,16 @@ fn websets_imports_create_missing_upload_url_warns_with_recovery() {
     server
         .join()
         .expect("local malformed import server panicked");
-    assert!(output.status.success());
-    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(live["nextActions"].as_array().unwrap().is_empty());
-    assert_eq!(live["warnings"][0]["code"], "upstream_malformed");
+    // A create without `uploadUrl` cannot be uploaded to, so it is an exit-5 upstream_malformed
+    // error, never a warning riding on a success envelope.
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_malformed");
+    assert_eq!(error["error"]["retryable"], false);
+    assert_eq!(error["error"]["details"]["importId"], "import/123");
     assert_eq!(
-        live["warnings"][0]["suggestedCommand"],
+        error["error"]["suggestedCommand"],
         "exa-agent websets imports get 'import/123'"
     );
 }
@@ -8934,4 +8968,415 @@ fn debug_redacts_global_secret_values() {
     assert!(!dbg.contains("set-secret"));
     assert!(!dbg.contains("body-secret"));
     assert!(dbg.contains("<redacted>"));
+}
+
+// --- Endgame regressions (2026-08-03 review) -------------------------------------------------
+
+/// `--output` writing over the reserved `--secret-output` file destroyed the only copy of a
+/// one-time secret and still exited 0. The combination is refused before anything is sent.
+#[test]
+fn output_and_secret_output_may_not_name_the_same_file() {
+    let dir = temp_path("output-vs-secret-output");
+    let unreachable = closed_local_base_url();
+
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        (
+            "collision.secret",
+            vec![
+                "admin".into(),
+                "keys".into(),
+                "create".into(),
+                "--name".into(),
+                "ci".into(),
+            ],
+        ),
+        (
+            "collision.secret",
+            vec![
+                "monitor".into(),
+                "create".into(),
+                "--query".into(),
+                "ai".into(),
+                "--webhook-url".into(),
+                "https://example.test/hook".into(),
+            ],
+        ),
+        (
+            "collision.secret",
+            vec![
+                "websets".into(),
+                "webhooks".into(),
+                "create".into(),
+                "--url".into(),
+                "https://example.test/hook".into(),
+                "--event".into(),
+                "webset.item.created".into(),
+            ],
+        ),
+    ];
+
+    for (name, base_args) in cases {
+        // `x` and `./x` are the same file; only canonicalization catches the second spelling.
+        for (secret_spelling, output_spelling) in [
+            (name.to_string(), name.to_string()),
+            (name.to_string(), format!("./{name}")),
+            (format!("./{name}"), name.to_string()),
+        ] {
+            let secret = dir.join(&secret_spelling);
+            let output_path = dir.join(&output_spelling);
+            let _ = fs::remove_file(&secret);
+
+            let mut args = base_args.clone();
+            args.extend([
+                "--secret-output".into(),
+                secret.to_str().unwrap().into(),
+                "--output".into(),
+                output_path.to_str().unwrap().into(),
+                "--base-url".into(),
+                unreachable.clone(),
+                "--api-key".into(),
+                "test-key-abcdef12".into(),
+                "--service-key".into(),
+                "test-service-key-abcdef12".into(),
+                "--compact".into(),
+            ]);
+            let output = run_owned(&args);
+
+            assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+            let error = stderr_json(&output);
+            assert_eq!(
+                error["error"]["code"], "invalid_flag_combination",
+                "args: {args:?}"
+            );
+            // A usage refusal, not a network failure, proves nothing was sent.
+            assert!(
+                !secret.exists(),
+                "the secret file must not be reserved: {args:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dry_run_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("dry-run-output");
+    let output_path = dir.join("preview.json");
+    let output = run_owned(&[
+        "search".into(),
+        "rust async runtimes".into(),
+        "--num-results".into(),
+        "3".into(),
+        "--dry-run".into(),
+        "--print-request".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success());
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["command"], "search");
+    assert!(confirmation["bytes"].as_u64().unwrap() > 0);
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["data"]["request"]["path"], "/search");
+}
+
+#[test]
+fn capabilities_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("capabilities-output");
+    let output_path = dir.join("capabilities.json");
+    let output = run_owned(&[
+        "capabilities".into(),
+        "search".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success());
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["command"], "capabilities");
+    // The point of --output is that stdout stays small.
+    assert!(output.stdout.len() < fs::read(&output_path).unwrap().len());
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["schema"], "exa.cli.capabilities.v1");
+}
+
+#[test]
+fn structured_stream_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("stream-output");
+    let output_path = dir.join("stream.json");
+    let (base_url, server) = local_json_server(
+        |request| assert!(request.starts_with("POST /answer "), "{request}"),
+        br#"{"answer":"streamed","citations":[]}"#,
+    );
+    let output = run_owned(&[
+        "answer".into(),
+        "what is exa".into(),
+        "--stream".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert!(confirmation["data"].is_null());
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["data"]["answer"], "streamed");
+}
+
+#[test]
+fn raw_stream_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("raw-stream-output");
+    let output_path = dir.join("stream.raw");
+    let (base_url, server) = local_json_server(
+        |request| assert!(request.starts_with("POST /answer "), "{request}"),
+        br#"{"answer":"raw streamed"}"#,
+    );
+    let output = run_owned(&[
+        "answer".into(),
+        "what is exa".into(),
+        "--stream".into(),
+        "--raw".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(&output_path).unwrap(),
+        br#"{"answer":"raw streamed"}"#
+    );
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["dataTruncated"], true);
+}
+
+/// The stub never sends anything, so borrowing `search`'s registry entry advertised a
+/// `POST /search` that did not happen.
+#[test]
+fn research_stub_error_reports_no_operation() {
+    for extra in [vec!["--compact"], vec!["--ndjson"], vec!["--raw"]] {
+        let mut args = vec!["research", "create", "anything"];
+        args.extend(extra.iter().copied());
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "research_retired", "args: {args:?}");
+        assert!(error["operation"]["method"].is_null(), "args: {args:?}");
+        assert!(error["operation"]["path"].is_null(), "args: {args:?}");
+        assert!(
+            error["request"]["requestId"].as_str().is_some(),
+            "args: {args:?}"
+        );
+    }
+}
+
+/// `search` rejected an unknown category as `invalid_value` while `similar` said
+/// `invalid_enum_value`, which is not in the published dictionary at all.
+#[test]
+fn rejected_category_uses_the_published_error_code_on_every_command() {
+    let search = run(&["search", "q", "--category", "github", "--compact"]);
+    assert_eq!(search.status.code(), Some(1));
+    assert_eq!(stderr_json(&search)["error"]["code"], "invalid_value");
+
+    let similar = run(&[
+        "similar",
+        "https://exa.ai",
+        "--category",
+        "github",
+        "--compact",
+    ]);
+    assert_eq!(similar.status.code(), Some(1));
+    let error = stderr_json(&similar);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    // The fine-grained validator label stays available in details.
+    assert_eq!(error["error"]["details"]["issue"], "invalid_enum_value");
+}
+
+#[test]
+fn output_schema_rejects_non_objects() {
+    for command in [
+        vec!["search", "q", "--output-schema", "[1]"],
+        vec!["answer", "q", "--output-schema", "[1]"],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "do it",
+            "--output-schema",
+            "\"nope\"",
+        ],
+    ] {
+        let mut args = command.clone();
+        args.push("--compact");
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(
+            error["error"]["code"], "invalid_field_type",
+            "args: {args:?}"
+        );
+        assert_eq!(error["error"]["details"]["field"], "outputSchema");
+    }
+}
+
+#[test]
+fn contents_highlights_json_is_validated_rather_than_demoted_to_a_query() {
+    let malformed = run(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        r#"{"numSentences": 3"#,
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(malformed.status.code(), Some(1));
+    let error = stderr_json(&malformed);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not valid JSON"));
+
+    // Whitespace-only is a bare highlights request, not a search for spaces.
+    let blank = run(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "   ",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(blank.status.success());
+    let preview: serde_json::Value = serde_json::from_slice(&blank.stdout).unwrap();
+    assert_eq!(preview["data"]["request"]["body"]["highlights"], true);
+
+    let bad_inner = run(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        r#"{"numSentences":"three"}"#,
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(bad_inner.status.code(), Some(1));
+    let error = stderr_json(&bad_inner);
+    assert_eq!(
+        error["error"]["details"]["field"],
+        "highlights.numSentences"
+    );
+}
+
+/// The rewrite used to latch onto the `websets exports create` token run anywhere in argv, so
+/// these positional URLs silently became an export-format rewrite.
+#[test]
+fn export_format_rewrite_ignores_matching_positional_arguments() {
+    let output = run(&[
+        "contents",
+        "websets",
+        "exports",
+        "create",
+        "--format",
+        "ndjson",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(preview["command"], "contents");
+
+    // The real command still gets the documented `--format` spelling.
+    let export = run(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "csv",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(
+        export.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
+    assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
+}
+
+#[test]
+fn empty_positional_ids_are_refused_before_the_path_is_built() {
+    let output = run(&["websets", "get", "", "--expand", "items", "--compact"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "placeholder_argument");
+    assert!(error["error"]["suggestedCommand"].as_str().is_some());
+}
+
+#[test]
+fn rejected_enum_values_come_back_as_a_runnable_command() {
+    let expand = run(&["websets", "get", "ws_1", "--expand", "item", "--compact"]);
+    assert_eq!(expand.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&expand)["error"]["suggestedCommand"],
+        "exa-agent websets get ws_1 --expand items --compact"
+    );
+
+    let format = run(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "parquet",
+        "--compact",
+    ]);
+    assert_eq!(format.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&format)["error"]["suggestedCommand"],
+        "exa-agent websets exports create ws_1 --format csv --compact"
+    );
 }

@@ -82,9 +82,8 @@ where
             if !export_create {
                 let is_flag = text.starts_with('-');
                 let was_flag = previous_was_flag;
-                previous_was_flag = is_flag
-                    && !text.contains('=')
-                    && VALUE_TAKING_GLOBALS.contains(&text.as_ref());
+                previous_was_flag =
+                    is_flag && !text.contains('=') && VALUE_TAKING_GLOBALS.contains(&text.as_ref());
                 // argv[0] is the binary name, never part of the command path.
                 let skip = index == 0;
                 index += 1;

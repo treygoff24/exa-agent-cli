@@ -550,7 +550,9 @@ fn rejected_value_suggestion(e: &clap::Error) -> Option<String> {
         // With a handful of accepted values any of them is a fair demonstration; with a long
         // enum, picking one would read as a recommendation the CLI cannot make.
         .or_else(|| (valid.len() <= 3).then(|| valid.first().cloned()).flatten())?;
-    let owner = clap_ctx_strings(e, ContextKind::InvalidArg).into_iter().next();
+    let owner = clap_ctx_strings(e, ContextKind::InvalidArg)
+        .into_iter()
+        .next();
     rewrite_argv_value_for(&invalid, &replacement, owner.as_deref())
 }
 
@@ -791,13 +793,13 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 ctx.online_probes = Some(run_doctor_online_probes(&cli.globals));
             }
             let report = doctor::run_doctor(&options, &ctx);
-            emit_stdout(&report.to_json(), pretty);
+            emit_document(&report.to_json(), "doctor", &cli.globals, pretty)?;
             Ok(doctor::doctor_exit_code(&report))
         }
         Command::Auth { sub } => dispatch_auth(sub, &cli.globals, pretty),
-        Command::Config { sub } => dispatch_config(sub, pretty),
-        Command::Preset { sub } => dispatch_preset(sub, pretty),
-        Command::Macro { sub } => dispatch_macro(sub, pretty),
+        Command::Config { sub } => dispatch_config(sub, &cli.globals, pretty),
+        Command::Preset { sub } => dispatch_preset(sub, &cli.globals, pretty),
+        Command::Macro { sub } => dispatch_macro(sub, &cli.globals, pretty),
         Command::Search(args) => dispatch_search(args, &cli.globals, pretty),
         Command::Contents(args) => dispatch_contents(args, &cli.globals, pretty),
         Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
@@ -4977,21 +4979,23 @@ fn dispatch_typed_preview_with_warnings(
     let path = options.path_override.unwrap_or(op.api_path);
     let mut warnings = typed_command_warnings(op);
     warnings.extend_from_slice(extra_warnings);
-    emit_stdout(
-        &redacted_preview_expanded(
-            &spec,
-            TypedPreviewOptions {
-                path,
-                query: options.query,
-                expands_to: options.expands_to,
-                extra_headers: options.extra_headers,
-                command_override: options.command_override,
-                globals: Some(globals),
-                warnings: &warnings,
-            },
-        ),
-        pretty,
+    let preview = redacted_preview_expanded(
+        &spec,
+        TypedPreviewOptions {
+            path,
+            query: options.query,
+            expands_to: options.expands_to,
+            extra_headers: options.extra_headers,
+            command_override: options.command_override,
+            globals: Some(globals),
+            warnings: &warnings,
+        },
     );
+    let command = options
+        .command_override
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| op.command());
+    emit_document(&preview, &command, globals, pretty)?;
     Ok(0)
 }
 
@@ -7391,7 +7395,7 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                 Ok(resolved) => (true, Some(resolved.source.label())),
                 Err(_) => (false, None),
             };
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_status.v1",
                     "ok": true,
@@ -7407,14 +7411,16 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "checked": checked,
                     "warnings": warnings,
                 }),
+                "auth status",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         AuthCmd::Login => {
             let secret = read_secret_stdin("auth login", "EXA_API_KEY")?;
             let path = auth::write_credential_file(auth::CredentialNamespace::Api, &secret)?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_login.v1",
                     "ok": true,
@@ -7425,13 +7431,15 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "keyFingerprint": secret.fingerprint(),
                     "last4": secret.last4(),
                 }),
+                "auth login",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         AuthCmd::Logout => {
             let path = auth::clear_credential_file(auth::CredentialNamespace::Api)?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_logout.v1",
                     "ok": true,
@@ -7439,8 +7447,10 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "source": "credentials_file",
                     "path": path.display().to_string(),
                 }),
+                "auth logout",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         AuthCmd::Test => dispatch_auth_test(globals, pretty),
@@ -7478,7 +7488,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
     const PROBE_ENDPOINT: &str = "/search";
     // Honor the universal contract: --dry-run/--print-request never touch the network.
     if globals.print_request || globals.dry_run {
-        emit_stdout(
+        emit_document(
             &serde_json::json!({
                 "schema": "exa.cli.auth_test.v1",
                 "ok": true,
@@ -7487,8 +7497,10 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
                 "endpoint": PROBE_ENDPOINT,
                 "note": "auth test verifies the credential with a billing-free validation probe (empty POST /search); run without --dry-run to probe.",
             }),
+            "auth test",
+            globals,
             pretty,
-        );
+        )?;
         return Ok(0);
     }
     transport::ensure_network_allowed()?;
@@ -7503,7 +7515,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
     let transport = UreqTransport::new(timeout);
     match transport::probe_auth(&transport, &base_url, &credential.secret)? {
         transport::AuthProbe::Accepted { status } => {
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_test.v1",
                     "ok": true,
@@ -7513,8 +7525,10 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
                     "endpoint": PROBE_ENDPOINT,
                     "httpStatus": status,
                 }),
+                "auth test",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         transport::AuthProbe::Rejected { status } => Err(CliError::Auth(
@@ -8587,17 +8601,19 @@ fn suggested_validate_input_command(
     format!("exa-agent schema show {} --compact", op.command())
 }
 
-fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_config(sub: &ConfigCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         ConfigCmd::Path => {
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_path.v1",
                     "ok": true,
                     "path": config::config_path().display().to_string(),
                 }),
+                "config path",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::List { effective } => {
@@ -8605,68 +8621,76 @@ fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
             let mut data = cfg.list_json();
             data["effective"] = serde_json::json!(effective);
             data["effectiveBaseUrl"] = serde_json::json!(cfg.effective_base_url());
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_list.v1",
                     "ok": true,
                     "config": data,
                 }),
+                "config list",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::Get { path } => {
             let cfg = config::Config::load()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_get.v1",
                     "ok": true,
                     "path": path,
                     "value": cfg.get_path(path)?,
                 }),
+                "config get",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::Set { path, value } => {
             let mut cfg = config::Config::load()?;
             cfg.set_path(path, value)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_set.v1",
                     "ok": true,
                     "path": path,
                     "configPath": config::config_path().display().to_string(),
                 }),
+                "config set",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::Unset { path } => {
             let mut cfg = config::Config::load()?;
             cfg.unset_path(path)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_unset.v1",
                     "ok": true,
                     "path": path,
                     "configPath": config::config_path().display().to_string(),
                 }),
+                "config unset",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
-        ConfigCmd::Profiles { sub } => dispatch_config_profiles(sub, pretty),
+        ConfigCmd::Profiles { sub } => dispatch_config_profiles(sub, globals, pretty),
     }
 }
 
-fn dispatch_preset(sub: &PresetCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_preset(sub: &PresetCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         PresetCmd::List => {
             let presets = presets::load_presets()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.presets.v1",
                     "ok": true,
@@ -8674,110 +8698,138 @@ fn dispatch_preset(sub: &PresetCmd, pretty: bool) -> Result<i32, CliError> {
                     "localPath": presets::local_presets_path().display().to_string(),
                     "presets": presets.keys().collect::<Vec<_>>(),
                 }),
+                "preset list",
+                globals,
                 pretty,
-            );
+            )?;
         }
-        PresetCmd::Show { name } => emit_stdout(
-            &serde_json::json!({
-                "schema": "exa.cli.preset.v1",
-                "ok": true,
-                "preset": presets::find_preset(name)?,
-            }),
-            pretty,
-        ),
+        PresetCmd::Show { name } => {
+            emit_document(
+                &serde_json::json!({
+                    "schema": "exa.cli.preset.v1",
+                    "ok": true,
+                    "preset": presets::find_preset(name)?,
+                }),
+                "preset show",
+                globals,
+                pretty,
+            )?;
+        }
     }
     Ok(0)
 }
 
-fn dispatch_macro(sub: &MacroCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_macro(sub: &MacroCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
-        MacroCmd::List => emit_stdout(
-            &serde_json::json!({
-                "schema": "exa.cli.macros.v1",
-                "ok": true,
-                "macros": presets::MACROS.iter().map(|item| item.name).collect::<Vec<_>>(),
-            }),
-            pretty,
-        ),
-        MacroCmd::Show { name } => emit_stdout(
-            &serde_json::json!({
-                "schema": "exa.cli.macro.v1",
-                "ok": true,
-                "macro": presets::get_macro(name)?,
-            }),
-            pretty,
-        ),
+        MacroCmd::List => {
+            emit_document(
+                &serde_json::json!({
+                    "schema": "exa.cli.macros.v1",
+                    "ok": true,
+                    "macros": presets::MACROS.iter().map(|item| item.name).collect::<Vec<_>>(),
+                }),
+                "macro list",
+                globals,
+                pretty,
+            )?;
+        }
+        MacroCmd::Show { name } => {
+            emit_document(
+                &serde_json::json!({
+                    "schema": "exa.cli.macro.v1",
+                    "ok": true,
+                    "macro": presets::get_macro(name)?,
+                }),
+                "macro show",
+                globals,
+                pretty,
+            )?;
+        }
     }
     Ok(0)
 }
 
-fn dispatch_config_profiles(sub: &ConfigProfilesCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_config_profiles(
+    sub: &ConfigProfilesCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     match sub {
         ConfigProfilesCmd::List => {
             let cfg = config::Config::load()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profiles.v1",
                     "ok": true,
                     "data": cfg.profiles_json(),
                 }),
+                "config profiles list",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Show { name } => {
             let cfg = config::Config::load()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile.v1",
                     "ok": true,
                     "name": name,
                     "profile": cfg.show_profile(name)?,
                 }),
+                "config profiles show",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Use { name } => {
             let mut cfg = config::Config::load()?;
             cfg.use_profile(name)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_use.v1",
                     "ok": true,
                     "activeProfile": name,
                 }),
+                "config profiles use",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Create { name } => {
             let mut cfg = config::Config::load()?;
             cfg.create_profile(name)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_create.v1",
                     "ok": true,
                     "name": name,
                 }),
+                "config profiles create",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Delete { name } => {
             let mut cfg = config::Config::load()?;
             cfg.delete_profile(name)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_delete.v1",
                     "ok": true,
                     "name": name,
                 }),
+                "config profiles delete",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
     }
@@ -9026,24 +9078,22 @@ fn dispatch_raw_inner(
             "dryRun": true,
         });
         let hash = transport::data_hash(&data);
-        emit_stdout(
-            &response_envelope(ResponseEnvelopeArgs {
-                command: "raw",
-                method,
-                path: &args.path,
-                operation: None,
-                request_id,
-                profile: "default",
-                correlation_id: globals.correlation_id.as_deref(),
-                data,
-                count: None,
-                data_hash: hash,
-                retries: 0,
-                duration_ms: 0,
-                warnings: &[],
-            }),
-            pretty,
-        );
+        let preview = response_envelope(ResponseEnvelopeArgs {
+            command: "raw",
+            method,
+            path: &args.path,
+            operation: None,
+            request_id,
+            profile: "default",
+            correlation_id: globals.correlation_id.as_deref(),
+            data,
+            count: None,
+            data_hash: hash,
+            retries: 0,
+            duration_ms: 0,
+            warnings: &[],
+        });
+        emit_document(&preview, "raw", globals, pretty)?;
         return Ok(0);
     }
 
@@ -9563,6 +9613,7 @@ mod tests {
     use super::*;
     use crate::auth::{CredentialInput, NoopKeyring};
     use crate::cli::{SearchCategory, SearchType};
+    use crate::error::error_code_specs;
     use crate::registry::{FieldDef, FieldKind, Method, Namespace, OperationDef, Pagination};
     use crate::transport::{FakeTransport, HttpResponse, RawExecuteResult};
     use clap::ValueEnum;
@@ -10687,6 +10738,34 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("/findSimilar"));
+    }
+
+    #[test]
+    fn registry_validation_errors_only_emit_published_codes() {
+        let specs = error_code_specs();
+        for issue in [
+            "missing_required_field",
+            "invalid_field_type",
+            "invalid_value",
+            "invalid_enum_value",
+            "future_validator_issue",
+        ] {
+            let err = registry_validation_error(ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(serde_json::json!({
+                    "issue": issue,
+                    "field": "query",
+                    "flag": "query",
+                })),
+                suggested_command: None,
+                note: None,
+            });
+            assert!(
+                specs.contains_key(err.diag().code.as_str()),
+                "unpublished registry validation code: {} for {issue}",
+                err.diag().code
+            );
+        }
     }
 
     fn envelope_with_data(data: serde_json::Value) -> serde_json::Value {

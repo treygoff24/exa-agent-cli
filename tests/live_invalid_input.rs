@@ -110,8 +110,12 @@ fn modeled_live_invalid_inputs_fail_locally() {
                 "query=null",
                 "--compact",
             ],
-            code: "missing_required_field",
-            details: &[("field", Str("query")), ("flag", Str("question"))],
+            code: "missing_required_argument",
+            details: &[
+                ("issue", Str("missing_required_field")),
+                ("field", Str("query")),
+                ("flag", Str("question")),
+            ],
         },
         InvalidCase {
             name: "context wrong tokensNum type",

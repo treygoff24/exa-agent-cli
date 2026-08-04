@@ -970,6 +970,22 @@ fn validate_input_rejects_wrong_type_and_out_of_range() {
 }
 
 #[test]
+fn registry_validation_missing_required_field_uses_published_error_code() {
+    let output = run(&[
+        "search",
+        "q",
+        "--set",
+        "query=null",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "missing_required_argument");
+    assert_eq!(error["error"]["details"]["issue"], "missing_required_field");
+}
+
+#[test]
 fn parse_doctor() {
     assert_path(&["doctor"], "doctor");
     parses(&["doctor", "--online"]);
@@ -3466,6 +3482,8 @@ fn unwritable_output_path_is_a_clear_error_without_false_success() {
         "test-key-abcdef12",
         "--base-url",
         &base_url,
+        "--max-output-bytes",
+        "1",
         "--output",
         output_path.to_str().unwrap(),
         "--compact",
@@ -3492,6 +3510,38 @@ fn unwritable_output_path_is_a_clear_error_without_false_success() {
         .find(|warning| warning["code"] == "output_write_failed")
         .expect("a warning names the failed --output path");
     assert_eq!(warning["path"], output_path.to_str().unwrap());
+}
+
+#[test]
+fn raw_unwritable_output_falls_back_to_exact_upstream_bytes() {
+    let dir = temp_path("raw-unwritable-output");
+    let output_path = dir.join("missing-parent").join("response.raw");
+    let response = br#"{"raw":"exact-upstream-bytes"}"#;
+    let (base_url, server) = local_json_server(
+        |request| assert!(request.starts_with("POST /search "), "{request}"),
+        response,
+    );
+    let output = run(&[
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"q"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        &base_url,
+        "--raw",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, response);
+    assert!(!output_path.exists());
+    assert_eq!(stderr_json(&output)["error"]["code"], "invalid_value");
 }
 
 #[test]
@@ -4345,15 +4395,14 @@ fn clap_unknown_flag_includes_did_you_mean() {
 
 #[test]
 fn clap_unknown_flag_without_a_near_match_points_at_capabilities() {
-    // `--summary` is the classic stale-knowledge guess: no near match exists, so the suggestion
-    // is the shipped truth for that command rather than another guess.
-    let output = run(&["search", "--summary", "x", "q"]);
+    // A flag before any subcommand has no usage line from which to recover a command path.
+    let output = run(&["--mystery", "search", "q"]);
     assert_eq!(output.status.code(), Some(1));
     let stderr = stderr_json(&output);
     assert_eq!(stderr["error"]["code"], "unknown_flag");
     assert_eq!(
         stderr["error"]["suggestedCommand"],
-        "exa-agent capabilities search --compact"
+        "exa-agent capabilities --compact"
     );
 }
 
@@ -9024,7 +9073,8 @@ fn output_and_secret_output_may_not_name_the_same_file() {
         ] {
             let secret = dir.join(&secret_spelling);
             let output_path = dir.join(&output_spelling);
-            let _ = fs::remove_file(&secret);
+            let sentinel = b"sentinel-secret-content";
+            fs::write(&secret, sentinel).unwrap();
 
             let mut args = base_args.clone();
             args.extend([
@@ -9048,11 +9098,8 @@ fn output_and_secret_output_may_not_name_the_same_file() {
                 error["error"]["code"], "invalid_flag_combination",
                 "args: {args:?}"
             );
-            // A usage refusal, not a network failure, proves nothing was sent.
-            assert!(
-                !secret.exists(),
-                "the secret file must not be reserved: {args:?}"
-            );
+            // A usage refusal, not a network failure, proves nothing was sent or overwritten.
+            assert_eq!(fs::read(&secret).unwrap(), sentinel, "args: {args:?}");
         }
     }
 }
@@ -9083,6 +9130,91 @@ fn dry_run_honors_output_and_confirms_on_stdout() {
     let written: serde_json::Value =
         serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
     assert_eq!(written["data"]["request"]["path"], "/search");
+}
+
+#[test]
+fn doctor_json_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("doctor-output");
+    let output_path = dir.join("doctor.json");
+    let output = run_owned(&[
+        "doctor".into(),
+        "--check".into(),
+        "base-url".into(),
+        "--json".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["command"], "doctor");
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["dataTruncated"], true);
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["schema"], "exa.cli.doctor.v1");
+}
+
+#[test]
+fn warning_bearing_typed_dry_run_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("typed-warning-output");
+    let output_path = dir.join("monitor-preview.json");
+    let output = run_owned(&[
+        "monitor".into(),
+        "create".into(),
+        "--query".into(),
+        "ai".into(),
+        "--webhook-url".into(),
+        "https://example.test/hook".into(),
+        "--dry-run".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["command"], "monitor create");
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["command"], "monitor create");
+    assert!(written["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "webhook_secret_ephemeral"));
+}
+
+#[test]
+fn raw_preview_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("raw-preview-output");
+    let output_path = dir.join("raw-preview.json");
+    let output = run_owned(&[
+        "raw".into(),
+        "POST".into(),
+        "/search".into(),
+        "--body".into(),
+        r#"{"query":"q"}"#.into(),
+        "--dry-run".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["command"], "raw");
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["data"]["request"]["path"], "/search");
+    assert_eq!(written["data"]["request"]["body"]["query"], "q");
 }
 
 #[test]
@@ -9345,6 +9477,38 @@ fn export_format_rewrite_ignores_matching_positional_arguments() {
     );
     let preview: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
     assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
+
+    let profiled = run(&[
+        "--profile",
+        "default",
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "csv",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(profiled.status.success(), "{profiled:?}");
+    let preview: serde_json::Value = serde_json::from_slice(&profiled.stdout).unwrap();
+    assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
+
+    let search = run(&[
+        "search",
+        "websets exports create",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(search.status.success(), "{search:?}");
+    let preview: serde_json::Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(preview["command"], "search");
+    assert_eq!(
+        preview["data"]["request"]["body"]["query"],
+        "websets exports create"
+    );
 }
 
 #[test]
@@ -9358,11 +9522,11 @@ fn empty_positional_ids_are_refused_before_the_path_is_built() {
 
 #[test]
 fn rejected_enum_values_come_back_as_a_runnable_command() {
-    let expand = run(&["websets", "get", "ws_1", "--expand", "item", "--compact"]);
+    let expand = run(&["websets", "get", "item", "--expand", "item", "--compact"]);
     assert_eq!(expand.status.code(), Some(1));
     assert_eq!(
         stderr_json(&expand)["error"]["suggestedCommand"],
-        "exa-agent websets get ws_1 --expand items --compact"
+        "exa-agent websets get item --expand items --compact"
     );
 
     let format = run(&[

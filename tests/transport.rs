@@ -1,6 +1,5 @@
 //! Transport seam tests (Wave 1D): fake transport, retry policy, header refusal.
 
-use clap::Parser;
 use exa_agent_cli::auth::{self, CredentialInput, NoopKeyring, Secret};
 use exa_agent_cli::cli::GlobalArgs;
 use exa_agent_cli::error::{CliError, Diag};

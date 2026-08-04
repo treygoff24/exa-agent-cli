@@ -239,16 +239,16 @@ fn positional_required_allowlist(operation_id: &str) -> &'static [&'static str] 
         // sourced required body properties; never use this to silence a real miss.
         "answer" | "createAgentRun" | "search" => &["query"],
         "findSimilar" => &["url"],
-        "ResearchController_createResearch" => &["instructions"],
         _ => &[],
     }
 }
 
 fn known_skips() -> BTreeSet<&'static str> {
     [
-        // Docs-only overlay-defined single-witness command; no upstream OpenAPI
-        // JSON requestBody schema exists to compare.
+        // Docs-only overlay-defined commands; no upstream OpenAPI JSON requestBody
+        // schema exists to compare.
         "context",
+        "websets-exports-create",
     ]
     .into_iter()
     .collect()

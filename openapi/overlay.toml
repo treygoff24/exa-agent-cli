@@ -142,20 +142,6 @@ flag = "webhook-url"
 body_path = "webhook.url"
 kind = "str"
 
-[operations."ResearchController_createResearch"]
-cli_path = "research create"
-namespace = "api"
-idempotency_sensitive = true
-
-[operations."ResearchController_getResearch"]
-cli_path = "research get"
-namespace = "api"
-
-[operations."ResearchController_listResearch"]
-cli_path = "research list"
-namespace = "api"
-cursor = "cursor"
-
 [operations."search"]
 cli_path = "search"
 namespace = "api"
@@ -458,6 +444,32 @@ flag = "tokens"
 body_path = "tokensNum"
 kind = "json"
 
+[operations."websets-exports-create"]
+cli_path = "websets exports create"
+namespace = "api"
+defined_by_overlay = true
+method = "POST"
+api_path = "/websets/v0/websets/{webset}/exports"
+source = "exa-docs:exports"
+source_version = "docs-2026-08-03"
+idempotency_sensitive = true
+
+[[operations."websets-exports-create".fields]]
+flag = "format"
+body_path = "format"
+kind = "str"
+required = true
+enum_values = ["csv", "json"]
+
+[operations."websets-exports-get"]
+cli_path = "websets exports get"
+namespace = "api"
+defined_by_overlay = true
+method = "GET"
+api_path = "/websets/v0/websets/{webset}/exports/{id}"
+source = "exa-docs:exports"
+source_version = "docs-2026-08-03"
+
 # --- Request-field maps for spec-derived ops (Phase 1 seeds `search`; rest land per-phase) ---
 [[operations."answer".fields]]
 flag = "question"
@@ -485,6 +497,10 @@ kind = "bool"
 flag = "output-schema"
 body_path = "outputSchema"
 kind = "json"
+input_kind = "flag"
+input_name = "--output-schema"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
 
 [[operations."findSimilar".fields]]
 flag = "url"
@@ -514,7 +530,7 @@ kind = "bool"
 flag = "category"
 body_path = "category"
 kind = "str"
-enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
+enum_values = ["company", "people", "publication", "news", "personal site", "financial report"]
 
 [[operations."findSimilar".fields]]
 flag = "text"
@@ -533,6 +549,24 @@ kind = "str"
 required = true
 input_kind = "argument"
 input_name = "QUERY"
+arity = { min = 1, max = 1 }
+
+[[operations."search".fields]]
+flag = "output-schema"
+body_path = "outputSchema"
+kind = "json"
+input_kind = "flag"
+input_name = "--output-schema"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
+
+[[operations."search".fields]]
+flag = "system-prompt"
+body_path = "systemPrompt"
+kind = "str"
+input_kind = "flag"
+input_name = "--system-prompt"
+value_name = "TEXT|@file"
 arity = { min = 1, max = 1 }
 
 [[operations."search".fields]]
@@ -555,7 +589,7 @@ enum_values = ["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
 flag = "category"
 body_path = "category"
 kind = "str"
-enum_values = ["company", "people", "research paper", "news", "personal site", "financial report"]
+enum_values = ["company", "people", "publication", "news", "personal site", "financial report"]
 
 [[operations."search".fields]]
 flag = "text"
@@ -702,6 +736,15 @@ input_name = "--summary-query"
 value_name = "SUMMARY_QUERY"
 arity = { min = 1, max = 1 }
 
+[[operations."getContents".fields]]
+flag = "highlights"
+body_path = "highlights"
+kind = "json"
+input_kind = "flag"
+input_name = "--highlights"
+value_name = "QUERY"
+arity = { min = 0, max = 1 }
+
 [[operations."createAgentRun".fields]]
 flag = "query"
 body_path = "query"
@@ -715,6 +758,19 @@ arity = { min = 1, max = 1 }
 flag = "output-schema"
 body_path = "outputSchema"
 kind = "json"
+input_kind = "flag"
+input_name = "--output-schema"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
+
+[[operations."createAgentRun".fields]]
+flag = "system-prompt"
+body_path = "systemPrompt"
+kind = "str"
+input_kind = "flag"
+input_name = "--system-prompt"
+value_name = "TEXT|@file"
+arity = { min = 1, max = 1 }
 
 [[operations."createAgentRun".fields]]
 flag = "input"
@@ -751,12 +807,3 @@ kind = "json"
 flag = "metadata"
 body_path = "metadata"
 kind = "json"
-
-[[operations."ResearchController_createResearch".fields]]
-flag = "query"
-body_path = "instructions"
-kind = "str"
-required = true
-input_kind = "argument"
-input_name = "QUERY"
-arity = { min = 1, max = 1 }

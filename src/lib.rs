@@ -17,7 +17,7 @@ pub mod request;
 pub mod stream;
 pub mod transport;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Read};
 use std::time::Duration;
@@ -28,12 +28,12 @@ use cli::{
     AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
     ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
     MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
-    PaginationArgs, PresetCmd, ResearchCmd, ResearchCreateArgs, RobotDocsCmd, SchemaCmd,
-    SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs,
-    WebsetsEventsListArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
-    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
-    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
-    SEARCH_CATEGORY_VALUES,
+    PaginationArgs, PresetCmd, ResearchCmd, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
+    TeamCmd, WebsetEnrichmentFormat, WebsetExportFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsExportsCmd, WebsetsGetArgs, WebsetsImportsCmd, WebsetsListArgs,
+    WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs,
+    WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs,
+    WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -103,7 +103,12 @@ struct TypedExecution<'a> {
 struct LiveExtras<'a> {
     secret_output: Option<SecretOutputReservation>,
     extra_warnings: &'a [serde_json::Value],
+    next_action_webset_id: Option<&'a str>,
 }
+
+/// The one `websets imports create` invocation that actually succeeds. Both the rejected
+/// `--csv`/`--url` flags and the missing-field check point straight at it rather than at `--help`.
+const IMPORTS_CREATE_BODY_EXAMPLE: &str = r#"exa-agent websets imports create --source csv --body '{"size":1024,"count":10,"entity":{"type":"company"}}'"#;
 
 /// Parse args, dispatch, and return the process exit code.
 pub fn run() -> i32 {
@@ -132,7 +137,8 @@ fn handle_clap_error(e: clap::Error) -> i32 {
     use clap::error::{ContextKind, ErrorKind};
     match e.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-            print!("{e}");
+            let text = public_clap_text(e.to_string());
+            print!("{text}");
             0
         }
         kind => {
@@ -195,7 +201,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 _ => "invalid_value",
             };
             let mut details = serde_json::Map::new();
-            let mut message = first_line(&e.to_string());
+            let mut message = public_clap_text(first_line(&e.to_string()));
             let mut suggestion = None;
 
             if kind == ErrorKind::UnknownArgument
@@ -214,11 +220,36 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                 suggestion = Some("exa-agent contents https://exa.ai [URL...]".to_string());
             }
 
+            if kind == ErrorKind::UnknownArgument
+                && (message.contains("--csv") || message.contains("--url"))
+                && e.to_string().contains("imports create")
+            {
+                message = "websets imports create no longer accepts --csv or --url; use the documented upload flow".to_string();
+                suggestion = Some(IMPORTS_CREATE_BODY_EXAMPLE.to_string());
+            }
+
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
-                let missing = clap_ctx_strings(&e, ContextKind::InvalidArg);
+                let missing: Vec<_> = clap_ctx_strings(&e, ContextKind::InvalidArg)
+                    .into_iter()
+                    .map(public_clap_text)
+                    .collect();
                 if !missing.is_empty() {
-                    message = format!("missing required argument(s): {}", missing.join(", "));
+                    message = public_clap_text(format!(
+                        "missing required argument(s): {}",
+                        missing.join(", ")
+                    ));
                     details.insert("missing".to_string(), serde_json::json!(missing));
+                }
+            }
+
+            // clap's own message for a rejected enum value names only the value it refused, so an
+            // agent guessing `--category github` learns nothing about what would have worked and
+            // retries with another guess. Spell the accepted set into the message and details.
+            if matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
+                let valid = clap_ctx_strings(&e, ContextKind::ValidValue);
+                if !valid.is_empty() {
+                    message = format!("{message}; valid values are {}", valid.join(", "));
+                    details.insert("validValues".to_string(), serde_json::json!(valid));
                 }
             }
 
@@ -238,12 +269,45 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     // invents false matches for nonsense input and can point an agent at a
                     // destructive command (`websets event` → `delete`).
                     if let Some(did_you_mean) = clap_ctx_strings(&e, kind).into_iter().last() {
+                        let did_you_mean = public_clap_text(did_you_mean);
                         details.insert(
                             "didYouMean".to_string(),
                             serde_json::Value::String(did_you_mean.clone()),
                         );
                         suggestion = Some(format!("Did you mean `{did_you_mean}`?"));
                     }
+                }
+            }
+
+            // A prose "Did you mean ...?" is not a command an agent can run. Where the shape of
+            // the fix is knowable, replace it with a runnable `suggestedCommand`.
+            let replaceable = suggestion
+                .as_deref()
+                .is_none_or(|current| current.starts_with("Did you mean"));
+            if replaceable && kind == ErrorKind::UnknownArgument {
+                let flag = clap_ctx_strings(&e, ContextKind::InvalidArg)
+                    .into_iter()
+                    .next();
+                let corrected = clap_ctx_strings(&e, ContextKind::SuggestedArg)
+                    .into_iter()
+                    .last()
+                    .map(public_clap_text);
+                suggestion = flag
+                    .as_deref()
+                    .zip(corrected.as_deref())
+                    .and_then(|(flag, corrected)| rewrite_argv_value(flag, corrected))
+                    .or_else(|| {
+                        command_path_from_error(&e)
+                            .map(|command| unknown_flag_suggestion(&command, flag.as_deref()))
+                    })
+                    // Total fallback: a flag placed before any subcommand has no usage line
+                    // to recover a command path from, but the agent still needs a move.
+                    .or_else(|| Some("exa-agent capabilities --compact".to_string()))
+                    .or(suggestion);
+            }
+            if replaceable && matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
+                if let Some(rewritten) = rejected_value_suggestion(&e) {
+                    suggestion = Some(rewritten);
                 }
             }
 
@@ -267,6 +331,104 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             err.category() as i32
         }
     }
+}
+
+fn public_clap_text(text: String) -> String {
+    let had_export_help = text.contains("--export-format") && text.contains("Global options:");
+    let had_trailing_newline = text.ends_with('\n');
+    let text = text
+        .replace("--export-format", "--format")
+        .replace("<EXPORT_FORMAT>", "<FORMAT>");
+    if !had_export_help {
+        return text;
+    }
+
+    let mut output = Vec::new();
+    let mut in_globals = false;
+    let mut skip_global_format_help = false;
+    for line in text.lines() {
+        if line == "Global options:" {
+            in_globals = true;
+        }
+        if in_globals && line.trim_start().starts_with("--format <FORMAT>") {
+            skip_global_format_help = true;
+            continue;
+        }
+        if skip_global_format_help {
+            if line.starts_with("          ") {
+                continue;
+            }
+            skip_global_format_help = false;
+        }
+        output.push(line);
+    }
+    let mut text = realign_options_block(&output).join("\n");
+    if had_trailing_newline {
+        text.push('\n');
+    }
+    text
+}
+
+/// clap lays the local `Options:` table out around `--export-format <EXPORT_FORMAT>`; renaming it
+/// to `--format <FORMAT>` afterwards leaves every description column and wrapped continuation line
+/// indented for a flag that is 14 characters wider. Re-columnize the block.
+fn realign_options_block(lines: &[&str]) -> Vec<String> {
+    let Some(start) = lines.iter().position(|line| *line == "Options:") else {
+        return lines.iter().map(|line| line.to_string()).collect();
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.trim().is_empty())
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(lines.len());
+
+    let rows: Vec<(usize, usize, &str, &str)> = lines[start + 1..end]
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, line)| {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('-') {
+                return None;
+            }
+            let indent = line.len() - trimmed.len();
+            let (flags, description) = trimmed.split_once("  ")?;
+            Some((start + 1 + offset, indent, flags, description.trim_start()))
+        })
+        .collect();
+    if rows.is_empty() {
+        return lines.iter().map(|line| line.to_string()).collect();
+    }
+
+    let column = rows
+        .iter()
+        .map(|(_, indent, flags, _)| indent + flags.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+    let mut in_description = false;
+    let mut row_iter = rows.iter().peekable();
+    for (index, line) in out.iter_mut().enumerate().take(end).skip(start + 1) {
+        if row_iter.peek().is_some_and(|(row, ..)| *row == index) {
+            let (_, indent, flags, description) = row_iter.next().expect("peeked row exists");
+            *line = format!(
+                "{:indent$}{flags}{}{description}",
+                "",
+                " ".repeat(column - indent - flags.len())
+            );
+            in_description = true;
+        } else if in_description {
+            // Wrapped description lines can themselves begin with `--`, so identify them by
+            // position in the table rather than by their first character.
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                in_description = false;
+            } else {
+                *line = format!("{:column$}{trimmed}", "");
+            }
+        }
+    }
+    out
 }
 
 fn search_num_results_args() -> Option<(String, String, Option<String>)> {
@@ -328,6 +490,165 @@ fn subcommand_usage_error(e: &clap::Error, kind: clap::error::ErrorKind) -> Opti
             .with_details(details)
             .with_suggestion(suggestion),
     ))
+}
+
+/// A rejected flag is the stale-knowledge agent's most common dead end. When the flag names a
+/// request-body field the registry knows about, `--set` reaches it; otherwise send the agent to
+/// the shipped truth for that command rather than to a guess.
+fn unknown_flag_suggestion(command: &str, flag: Option<&str>) -> String {
+    match flag.and_then(|flag| registry_body_path_for_flag(command, flag)) {
+        Some(body_path) => format!("exa-agent {command} --set {body_path}=VALUE"),
+        None => format!("exa-agent capabilities {command} --compact"),
+    }
+}
+
+fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {
+    let token = flag
+        .trim()
+        .split('=')
+        .next()?
+        .trim()
+        .trim_start_matches('-');
+    if token.is_empty() {
+        return None;
+    }
+    let camel = kebab_to_camel(token);
+    registry::lookup_by_command(command)?
+        .fields
+        .iter()
+        .map(|field| field.body_path)
+        .find(|path| *path == camel || path.rsplit('.').next() == Some(camel.as_str()))
+}
+
+fn kebab_to_camel(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut upper_next = false;
+    for ch in token.chars() {
+        if ch == '-' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Rewrite the invocation the agent actually typed with an accepted value, so the suggestion is
+/// a command it can rerun rather than a fragment it has to reassemble.
+fn rejected_value_suggestion(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+    let invalid = clap_ctx_strings(e, ContextKind::InvalidValue)
+        .into_iter()
+        .next()?;
+    let valid = clap_ctx_strings(e, ContextKind::ValidValue);
+    let replacement = clap_ctx_strings(e, ContextKind::SuggestedValue)
+        .into_iter()
+        .last()
+        // With a handful of accepted values any of them is a fair demonstration; with a long
+        // enum, picking one would read as a recommendation the CLI cannot make.
+        .or_else(|| (valid.len() <= 3).then(|| valid.first().cloned()).flatten())?;
+    let owner = clap_ctx_strings(e, ContextKind::InvalidArg)
+        .into_iter()
+        .next();
+    rewrite_argv_value_for(&invalid, &replacement, owner.as_deref())
+}
+
+fn rewrite_argv_value(invalid: &str, replacement: &str) -> Option<String> {
+    rewrite_argv_value_for(invalid, replacement, None)
+}
+
+/// Rewrite the argv occurrence of `invalid` that belongs to `owner_flag` (clap's InvalidArg,
+/// e.g. `--expand <EXPAND>`), not merely the first token that happens to equal the value —
+/// `websets get item --expand item` must correct the flag value, not the positional id.
+fn rewrite_argv_value_for(
+    invalid: &str,
+    replacement: &str,
+    owner_flag: Option<&str>,
+) -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    if args.is_empty() {
+        return None;
+    }
+    args[0] = "exa-agent".to_string();
+    let owner_long = owner_flag.and_then(|owner| {
+        owner
+            .split_whitespace()
+            .next()
+            .filter(|token| token.starts_with('-'))
+            // clap knows the internal spelling; argv holds the public one.
+            .map(|token| token.replace("--export-format", "--format"))
+    });
+    let mut replaced = false;
+    let mut previous: Option<String> = None;
+    for arg in args.iter_mut().skip(1) {
+        let bound_to_owner = match (&owner_long, &previous) {
+            (Some(owner), Some(prev)) => prev == owner,
+            // No owner flag is recoverable, so replace the first matching token.
+            (None, _) => true,
+            _ => false,
+        };
+        if arg == invalid && bound_to_owner {
+            *arg = replacement.to_string();
+            replaced = true;
+            break;
+        }
+        if let Some((flag, value)) = arg.split_once('=') {
+            if value == invalid && owner_long.as_deref().is_none_or(|owner| flag == owner) {
+                *arg = format!("{flag}={replacement}");
+                replaced = true;
+                break;
+            }
+        }
+        previous = Some(arg.clone());
+    }
+    replaced.then(|| {
+        args.iter()
+            .map(|arg| display_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+fn display_arg(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "-_./:=@+".contains(ch));
+    if plain {
+        arg.to_string()
+    } else {
+        shell_quote(arg)
+    }
+}
+
+/// The full command path from a clap usage line, e.g. `websets exports create`.
+fn command_path_from_error(e: &clap::Error) -> Option<String> {
+    use clap::error::ContextKind;
+    let usage = clap_ctx_strings(e, ContextKind::Usage)
+        .into_iter()
+        .next()
+        .or_else(|| {
+            e.to_string()
+                .lines()
+                .find(|line| line.contains("Usage:"))
+                .map(ToOwned::to_owned)
+        })?;
+    let usage = strip_ansi(&usage);
+    let usage = usage.trim().strip_prefix("Usage: ")?;
+    let usage = usage.strip_prefix("exa-agent ")?;
+    let parts: Vec<&str> = usage
+        .split_whitespace()
+        .take_while(|token| {
+            token
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+                && !token.starts_with('-')
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn parent_command_from_error(e: &clap::Error) -> Option<String> {
@@ -399,6 +720,7 @@ fn static_subcommands(parent: &str) -> &'static [&'static str] {
         "preset" | "macro" => &["list", "show"],
         "agent" => &["run", "runs"],
         "agent runs" => &["create", "list", "get", "events", "cancel", "delete"],
+        "research" => &["create", "list", "get"],
         _ => &[],
     }
 }
@@ -441,11 +763,16 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
     match &cli.command {
         Command::Capabilities(args) => {
-            emit_stdout(&capabilities_for(args)?, pretty);
+            emit_document(
+                &capabilities_for(args)?,
+                "capabilities",
+                &cli.globals,
+                pretty,
+            )?;
             Ok(0)
         }
         Command::Schema { sub } => dispatch_schema(sub, &cli.globals, pretty),
-        Command::RobotDocs { sub } => dispatch_robot_docs(sub, pretty),
+        Command::RobotDocs { sub } => dispatch_robot_docs(sub, &cli.globals, pretty),
         Command::Doctor(args) => {
             let checks = parse_checks(&args.check);
             doctor::validate_check_ids(&checks)?;
@@ -466,13 +793,13 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
                 ctx.online_probes = Some(run_doctor_online_probes(&cli.globals));
             }
             let report = doctor::run_doctor(&options, &ctx);
-            emit_stdout(&report.to_json(), pretty);
+            emit_document(&report.to_json(), "doctor", &cli.globals, pretty)?;
             Ok(doctor::doctor_exit_code(&report))
         }
         Command::Auth { sub } => dispatch_auth(sub, &cli.globals, pretty),
-        Command::Config { sub } => dispatch_config(sub, pretty),
-        Command::Preset { sub } => dispatch_preset(sub, pretty),
-        Command::Macro { sub } => dispatch_macro(sub, pretty),
+        Command::Config { sub } => dispatch_config(sub, &cli.globals, pretty),
+        Command::Preset { sub } => dispatch_preset(sub, &cli.globals, pretty),
+        Command::Macro { sub } => dispatch_macro(sub, &cli.globals, pretty),
         Command::Search(args) => dispatch_search(args, &cli.globals, pretty),
         Command::Contents(args) => dispatch_contents(args, &cli.globals, pretty),
         Command::Similar(args) => dispatch_similar(args, &cli.globals, pretty),
@@ -543,7 +870,17 @@ fn dispatch_search(args: &SearchArgs, globals: &GlobalArgs, pretty: bool) -> Res
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     with_typed_error_context(op, globals, || {
         let spec = build_search_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
+        let warnings = typed_category_alias_warnings(args.category.as_deref(), &spec.body);
+        dispatch_typed_command_with_extras(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                extra_warnings: &warnings,
+                ..LiveExtras::default()
+            },
+        )
     })
 }
 
@@ -553,11 +890,48 @@ fn build_search_spec(
 ) -> Result<request::RequestSpec, CliError> {
     let op = registry::lookup_by_segments(&["search"]).expect("search is in the registry");
     validate_search_intent_args(args)?;
-    let flag_values = normalize_content_flag_values(op, args.into_flag_values(), &args.query)?;
+    let mut flag_values = args.into_flag_values();
+    if let Some((_, value)) = flag_values
+        .iter_mut()
+        .find(|(flag, _)| *flag == "output-schema")
+    {
+        *value = args
+            .output_schema
+            .as_deref()
+            .map(|raw| read_output_schema_arg(raw, SEARCH_SCHEMA_EXAMPLE))
+            .transpose()?
+            .map(|value| value.to_string());
+    }
+    if let Some((_, value)) = flag_values
+        .iter_mut()
+        .find(|(flag, _)| *flag == "system-prompt")
+    {
+        *value = args
+            .system_prompt
+            .as_deref()
+            .map(|raw| read_system_prompt_arg(raw, "search", &args.query))
+            .transpose()?;
+    }
+    let flag_values = normalize_content_flag_values(op, flag_values, &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
+}
+
+fn read_system_prompt_arg(raw: &str, command: &str, query: &str) -> Result<String, CliError> {
+    let value = request::read_text_value_arg(raw, "system-prompt")?;
+    if value.trim().is_empty() {
+        return Err(CliError::Usage(
+            Diag::new("invalid_value", "`--system-prompt` must not be empty").with_suggestion(
+                format!(
+                    "exa-agent {command} {} --system-prompt \"instructions\"",
+                    shell_quote(query)
+                ),
+            ),
+        ));
+    }
+    Ok(value)
 }
 
 fn validate_search_intent_args(args: &SearchArgs) -> Result<(), CliError> {
@@ -698,14 +1072,13 @@ fn normalize_and_validate_search_body(
             return Err(CliError::Usage(
                 Diag::new(
                     "invalid_value",
-                    "search category must be a string; valid categories are company, people, research paper, news, personal site, financial report",
+                    "search category must be a string; valid categories are company, people, publication, news, personal site, financial report",
                 )
                 .with_details(serde_json::json!({ "validCategories": SEARCH_CATEGORY_VALUES }))
                 .with_suggestion("exa-agent schema show search --compact"),
             ));
         };
-        let category = canonical_search_category(raw, query)?;
-        body["category"] = serde_json::Value::String(category.to_string());
+        canonical_search_category(raw, query)?;
     }
 
     validate_search_category_filter_combinations(body, query)?;
@@ -826,7 +1199,7 @@ fn canonical_search_category(raw: &str, query: &str) -> Result<&'static str, Cli
         Diag::new(
             "invalid_value",
             format!(
-                "invalid search category `{raw}`; valid categories are company, people, research paper, news, personal site, financial report"
+                "invalid search category `{raw}`; valid categories are company, people, publication, news, personal site, financial report"
             ),
         )
         .with_details(details)
@@ -843,7 +1216,7 @@ fn exact_search_category(raw: &str) -> Option<&'static str> {
     match lower.as_str() {
         "company" => Some("company"),
         "people" => Some("people"),
-        "research paper" => Some("research paper"),
+        "publication" | "research paper" => Some("publication"),
         "news" => Some("news"),
         "personal site" => Some("personal site"),
         "financial report" => Some("financial report"),
@@ -860,11 +1233,32 @@ fn search_category_alias(raw: &str) -> Option<&'static str> {
     match compact.as_str() {
         "companys" | "companies" => Some("company"),
         "person" | "peoples" => Some("people"),
-        "researchpaper" => Some("research paper"),
+        "researchpaper" => Some("publication"),
         "personalsite" => Some("personal site"),
         "financialreport" => Some("financial report"),
         _ => None,
     }
+}
+
+fn coerce_typed_category(raw: &str) -> String {
+    exact_search_category(raw).unwrap_or(raw).to_string()
+}
+
+fn typed_category_alias_warnings(
+    given: Option<&str>,
+    body: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    if given.is_some_and(|value| value.trim().eq_ignore_ascii_case("research paper"))
+        && body.get("category").and_then(serde_json::Value::as_str) == Some("publication")
+    {
+        return vec![legacy_value_coerced_warning(
+            "category",
+            given.unwrap_or_default(),
+            "publication",
+            "legacy category spelling was coerced to the canonical publication value",
+        )];
+    }
+    Vec::new()
 }
 
 fn validate_search_category_filter_combinations(
@@ -1037,7 +1431,17 @@ fn dispatch_similar(
     let op = registry::lookup_by_segments(&["similar"]).expect("similar is in the registry");
     with_typed_error_context(op, globals, || {
         let spec = build_similar_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
+        let warnings = typed_category_alias_warnings(args.category.as_deref(), &spec.body);
+        dispatch_typed_command_with_extras(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions::default(),
+            LiveExtras {
+                extra_warnings: &warnings,
+                ..LiveExtras::default()
+            },
+        )
     })
 }
 
@@ -1068,7 +1472,7 @@ fn build_answer_spec(
     let output_schema = args
         .output_schema
         .as_deref()
-        .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+        .map(|raw| read_output_schema_arg(raw, ANSWER_SCHEMA_EXAMPLE))
         .transpose()?
         .map(|value| value.to_string());
     let mut flag_values = args.into_flag_values();
@@ -1103,6 +1507,7 @@ fn dispatch_fetch(args: &FetchArgs, globals: &GlobalArgs, pretty: bool) -> Resul
             ids: Vec::new(),
             text: Some(String::new()),
             summary_query: Some("Summarize the page".to_string()),
+            highlights: None,
             chunk_size: None,
         };
         let spec = build_contents_spec(&contents_args, globals)?;
@@ -1339,6 +1744,9 @@ fn dispatch_admin_keys_create(
             )));
         }
         let spec = build_admin_keys_create_spec(args, globals)?;
+        if let Some(secret_path) = args.secret_output.as_deref() {
+            ensure_output_targets_distinct(globals, secret_path)?;
+        }
         if globals.print_request || globals.dry_run {
             return dispatch_typed_command(spec, globals, pretty);
         }
@@ -1371,6 +1779,7 @@ fn dispatch_admin_keys_create(
             LiveExtras {
                 secret_output: Some(secret_output),
                 extra_warnings: &[],
+                ..LiveExtras::default()
             },
         )
     })
@@ -1700,7 +2109,8 @@ fn dispatch_agent_runs_create(
     with_typed_error_context(op, globals, || {
         let spec = build_agent_run_spec(args, globals)?;
         let extra_headers = agent_run_create_headers(args);
-        dispatch_typed_command_with_options(
+        let warnings = typed_provider_alias_warnings(&args.data_source, &spec.body);
+        dispatch_typed_command_with_extras(
             spec,
             globals,
             pretty,
@@ -1710,6 +2120,10 @@ fn dispatch_agent_runs_create(
                 extra_headers: (!extra_headers.is_empty()).then_some(extra_headers.as_slice()),
                 command_override,
                 ..TypedDispatchOptions::default()
+            },
+            LiveExtras {
+                extra_warnings: &warnings,
+                ..LiveExtras::default()
             },
         )
     })
@@ -1731,7 +2145,7 @@ fn build_agent_run_spec(
     let output_schema = args
         .output_schema
         .as_deref()
-        .map(|raw| request::read_json_value_arg(raw, "output-schema"))
+        .map(|raw| read_output_schema_arg(raw, AGENT_SCHEMA_EXAMPLE))
         .transpose()?
         .map(|value| value.to_string());
     let input = args
@@ -1748,6 +2162,11 @@ fn build_agent_run_spec(
         .transpose()?
         .map(|value| value.to_string());
     let data_sources = agent_data_sources_json(&args.data_source)?;
+    let system_prompt = args
+        .system_prompt
+        .as_deref()
+        .map(|raw| read_system_prompt_arg(raw, "agent runs create", &args.query))
+        .transpose()?;
     let metadata = args
         .metadata
         .as_deref()
@@ -1757,6 +2176,7 @@ fn build_agent_run_spec(
     let flag_values = [
         ("query", Some(args.query.clone())),
         ("output-schema", output_schema),
+        ("system-prompt", system_prompt),
         ("input", input),
         ("input-row", input_rows),
         ("exclusion", exclusion),
@@ -1805,6 +2225,13 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
     let mut sources = Vec::with_capacity(providers.len());
     for provider in providers {
         let provider = provider.trim();
+        let provider = if provider.eq_ignore_ascii_case("fiber_ai") {
+            "fiber"
+        } else if provider.eq_ignore_ascii_case("particle_news") {
+            "particle"
+        } else {
+            provider
+        };
         if provider.is_empty() {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
@@ -1814,6 +2241,60 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
         sources.push(serde_json::json!({ "provider": provider }));
     }
     Ok(Some(serde_json::Value::Array(sources).to_string()))
+}
+
+fn typed_provider_alias_warnings(
+    given: &[String],
+    body: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let sent = body
+        .get("dataSources")
+        .and_then(serde_json::Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .filter_map(|source| source.get("provider").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    given
+        .iter()
+        .filter_map(|raw| {
+            let value = raw.trim();
+            let (canonical, sent_value) = if value.eq_ignore_ascii_case("fiber_ai") {
+                ("fiber", "fiber")
+            } else if value.eq_ignore_ascii_case("particle_news") {
+                ("particle", "particle")
+            } else {
+                return None;
+            };
+            sent.contains(&sent_value).then(|| {
+                legacy_value_coerced_warning(
+                    "provider",
+                    raw,
+                    canonical,
+                    format!("legacy data-source provider spelling was coerced to `{canonical}`"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn legacy_value_coerced_warning(
+    field: &str,
+    given: &str,
+    sent: &str,
+    message: impl Into<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": "legacy_value_coerced",
+        "message": message.into(),
+        "details": {
+            "field": field,
+            "given": given,
+            "sent": sent
+        }
+    })
 }
 
 fn dispatch_agent_runs_list(
@@ -1963,64 +2444,32 @@ fn globals_with_extra_headers(globals: &GlobalArgs, extra: &[(String, String)]) 
 fn dispatch_research(
     sub: &ResearchCmd,
     globals: &GlobalArgs,
-    pretty: bool,
+    _pretty: bool,
 ) -> Result<i32, CliError> {
-    match sub {
-        ResearchCmd::Create(args) => dispatch_research_create(args, globals, pretty),
-        ResearchCmd::List(pagination) => dispatch_research_list(pagination, globals, pretty),
-        ResearchCmd::Get { research_id } => dispatch_research_get(research_id, globals, pretty),
-    }
+    let err = match sub {
+        ResearchCmd::Create(args) => research_retired_error("create", Some(&args.query), None),
+        ResearchCmd::List(_) => research_retired_error("list", None, None),
+        ResearchCmd::Get { research_id } => research_retired_error("get", None, Some(research_id)),
+    };
+    Ok(emit_local_error(err, globals))
 }
 
-fn dispatch_research_create(
-    args: &ResearchCreateArgs,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["research", "create"])
-        .expect("research create is in the registry");
-    with_typed_error_context(op, globals, || {
-        if args.stream {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "invalid_flag_combination",
-                    "`research create --stream` is not supported by the upstream create endpoint",
-                )
-                .with_suggestion("exa-agent research create QUERY && exa-agent research get ID"),
-            ));
-        }
-        let spec = build_research_create_spec(args, globals)?;
-        dispatch_typed_command(spec, globals, pretty)
-    })
-}
-
-fn build_research_create_spec(
-    args: &ResearchCreateArgs,
-    globals: &GlobalArgs,
-) -> Result<request::RequestSpec, CliError> {
-    let op = registry::lookup_by_segments(&["research", "create"])
-        .expect("research create is in the registry");
-    let flag_values = [("query", Some(args.query.clone()))];
-    build_typed_spec(op, &flag_values, globals)
-}
-
-fn dispatch_research_list(
-    pagination: &PaginationArgs,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op =
-        registry::lookup_by_segments(&["research", "list"]).expect("research list is in registry");
-    with_typed_error_context(op, globals, || {
-        validate_cursor_pagination(pagination)?;
-        let spec = build_typed_spec(op, &[], globals)?;
-        let query = pagination_query(pagination);
-        if pagination.all && !(globals.print_request || globals.dry_run) {
-            dispatch_paginated_typed_command(spec, globals, pretty, pagination, None, &[])
-        } else {
-            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
-        }
-    })
+/// Emit an error for a command that never reaches the network, keeping request identity while
+/// leaving `operation.method`/`operation.path` null.
+fn emit_local_error(err: CliError, globals: &GlobalArgs) -> i32 {
+    let code = err.category() as i32;
+    let request_id = if globals.print_request || globals.dry_run {
+        "req_dry_run".to_string()
+    } else {
+        transport::new_request_id()
+    };
+    let env = ErrorEnvelope::from_error(&err)
+        .with_request_context(request_id, globals.correlation_id.clone());
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&env.to_json()).unwrap_or_default()
+    );
+    code
 }
 
 fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliError> {
@@ -2030,13 +2479,13 @@ fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliErro
                 "invalid_flag_combination",
                 "`--max-pages` and `--page-delay` require `--all` on cursor-paginated list commands",
             )
-            .with_suggestion("exa-agent research list --all --max-pages 3"),
+            .with_suggestion("exa-agent websets events list --all --max-pages 3"),
         ));
     }
     if pagination.max_pages == Some(0) {
         return Err(CliError::Usage(
             Diag::new("invalid_value", "--max-pages must be at least 1")
-                .with_suggestion("exa-agent research list --all --max-pages 1"),
+                .with_suggestion("exa-agent websets events list --all --max-pages 1"),
         ));
     }
     if let Some(raw) = &pagination.page_delay {
@@ -2045,18 +2494,40 @@ fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliErro
     Ok(())
 }
 
-fn dispatch_research_get(
-    research_id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op =
-        registry::lookup_by_segments(&["research", "get"]).expect("research get is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("researchId", research_id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+fn research_retired_error(verb: &str, query: Option<&str>, research_id: Option<&str>) -> CliError {
+    let mut details = serde_json::json!({
+        "replacement": "exa-agent search --type deep-reasoning"
+    });
+    if let Some(research_id) = research_id {
+        details["researchId"] = serde_json::Value::String(research_id.to_string());
+    }
+    let suggested = match verb {
+        "create" => format!(
+            "exa-agent search {} --type deep-reasoning",
+            shell_double_quote(query.unwrap_or_default())
+        ),
+        _ => "exa-agent search --help".to_string(),
+    };
+    CliError::Usage(
+        Diag::new(
+            "research_retired",
+            "the Exa Research API is retired; use search --type deep-reasoning",
+        )
+        .with_details(details)
+        .with_suggestion(suggested),
+    )
+}
+
+fn shell_double_quote(value: &str) -> String {
+    let value = value.replace("\r\n", " ").replace(['\n', '\r'], " ");
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
+    )
 }
 
 fn dispatch_monitor(sub: &MonitorCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
@@ -2113,6 +2584,9 @@ fn dispatch_monitor_create(
             )));
         }
         let spec = build_monitor_create_spec(args, globals)?;
+        if let Some(secret_path) = args.secret_output.as_deref() {
+            ensure_output_targets_distinct(globals, secret_path)?;
+        }
         let extra_warnings = monitor_webhook_secret_warnings(args, &spec.body);
         if globals.print_request || globals.dry_run {
             return dispatch_typed_preview_with_warnings(
@@ -2145,6 +2619,7 @@ fn dispatch_monitor_create(
             LiveExtras {
                 secret_output,
                 extra_warnings: &extra_warnings,
+                ..LiveExtras::default()
             },
         )
     })
@@ -2313,6 +2788,53 @@ impl Drop for SecretOutputReservation {
             let _ = std::fs::remove_file(&self.target);
         }
     }
+}
+
+/// `--output` and `--secret-output` must never name the same file. The response write happens
+/// after the secret is committed, so an equivalent target silently overwrites the only copy of a
+/// one-time secret and still exits 0. Reject the combination before anything is reserved or sent.
+fn ensure_output_targets_distinct(globals: &GlobalArgs, secret_path: &str) -> Result<(), CliError> {
+    let Some(output_path) = globals.output.as_deref() else {
+        return Ok(());
+    };
+    if !paths_target_same_file(output_path, secret_path) {
+        return Ok(());
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_flag_combination",
+            format!(
+                "--output `{output_path}` and --secret-output `{secret_path}` resolve to the same file; the response write would overwrite the one-time secret"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "outputPath": output_path,
+            "secretOutputPath": secret_path,
+        })),
+    ))
+}
+
+fn paths_target_same_file(left: &str, right: &str) -> bool {
+    let (left, right) = (std::path::Path::new(left), std::path::Path::new(right));
+    match (
+        canonical_output_target(left),
+        canonical_output_target(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Canonicalize the existing parent directory and re-attach the file name, so two spellings of a
+/// file that does not exist yet (`x` and `./x`) compare equal.
+fn canonical_output_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    Some(std::fs::canonicalize(parent).ok()?.join(name))
 }
 
 fn reserve_webhook_secret_file(path: &str) -> Result<SecretOutputReservation, CliError> {
@@ -2683,7 +3205,7 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
     match sub {
         WebsetsCmd::Create(args) => dispatch_websets_create(args, globals, pretty),
         WebsetsCmd::List(args) => dispatch_websets_list(args, globals, pretty),
-        WebsetsCmd::Get { id } => dispatch_websets_get(id, globals, pretty),
+        WebsetsCmd::Get(args) => dispatch_websets_get(args, globals, pretty),
         WebsetsCmd::Update { id } => dispatch_websets_update(id, globals, pretty),
         WebsetsCmd::Delete { id } => dispatch_websets_delete(id, globals, pretty),
         WebsetsCmd::Cancel { id } => dispatch_websets_cancel(id, globals, pretty),
@@ -2691,6 +3213,7 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
         WebsetsCmd::Items { sub } => dispatch_websets_items(sub, globals, pretty),
         WebsetsCmd::Searches { sub } => dispatch_websets_searches(sub, globals, pretty),
         WebsetsCmd::Enrichments { sub } => dispatch_websets_enrichments(sub, globals, pretty),
+        WebsetsCmd::Exports { sub } => dispatch_websets_exports(sub, globals, pretty),
         WebsetsCmd::Imports { sub } => dispatch_websets_imports(sub, globals, pretty),
         WebsetsCmd::Monitors { sub } => dispatch_websets_monitors(sub, globals, pretty),
         WebsetsCmd::Events { sub } => dispatch_websets_events(sub, globals, pretty),
@@ -2868,11 +3391,131 @@ fn dispatch_websets_list(
     })
 }
 
-fn dispatch_websets_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_websets_get(
+    args: &WebsetsGetArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["websets", "get"]).expect("websets get is in registry");
     with_typed_error_context(op, globals, || {
+        let mut spec = build_typed_spec(op, &[], globals)?;
+        let path = checked_substitute_path(op.api_path, &[("id", args.id.as_str())])?;
+        let body_expand = spec.body.get("expand").cloned();
+        if args.expand.is_some() && body_expand.is_some() {
+            return Err(CliError::Usage(Diag::new(
+                "invalid_flag_combination",
+                "websets get cannot combine --expand with body field `expand`; use one source",
+            )));
+        }
+        let body_expand = body_expand
+            .map(|value| {
+                spec.body
+                    .as_object_mut()
+                    .expect("typed request bodies are JSON objects")
+                    .remove("expand");
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    CliError::Usage(Diag::new(
+                        "invalid_value",
+                        "websets get body field `expand` must be a string",
+                    ))
+                })
+            })
+            .transpose()?;
+        let query = args
+            .expand
+            .map(|expand| expand.as_str().to_string())
+            .or(body_expand)
+            .map(|expand| vec![("expand".to_string(), expand)])
+            .unwrap_or_default();
+        dispatch_typed_command_routed(
+            spec,
+            globals,
+            pretty,
+            Some(path.as_str()),
+            &query,
+            false,
+            None,
+        )
+    })
+}
+
+fn dispatch_websets_exports(
+    sub: &WebsetsExportsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    match sub {
+        WebsetsExportsCmd::Create {
+            webset_id,
+            export_format,
+        } => dispatch_websets_exports_create(webset_id, *export_format, globals, pretty),
+        WebsetsExportsCmd::Get {
+            webset_id,
+            export_id,
+        } => dispatch_websets_exports_get(webset_id, export_id, globals, pretty),
+    }
+}
+
+fn dispatch_websets_exports_create(
+    webset_id: &str,
+    format: Option<WebsetExportFormat>,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "exports", "create"])
+        .expect("websets exports create is in registry");
+    with_typed_error_context(op, globals, || {
+        let spec = build_typed_spec(
+            op,
+            &[(
+                "format",
+                Some(
+                    format
+                        .map(|format| format.as_str().to_string())
+                        .unwrap_or_default(),
+                ),
+            )],
+            globals,
+        )?;
+        let format_missing = match spec.body.get("format") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(value) => value.as_str().is_some_and(str::is_empty),
+        };
+        if format_missing {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "missing_required_argument",
+                    "websets exports create requires format (via --format, --body, or --set)",
+                )
+                .with_suggestion("exa-agent websets exports create <webset> --format csv"),
+            ));
+        }
+        let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
+        dispatch_typed_command_with_next_action_context(
+            spec,
+            globals,
+            pretty,
+            TypedDispatchOptions {
+                path_override: Some(path.as_str()),
+                ..TypedDispatchOptions::default()
+            },
+            webset_id,
+        )
+    })
+}
+
+fn dispatch_websets_exports_get(
+    webset_id: &str,
+    export_id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(&["websets", "exports", "get"])
+        .expect("websets exports get is in registry");
+    with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
+        let path =
+            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", export_id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
@@ -3379,13 +4022,9 @@ fn dispatch_websets_imports(
     pretty: bool,
 ) -> Result<i32, CliError> {
     match sub {
-        WebsetsImportsCmd::Create { source, url, csv } => dispatch_websets_imports_create(
-            source.as_deref(),
-            url.as_deref(),
-            csv.as_deref(),
-            globals,
-            pretty,
-        ),
+        WebsetsImportsCmd::Create { source } => {
+            dispatch_websets_imports_create(source.as_deref(), globals, pretty)
+        }
         WebsetsImportsCmd::List(pagination) => {
             dispatch_websets_imports_list(pagination, globals, pretty)
         }
@@ -3403,8 +4042,6 @@ fn dispatch_websets_imports(
 
 fn build_websets_imports_create_spec(
     source: Option<&str>,
-    url: Option<&str>,
-    csv: Option<&str>,
     globals: &GlobalArgs,
 ) -> Result<request::RequestSpec, CliError> {
     if source.is_some_and(|source| source != "csv") {
@@ -3415,18 +4052,6 @@ fn build_websets_imports_create_spec(
             )
             .with_suggestion("exa-agent websets imports create --source csv --body @import.json"),
         ));
-    }
-    if csv.is_some() {
-        return Err(CliError::Usage(Diag::new(
-            "not_implemented",
-            "CSV upload convenience via --csv is deferred; build the import body with --body/--set instead",
-        )));
-    }
-    if url.is_some() {
-        return Err(CliError::Usage(Diag::new(
-            "invalid_value",
-            "`--url` upload convenience is deferred; build the import body with --body/--set instead",
-        )));
     }
     let op = registry::lookup_by_segments(&["websets", "imports", "create"])
         .expect("websets imports create is in registry");
@@ -3473,7 +4098,7 @@ fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), C
                 ),
             )
             .with_suggestion(
-                r#"exa-agent websets imports create --source csv --body '{"size":1024,"count":10,"entity":{"type":"company"}}'"#,
+                IMPORTS_CREATE_BODY_EXAMPLE,
             ),
         ));
     }
@@ -3483,15 +4108,13 @@ fn validate_websets_import_create_body(body: &serde_json::Value) -> Result<(), C
 
 fn dispatch_websets_imports_create(
     source: Option<&str>,
-    url: Option<&str>,
-    csv: Option<&str>,
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["websets", "imports", "create"])
         .expect("websets imports create is in registry");
     with_typed_error_context(op, globals, || {
-        let spec = build_websets_imports_create_spec(source, url, csv, globals)?;
+        let spec = build_websets_imports_create_spec(source, globals)?;
         dispatch_typed_command(spec, globals, pretty)
     })
 }
@@ -4132,6 +4755,9 @@ fn dispatch_websets_webhooks_create(
             )));
         }
         let spec = build_websets_webhooks_create_spec(args, globals)?;
+        if let Some(secret_path) = args.secret_output.as_deref() {
+            ensure_output_targets_distinct(globals, secret_path)?;
+        }
         let extra_warnings = websets_webhook_secret_warnings(args);
         if globals.print_request || globals.dry_run {
             return dispatch_typed_preview_with_warnings(
@@ -4164,6 +4790,7 @@ fn dispatch_websets_webhooks_create(
             LiveExtras {
                 secret_output,
                 extra_warnings: &extra_warnings,
+                ..LiveExtras::default()
             },
         )
     })
@@ -4358,29 +4985,48 @@ fn dispatch_typed_preview_with_warnings(
     let path = options.path_override.unwrap_or(op.api_path);
     let mut warnings = typed_command_warnings(op);
     warnings.extend_from_slice(extra_warnings);
-    emit_stdout(
-        &redacted_preview_expanded(
-            &spec,
-            TypedPreviewOptions {
-                path,
-                query: options.query,
-                expands_to: options.expands_to,
-                extra_headers: options.extra_headers,
-                command_override: options.command_override,
-                globals: Some(globals),
-                warnings: &warnings,
-            },
-        ),
-        pretty,
+    let preview = redacted_preview_expanded(
+        &spec,
+        TypedPreviewOptions {
+            path,
+            query: options.query,
+            expands_to: options.expands_to,
+            extra_headers: options.extra_headers,
+            command_override: options.command_override,
+            globals: Some(globals),
+            warnings: &warnings,
+        },
     );
+    let command = options
+        .command_override
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| op.command());
+    emit_document(&preview, &command, globals, pretty)?;
     Ok(0)
 }
 
 fn checked_substitute_path(template: &str, params: &[(&str, &str)]) -> Result<String, CliError> {
     for (key, value) in params {
+        reject_empty_path_id(value, key)?;
         reject_placeholder_value(value, key)?;
     }
     Ok(substitute_path(template, params))
+}
+
+/// An empty id collapses the path to its collection root (`/websets/v0/websets/`), which is a
+/// different, often broader, endpoint. Refuse it here rather than sending it.
+fn reject_empty_path_id(value: &str, arg_name: &str) -> Result<(), CliError> {
+    if !value.trim().is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "placeholder_argument",
+            format!("{arg_name} is empty; pass the resource id"),
+        )
+        .with_details(serde_json::json!({ "argument": arg_name, "received": value }))
+        .with_suggestion(placeholder_example_command(arg_name)),
+    ))
 }
 
 fn substitute_path(template: &str, params: &[(&str, &str)]) -> String {
@@ -4430,7 +5076,6 @@ fn is_placeholder_token(value: &str) -> bool {
 fn placeholder_example_command(arg_name: &str) -> &'static str {
     match arg_name {
         "path" => "exa-agent raw GET /search --dry-run",
-        "researchId" => "exa-agent research get research_123 --dry-run",
         "runId" => "exa-agent monitor runs get mon_123 run_123 --dry-run",
         "monitor" => "exa-agent websets monitors get mon_123 --dry-run",
         _ => "exa-agent websets get webset_123 --dry-run",
@@ -4470,7 +5115,7 @@ fn parse_page_delay(raw: &str) -> Result<Duration, CliError> {
                 "invalid_value",
                 "--page-delay expects a duration like 250ms or 1s",
             )
-            .with_suggestion("exa-agent research list --all --page-delay 250ms"),
+            .with_suggestion("exa-agent websets events list --all --page-delay 250ms"),
         )
     })
 }
@@ -4504,6 +5149,36 @@ fn shell_join(args: &[String]) -> String {
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `outputSchema` is a JSON Schema object upstream. Accepting `[1]` or `"x"` here only defers
+/// the rejection to a paid round-trip with an opaque upstream message.
+const SEARCH_SCHEMA_EXAMPLE: &str =
+    r#"exa-agent search "<query>" --output-schema '{"type":"object","properties":{}}'"#;
+const ANSWER_SCHEMA_EXAMPLE: &str =
+    r#"exa-agent answer "<question>" --output-schema '{"type":"object","properties":{}}'"#;
+const AGENT_SCHEMA_EXAMPLE: &str =
+    r#"exa-agent agent runs create "<query>" --output-schema '{"type":"object","properties":{}}'"#;
+
+fn read_output_schema_arg(raw: &str, example: &str) -> Result<serde_json::Value, CliError> {
+    let value = request::read_json_value_arg(raw, "output-schema")?;
+    if value.is_object() {
+        return Ok(value);
+    }
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_field_type",
+            "`--output-schema` must be a JSON object (a JSON Schema), not a scalar or array",
+        )
+        .with_details(serde_json::json!({
+            "issue": "invalid_field_type",
+            "field": "outputSchema",
+            "flag": "output-schema",
+            "expected": "object",
+            "received": value,
+        }))
+        .with_suggestion(example),
+    ))
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -4587,6 +5262,12 @@ fn normalize_content_flag_values(
                 ("search", "highlights", Some(raw)) => {
                     Some(normalize_highlights_flag(&raw, query)?)
                 }
+                ("contents", "highlights", Some(raw)) => {
+                    Some(normalize_contents_highlights_flag(&raw)?)
+                }
+                ("search", "category", Some(raw)) | ("similar", "category", Some(raw)) => {
+                    Some(coerce_typed_category(&raw))
+                }
                 (_, _, value) => value,
             };
             Ok((flag, value))
@@ -4667,6 +5348,50 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
         )
     };
     Ok(default_highlights_value(query, max_characters).to_string())
+}
+
+fn normalize_contents_highlights_flag(raw: &str) -> Result<String, CliError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok("true".to_string());
+    }
+    // A value that opens with `{` was meant as an options object. Silently demoting a malformed
+    // one to `{"query": "{\"numSentences\": ..."}` sends the broken JSON upstream as a search
+    // phrase and returns plausible nonsense.
+    if trimmed.starts_with('{') {
+        let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|err| {
+            CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    format!("`--highlights` looks like a JSON options object but is not valid JSON: {err}"),
+                )
+                .with_details(serde_json::json!({ "received": raw }))
+                .with_suggestion(
+                    r#"exa-agent contents <url-or-id> --highlights '{"query":"pricing","numSentences":3}'"#,
+                ),
+            )
+        })?;
+        if !value.is_object() {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_field_type",
+                    "`--highlights` JSON must be a highlights options object",
+                )
+                .with_details(serde_json::json!({
+                    "issue": "invalid_field_type",
+                    "field": "contents.highlights",
+                    "flag": "highlights",
+                    "expected": "highlights options object",
+                    "received": value,
+                }))
+                .with_suggestion(
+                    r#"exa-agent contents <url-or-id> --highlights '{"query":"pricing","numSentences":3}'"#,
+                ),
+            ));
+        }
+        return Ok(value.to_string());
+    }
+    Ok(serde_json::json!({ "query": raw }).to_string())
 }
 
 fn build_typed_spec(
@@ -4873,6 +5598,25 @@ fn dispatch_typed_command_routed(
     )
 }
 
+fn dispatch_typed_command_with_next_action_context(
+    spec: request::RequestSpec,
+    globals: &GlobalArgs,
+    pretty: bool,
+    options: TypedDispatchOptions<'_>,
+    webset_id: &str,
+) -> Result<i32, CliError> {
+    dispatch_typed_command_with_extras(
+        spec,
+        globals,
+        pretty,
+        options,
+        LiveExtras {
+            next_action_webset_id: Some(webset_id),
+            ..LiveExtras::default()
+        },
+    )
+}
+
 fn dispatch_typed_command_with_options(
     spec: request::RequestSpec,
     globals: &GlobalArgs,
@@ -4964,21 +5708,23 @@ fn dispatch_typed_inner(
         let mut warnings = typed_command_warnings(spec.op);
         warnings.extend_from_slice(extras.extra_warnings);
         warnings.extend(request_body_warnings(spec.op, &typed_wire_body(spec)));
-        emit_stdout(
-            &redacted_preview_expanded(
-                spec,
-                TypedPreviewOptions {
-                    path,
-                    query: options.query,
-                    expands_to: options.expands_to,
-                    extra_headers: options.extra_headers,
-                    command_override: options.command_override,
-                    globals: Some(globals),
-                    warnings: &warnings,
-                },
-            ),
-            pretty,
+        let preview = redacted_preview_expanded(
+            spec,
+            TypedPreviewOptions {
+                path,
+                query: options.query,
+                expands_to: options.expands_to,
+                extra_headers: options.extra_headers,
+                command_override: options.command_override,
+                globals: Some(globals),
+                warnings: &warnings,
+            },
         );
+        let command = options
+            .command_override
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| spec.op.command());
+        emit_document(&preview, &command, globals, pretty)?;
         return Ok(0);
     }
     transport::ensure_network_allowed()?;
@@ -5026,7 +5772,7 @@ fn dispatch_paginated_typed_command(
                 "invalid_flag_combination",
                 "`--raw` cannot be combined with `--all`; request JSON or NDJSON pages instead",
             )
-            .with_suggestion("exa-agent research list --all --ndjson"),
+            .with_suggestion(format!("exa-agent {} --all --ndjson", spec.op.command())),
         ));
     }
     transport::ensure_network_allowed()?;
@@ -5225,8 +5971,7 @@ fn execute_paginated_live<T: Transport>(
         // shape varies by endpoint; a stale single-page breakdown next to a multi-page total
         // would be more misleading than showing only the total.
         envelope["costDollars"] = serde_json::json!({ "total": total_cost_dollars });
-        apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-        emit_response_value(&envelope, globals, pretty);
+        emit_completed_response(&mut envelope, globals, pretty)?;
     }
     Ok(0)
 }
@@ -5529,7 +6274,7 @@ fn execute_typed_live<T: Transport>(
             method: spec.op.method.as_str(),
             path: execution.route.path,
             query_raw: &query_raw,
-            body,
+            body: body.clone(),
             globals,
             credential,
             request_id: execution.request_id.to_string(),
@@ -5550,6 +6295,8 @@ fn execute_typed_live<T: Transport>(
                 globals,
                 execution.request_id,
                 execution.route.path,
+                extras.next_action_webset_id,
+                &body,
             )),
         };
     }
@@ -5574,17 +6321,21 @@ fn execute_typed_live<T: Transport>(
                 globals,
                 execution.request_id,
                 execution.route.path,
+                extras.next_action_webset_id,
+                &body,
             ));
         }
     };
 
     if globals.raw {
-        emit_raw(&result.response.body).map_err(|err| {
-            CliError::Interrupted(Diag::new(
-                "interrupted",
-                format!("failed to write raw stdout: {err}"),
-            ))
-        })?;
+        emit_raw_result(
+            &result,
+            Some(spec.op),
+            &command,
+            globals,
+            execution.pretty,
+            &warnings,
+        )?;
         return Ok(0);
     }
 
@@ -5625,17 +6376,26 @@ fn execute_typed_live<T: Transport>(
     }
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let requested_contents_count = spec.op.mixed_status_exit.then(|| {
+    let requested_contents = spec.op.mixed_status_exit.then(|| {
         contents_inputs_from_body(&body)
             .expect("validated contents body")
             .1
-            .len()
     });
+    let requested_contents_count = requested_contents.as_ref().map(Vec::len);
+    let content_diagnostics = if let Some(requested) = requested_contents.as_deref() {
+        Some(transport::contents_diagnostics(&data, requested))
+    } else if spec.op.command() == "answer" {
+        // The AnswerResponse schema exposes no per-citation crawl, HTTP, or MIME metadata.
+        Some(Vec::new())
+    } else {
+        None
+    };
     append_response_warnings(
         spec.op,
         &body,
         &data,
-        requested_contents_count,
+        requested_contents.as_deref(),
+        content_diagnostics.as_deref(),
         &mut warnings,
     );
     let exit_code = if let Some(requested_count) = requested_contents_count {
@@ -5658,13 +6418,15 @@ fn execute_typed_live<T: Transport>(
         duration_ms: result.duration_ms,
         warnings: &warnings,
     });
-    if let Some(requested_count) = requested_contents_count {
-        envelope["outcome"] = serde_json::Value::String(
-            transport::contents_outcome(&envelope["data"], requested_count).to_string(),
-        );
-    }
-    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-    emit_response_value(&envelope, globals, execution.pretty);
+    let outcome = requested_contents_count
+        .map(|requested_count| transport::contents_outcome(&envelope["data"], requested_count))
+        .or_else(|| {
+            (spec.op.command() == "answer").then(|| transport::answer_outcome(&envelope["data"]))
+        });
+    attach_content_metadata(&mut envelope, outcome, content_diagnostics);
+    append_warning_next_actions(&mut envelope);
+    append_operation_next_actions(&mut envelope, spec.op, extras.next_action_webset_id)?;
+    emit_completed_response(&mut envelope, globals, execution.pretty)?;
     Ok(exit_code)
 }
 
@@ -5677,11 +6439,20 @@ fn execute_streaming_live<T: Transport>(
     pretty: bool,
     warnings: &[serde_json::Value],
 ) -> Result<i32, CliError> {
+    let answer_request_body = operation
+        .is_some_and(|op| op.command() == "answer")
+        .then(|| params.body.clone());
     let stream_mode = stream_output_mode(globals, stdout_is_tty());
     let ndjson = !globals.raw && stream_mode == OutputMode::Ndjson;
     let human = !globals.raw && stream_mode == OutputMode::Human;
     let mut seq = 0u64;
-    let mut out = std::io::stdout().lock();
+    // `--output` is a contract-level promise on every surface, streaming included: point the
+    // stream writer at the file and keep stdout for the confirmation envelope.
+    let output_path = globals.output.as_deref();
+    let mut out: Box<dyn std::io::Write> = match output_path {
+        Some(path) => Box::new(std::io::BufWriter::new(create_output_file(path)?)),
+        None => Box::new(std::io::stdout().lock()),
+    };
     let mut on_item = |item: StreamItem<'_>| -> Result<(), CliError> {
         match item {
             StreamItem::Bytes(bytes) if globals.raw => {
@@ -5714,6 +6485,13 @@ fn execute_streaming_live<T: Transport>(
         use std::io::Write;
         out.flush()
             .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+        if let Some(path) = output_path {
+            drop(out);
+            emit_stdout(
+                &output_file_confirmation(command, path, written_output_bytes(path)),
+                pretty,
+            );
+        }
         return Ok(0);
     }
 
@@ -5723,6 +6501,10 @@ fn execute_streaming_live<T: Transport>(
             if let Some((field, _, _)) = op.secret_capture() {
                 redaction::redact_named_field(&mut data, field);
             }
+        }
+        let mut response_warnings = warnings.to_vec();
+        if let Some(request_body) = answer_request_body.as_ref() {
+            append_answer_warning(request_body, &data, &mut response_warnings);
         }
         let mut envelope = response_envelope(ResponseEnvelopeArgs {
             command,
@@ -5737,19 +6519,34 @@ fn execute_streaming_live<T: Transport>(
             data,
             retries: result.retries,
             duration_ms: result.duration_ms,
-            warnings,
+            warnings: &response_warnings,
         });
-        apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-        if ndjson {
-            write_ndjson(&mut out, &envelope).map_err(|err| stream_write_error(err, None))?;
+        let answer_outcome = answer_request_body
+            .as_ref()
+            .map(|_| transport::answer_outcome(&envelope["data"]));
+        attach_content_metadata(
+            &mut envelope,
+            answer_outcome,
+            answer_request_body.as_ref().map(|_| Vec::new()),
+        );
+        append_warning_next_actions(&mut envelope);
+        if let Some(path) = output_path {
+            write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
+            drop(out);
+            elide_data(&mut envelope, path, written_output_bytes(path));
+            emit_response_value(&envelope, globals, pretty);
         } else {
-            write_stdout_value(&mut out, &envelope, pretty)
-                .map_err(|err| stream_write_error(err, None))?;
+            apply_output_ceiling(&mut envelope, globals.max_output_bytes);
+            write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
         }
         return Ok(0);
     }
 
     let terminal_data = terminal_stream_data(&frames);
+    let mut response_warnings = warnings.to_vec();
+    if let Some(request_body) = answer_request_body.as_ref() {
+        append_answer_warning(request_body, &terminal_data, &mut response_warnings);
+    }
     let count = transport::primary_count(&terminal_data);
     let hash = transport::data_hash(&terminal_data);
     let mut terminal = response_envelope(ResponseEnvelopeArgs {
@@ -5765,21 +6562,51 @@ fn execute_streaming_live<T: Transport>(
         data_hash: hash,
         retries: result.retries,
         duration_ms: result.duration_ms,
-        warnings,
+        warnings: &response_warnings,
     });
-    apply_output_ceiling(&mut terminal, globals.max_output_bytes);
-    if ndjson {
-        write_ndjson(&mut out, &terminal)
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
-    } else if human {
-        use std::io::Write;
-        out.flush()
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+    let answer_outcome = answer_request_body
+        .as_ref()
+        .map(|_| transport::answer_outcome(&terminal["data"]));
+    attach_content_metadata(
+        &mut terminal,
+        answer_outcome,
+        answer_request_body.as_ref().map(|_| Vec::new()),
+    );
+    append_warning_next_actions(&mut terminal);
+    let last_event_id = last_frame_event_id(&frames);
+    if let Some(path) = output_path {
+        write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
+        drop(out);
+        elide_data(&mut terminal, path, written_output_bytes(path));
+        emit_response_value(&terminal, globals, pretty);
     } else {
-        write_stdout_value(&mut out, &terminal, pretty)
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+        apply_output_ceiling(&mut terminal, globals.max_output_bytes);
+        write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
     }
     Ok(0)
+}
+
+fn write_stream_terminal(
+    out: &mut impl std::io::Write,
+    envelope: &serde_json::Value,
+    ndjson: bool,
+    human: bool,
+    pretty: bool,
+    last_event_id: Option<&str>,
+) -> Result<(), CliError> {
+    if ndjson {
+        write_ndjson(out, envelope).map_err(|err| stream_write_error(err, last_event_id))
+    } else if human {
+        out.flush()
+            .map_err(|err| stream_write_error(err, last_event_id))
+    } else {
+        write_stdout_value(out, envelope, pretty)
+            .map_err(|err| stream_write_error(err, last_event_id))
+    }
+}
+
+fn written_output_bytes(path: &str) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 fn write_stream_event_ndjson(
@@ -5847,12 +6674,14 @@ fn maybe_record_pending_run_on_create_failure(
     globals: &GlobalArgs,
     request_id: &str,
     path: &str,
+    webset_id: Option<&str>,
+    body: &serde_json::Value,
 ) -> CliError {
     if !should_write_pending_run(&err, spec, globals) {
         return err;
     }
 
-    let suggested = pending_recovery_command(spec.op);
+    let suggested = pending_recovery_command(spec.op, webset_id, body);
     let pending_path = pending::pending_runs_path();
     let record = pending::PendingRunRecord::for_operation(
         spec.op,
@@ -5879,10 +6708,23 @@ fn should_write_pending_run(
         )
 }
 
-fn pending_recovery_command(op: &'static registry::OperationDef) -> String {
+fn pending_recovery_command(
+    op: &'static registry::OperationDef,
+    webset_id: Option<&str>,
+    body: &serde_json::Value,
+) -> String {
     match op.command().as_str() {
         "agent runs create" => "exa-agent agent runs list --limit 10".to_string(),
-        "research create" => "exa-agent research list --limit 10".to_string(),
+        "websets exports create" => format!(
+            "exa-agent websets exports create {} --format {} --idempotency-key <stable-key>",
+            webset_id
+                .map(shell_quote)
+                .unwrap_or_else(|| "<webset-id>".to_string()),
+            body.get("format")
+                .and_then(serde_json::Value::as_str)
+                .map(shell_quote)
+                .unwrap_or_else(|| "<format>".to_string()),
+        ),
         other => format!("exa-agent {other} --idempotency-key <stable-key>"),
     }
 }
@@ -6065,13 +6907,6 @@ fn stream_output_mode_from_env(
 }
 
 fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json::Value> {
-    if op.cli_path.first() == Some(&"research") {
-        return vec![serde_json::json!({
-            "code": "legacy_api",
-            "message": "The /research/v1 API is legacy; prefer `exa-agent agent run` for new work.",
-            "replacement": "exa-agent agent run <query>"
-        })];
-    }
     if !op.deprecated {
         return Vec::new();
     }
@@ -6123,17 +6958,27 @@ fn append_response_warnings(
     op: &'static registry::OperationDef,
     request_body: &serde_json::Value,
     data: &serde_json::Value,
-    requested_contents_count: Option<usize>,
+    requested_contents: Option<&[String]>,
+    content_diagnostics: Option<&[serde_json::Value]>,
     warnings: &mut Vec<serde_json::Value>,
 ) {
     if op.command() == "contents" {
-        if let Some(requested_count) = requested_contents_count {
+        if let Some(requested) = requested_contents {
             let uses_ids = request_body
                 .get("ids")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|ids| !ids.is_empty());
-            append_contents_status_warnings(data, requested_count, uses_ids, warnings);
+            append_contents_status_warnings(data, requested.len(), uses_ids, warnings);
+            append_contents_content_warnings(
+                content_diagnostics.unwrap_or_default(),
+                uses_ids,
+                warnings,
+            );
         }
+        return;
+    }
+    if op.command() == "answer" {
+        append_answer_warning(request_body, data, warnings);
         return;
     }
     if op.command() != "search" {
@@ -6164,6 +7009,245 @@ fn append_response_warnings(
         ),
         "suggestedCommand": format!("exa-agent search {} --text 1500", shell_quote(query)),
     }));
+}
+
+fn append_answer_warning(
+    request_body: &serde_json::Value,
+    data: &serde_json::Value,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    let outcome = transport::answer_outcome(data);
+    if outcome == "full" {
+        return;
+    }
+    let query = request_body
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<question>");
+    warnings.push(serde_json::json!({
+        "code": "empty_answer",
+        "message": if outcome == "partial" {
+            "answer text was empty although citations were returned; inspect citations or search directly"
+        } else {
+            "answer and citations were empty; search directly rather than treating this as a sourced answer"
+        },
+        "suggestedCommand": format!(
+            "exa-agent search {} --num-results 10 --json",
+            shell_quote(query)
+        )
+    }));
+}
+
+fn append_contents_content_warnings(
+    diagnostics: &[serde_json::Value],
+    uses_ids: bool,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    for diagnostic in diagnostics {
+        let content_status = diagnostic
+            .get("content_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("empty_content");
+        if matches!(content_status, "usable" | "crawl_error") {
+            continue;
+        }
+        let target = diagnostic
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>");
+        let (message, suggested_command) = match content_status {
+            "binary_content" => (
+                "upstream returned undecoded binary bytes instead of usable text",
+                contents_content_fallback(target, uses_ids),
+            ),
+            "pdf_unextracted" => (
+                "upstream returned a PDF without extracted text; no trustworthy raw PDF bytes were available for local pdftotext recovery",
+                parallel_extract_command(target),
+            ),
+            _ => (
+                "upstream returned an empty content row instead of usable text",
+                contents_content_fallback(target, uses_ids),
+            ),
+        };
+        warnings.push(serde_json::json!({
+            "code": content_status,
+            "message": format!("{message}: {target}"),
+            "url": target,
+            "suggestedCommand": suggested_command,
+        }));
+    }
+}
+
+fn contents_content_fallback(target: &str, uses_ids: bool) -> String {
+    if !uses_ids && is_government_source(target) {
+        parallel_extract_command(target)
+    } else {
+        format!(
+            "exa-agent contents {}{} --fresh --text full --json",
+            if uses_ids { "--ids " } else { "" },
+            shell_quote(target)
+        )
+    }
+}
+
+fn parallel_extract_command(target: &str) -> String {
+    format!(
+        "parallel-cli extract {} --full-content --json",
+        shell_quote(target)
+    )
+}
+
+fn is_government_source(target: &str) -> bool {
+    let host = target
+        .split_once("://")
+        .map_or(target, |(_, remainder)| remainder)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    host == "ecfr.gov"
+        || host == "www.ecfr.gov"
+        || host == "congress.gov"
+        || host == "www.congress.gov"
+        || host == "govinfo.gov"
+        || host == "www.govinfo.gov"
+        || host == "uscode.house.gov"
+        || host.ends_with(".gov")
+}
+
+fn attach_content_metadata(
+    envelope: &mut serde_json::Value,
+    outcome: Option<&str>,
+    content_diagnostics: Option<Vec<serde_json::Value>>,
+) {
+    let Some(object) = envelope.as_object_mut() else {
+        return;
+    };
+    let Some(mut index) = object
+        .keys()
+        .position(|key| key == "data")
+        .map(|index| index + 1)
+    else {
+        return;
+    };
+    if let Some(outcome) = outcome {
+        object.shift_insert(
+            index,
+            "outcome".to_string(),
+            serde_json::Value::String(outcome.to_string()),
+        );
+        index += 1;
+    }
+    if let Some(diagnostics) = content_diagnostics {
+        object.shift_insert(
+            index,
+            "contentDiagnostics".to_string(),
+            serde_json::Value::Array(diagnostics),
+        );
+    }
+}
+
+fn append_warning_next_actions(envelope: &mut serde_json::Value) {
+    let actions: Vec<serde_json::Value> = envelope
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| {
+            let code = warning.get("code").and_then(serde_json::Value::as_str)?;
+            if !matches!(
+                code,
+                "url_failed"
+                    | "all_urls_failed"
+                    | "empty_content"
+                    | "binary_content"
+                    | "pdf_unextracted"
+                    | "empty_answer"
+            ) {
+                return None;
+            }
+            let command = warning
+                .get("suggestedCommand")
+                .and_then(serde_json::Value::as_str)?;
+            Some(serde_json::json!({
+                "description": "Recover missing upstream content",
+                "command": command,
+            }))
+        })
+        .collect();
+    if !actions.is_empty() {
+        envelope["nextActions"] = serde_json::Value::Array(actions);
+    }
+}
+
+fn append_operation_next_actions(
+    envelope: &mut serde_json::Value,
+    operation: &registry::OperationDef,
+    webset_id: Option<&str>,
+) -> Result<(), CliError> {
+    let Some(data) = envelope.get("data").cloned() else {
+        return Ok(());
+    };
+    match operation.command().as_str() {
+        "websets imports create" => {
+            if let Some(upload_url) = data.get("uploadUrl").and_then(serde_json::Value::as_str) {
+                envelope["nextActions"]
+                    .as_array_mut()
+                    .expect("response envelopes initialize nextActions as an array")
+                    .push(serde_json::json!({
+                        "description": "Upload your CSV file",
+                        "command": format!(
+                            "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' {}",
+                            shell_quote(upload_url)
+                        ),
+                    }));
+            } else {
+                // Without `uploadUrl` the create half-succeeded: there is nothing to upload to,
+                // so the caller must not read exit 0 as "import ready". `upstream_malformed` is
+                // an exit-5 error in the dictionary, never a warning on a success envelope.
+                let import_id = data.get("id").and_then(serde_json::Value::as_str);
+                let mut details = serde_json::json!({
+                    "field": "uploadUrl",
+                    "command": "websets imports create",
+                });
+                if let Some(import_id) = import_id {
+                    details["importId"] = serde_json::Value::String(import_id.to_string());
+                }
+                return Err(CliError::Upstream(
+                    Diag::new(
+                        "upstream_malformed",
+                        "websets imports create response did not include string `uploadUrl`; the upload step could not be prepared",
+                    )
+                    .with_details(details)
+                    .with_suggestion(format!(
+                        "exa-agent websets imports get {}",
+                        shell_quote(import_id.unwrap_or("<id>"))
+                    )),
+                ));
+            }
+        }
+        "websets exports create" => {
+            let Some(webset_id) = webset_id else {
+                return Ok(());
+            };
+            if let Some(export_id) = data.get("id").and_then(serde_json::Value::as_str) {
+                envelope["nextActions"]
+                    .as_array_mut()
+                    .expect("response envelopes initialize nextActions as an array")
+                    .push(serde_json::json!({
+                        "description": "Poll export status",
+                        "command": format!(
+                            "exa-agent websets exports get {} {}",
+                            shell_quote(webset_id),
+                            shell_quote(export_id)
+                        ),
+                    }));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn append_contents_status_warnings(
@@ -6216,6 +7300,11 @@ fn append_contents_status_warnings(
             });
             if let Some(command) = contents_status_suggested_command(entry, uses_ids) {
                 warning["suggestedCommand"] = serde_json::Value::String(command);
+            }
+            // Label the missing reason whether or not a fallback command could be built —
+            // an entry with no usable id is exactly the case where the caller most needs to be
+            // told the failure reason was absent rather than unread.
+            if contents_status_reason(entry).is_none() {
                 warning["reason"] =
                     serde_json::Value::String("upstream_reason_unavailable".to_string());
             }
@@ -6249,15 +7338,25 @@ fn contents_status_reason(entry: &serde_json::Value) -> Option<&str> {
 }
 
 fn contents_status_suggested_command(entry: &serde_json::Value, uses_ids: bool) -> Option<String> {
-    if contents_status_reason(entry).is_some() {
-        return None;
-    }
     let target = entry
         .get("id")
         .or_else(|| entry.get("url"))
         .and_then(serde_json::Value::as_str)?;
+    if !uses_ids
+        && (contents_status_reason(entry) == Some("CRAWL_UNKNOWN_ERROR")
+            || is_government_source(target))
+    {
+        return Some(parallel_extract_command(target));
+    }
+    if contents_status_reason(entry).is_none() {
+        return Some(format!(
+            "exa-agent contents {}{} --text full",
+            if uses_ids { "--ids " } else { "" },
+            shell_quote(target)
+        ));
+    }
     Some(format!(
-        "exa-agent contents {}{} --text full",
+        "exa-agent contents {}{} --fresh --text full --json",
         if uses_ids { "--ids " } else { "" },
         shell_quote(target)
     ))
@@ -6302,7 +7401,7 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                 Ok(resolved) => (true, Some(resolved.source.label())),
                 Err(_) => (false, None),
             };
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_status.v1",
                     "ok": true,
@@ -6318,14 +7417,16 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "checked": checked,
                     "warnings": warnings,
                 }),
+                "auth status",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         AuthCmd::Login => {
             let secret = read_secret_stdin("auth login", "EXA_API_KEY")?;
             let path = auth::write_credential_file(auth::CredentialNamespace::Api, &secret)?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_login.v1",
                     "ok": true,
@@ -6336,13 +7437,15 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "keyFingerprint": secret.fingerprint(),
                     "last4": secret.last4(),
                 }),
+                "auth login",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         AuthCmd::Logout => {
             let path = auth::clear_credential_file(auth::CredentialNamespace::Api)?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_logout.v1",
                     "ok": true,
@@ -6350,8 +7453,10 @@ fn dispatch_auth(sub: &AuthCmd, globals: &GlobalArgs, pretty: bool) -> Result<i3
                     "source": "credentials_file",
                     "path": path.display().to_string(),
                 }),
+                "auth logout",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         AuthCmd::Test => dispatch_auth_test(globals, pretty),
@@ -6389,7 +7494,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
     const PROBE_ENDPOINT: &str = "/search";
     // Honor the universal contract: --dry-run/--print-request never touch the network.
     if globals.print_request || globals.dry_run {
-        emit_stdout(
+        emit_document(
             &serde_json::json!({
                 "schema": "exa.cli.auth_test.v1",
                 "ok": true,
@@ -6398,8 +7503,10 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
                 "endpoint": PROBE_ENDPOINT,
                 "note": "auth test verifies the credential with a billing-free validation probe (empty POST /search); run without --dry-run to probe.",
             }),
+            "auth test",
+            globals,
             pretty,
-        );
+        )?;
         return Ok(0);
     }
     transport::ensure_network_allowed()?;
@@ -6414,7 +7521,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
     let transport = UreqTransport::new(timeout);
     match transport::probe_auth(&transport, &base_url, &credential.secret)? {
         transport::AuthProbe::Accepted { status } => {
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.auth_test.v1",
                     "ok": true,
@@ -6424,8 +7531,10 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
                     "endpoint": PROBE_ENDPOINT,
                     "httpStatus": status,
                 }),
+                "auth test",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         transport::AuthProbe::Rejected { status } => Err(CliError::Auth(
@@ -6434,6 +7543,16 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
                 format!("credential rejected upstream (HTTP {status})"),
             )
             .with_suggestion("exa-agent auth login"),
+        )),
+        transport::AuthProbe::OutOfCredits { status } => Err(CliError::Billing(
+            crate::error::Diag::new(
+                "insufficient_credits",
+                format!(
+                    "credential is valid but the Exa account is out of credits (HTTP {status}); \
+                     top up at https://dashboard.exa.ai or switch research lanes — retrying will not help"
+                ),
+            )
+            .with_suggestion("exa-agent auth status --json"),
         )),
         transport::AuthProbe::Inconclusive { status } => Err(CliError::Upstream(
             crate::error::Diag::new(
@@ -6449,15 +7568,17 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
     match sub {
         SchemaCmd::List => {
             let list = schema_operations();
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_list.v1",
                     "ok": true,
                     "count": list.len(),
                     "operations": list,
                 }),
+                "schema list",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::Show { name } => {
@@ -6472,19 +7593,21 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                         .with_suggestion("exa-agent schema list"),
                     )
                 })?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_show.v1",
                     "ok": true,
                     "operation": operation_schema(op),
                 }),
+                "schema show",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::Export(args) => {
             let target = args.api.as_deref().or(args.cli.as_deref()).unwrap_or("cli");
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_export.v1",
                     "ok": true,
@@ -6497,8 +7620,10 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     },
                     "operations": schema_operations(),
                 }),
+                "schema export",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::ValidateInput(args) => {
@@ -6513,7 +7638,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             })?;
             let body = read_validate_input_body(globals)?;
             let validation = validate_registry_body(op, &body, true, true);
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_validate_input.v1",
                     "ok": true,
@@ -6523,8 +7648,10 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     "suggestedCommand": validation.suggested_command,
                     "note": validation.note,
                 }),
+                "schema validate-input",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         SchemaCmd::Refresh(args) => {
@@ -6552,7 +7679,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             )?;
             let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
             let current = live_spec_sha256 == registry::EMBEDDED_SPEC_SHA256;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
                     "ok": true,
@@ -6562,14 +7689,20 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
                     "liveSpecSha256": live_spec_sha256,
                 }),
+                "schema refresh",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(i32::from(args.check && !current))
         }
     }
 }
 
-fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_robot_docs(
+    sub: &RobotDocsCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     match sub {
         RobotDocsCmd::Guide => emit_robot_docs(
             serde_json::json!({
@@ -6582,18 +7715,30 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
+                    "Named output controls include search --output-schema JSON|@file and --system-prompt TEXT|@file, contents --highlights [QUERY|JSON], and agent runs create --system-prompt TEXT|@file.",
+                    "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
+                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
+                    "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
+                    "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
+                    "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
                     "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[.data.results[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
-                    "Contents/fetch success envelopes add outcome no_content (no failures and no returned rows), partial, or full (one results row per requested item with no failure evidence); missing statuses do not downgrade full coverage, and all-URL failures remain outcome partial with exit 10.",
+                    "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
+                    "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
+                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (HTTP 402). The key is valid and the command was correct, so do not retry and do not re-guess flags: top up at https://dashboard.exa.ai or switch lanes to `parallel-cli` for the rest of the task.",
+                    "`exa-agent auth test --json` and `exa-agent doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
+                    "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
+                    "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
                     "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
-                    "Errors are JSON on stderr with stable error.code values; run robot-docs errors for the full dictionary."
+                    "Errors are JSON on stderr with stable error.code values; run exa-agent robot-docs errors for the full dictionary."
                 ],
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Commands => emit_robot_docs(
@@ -6603,6 +7748,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "section": "commands",
                 "commands": schema_operations(),
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Errors => emit_robot_docs(
@@ -6616,6 +7762,11 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                 "errorCodes": error_codes_json(),
                 "warningCodes": [
                     {
+                        "code": "legacy_value_coerced",
+                        "exit": 0,
+                        "description": "a typed flag accepted a legacy enum spelling and sent its canonical value; details identify field, given, and sent"
+                    },
+                    {
                         "code": "url_failed",
                         "exit": 0,
                         "description": "contents/fetch returned at least one successful URL and one failed URL; inspect warnings for per-URL status tags"
@@ -6623,10 +7774,31 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     {
                         "code": "all_urls_failed",
                         "exit": 10,
-                        "description": "contents/fetch returned zero results and every requested URL failed; inspect warnings.statuses for per-URL status tags"
+                        "description": "contents/fetch returned zero usable results and every reported URL status failed; inspect warnings.statuses for per-URL status tags"
+                    },
+                    {
+                        "code": "empty_content",
+                        "exit": 0,
+                        "description": "contents/fetch returned a row with no usable text; inspect contentDiagnostics and follow nextActions"
+                    },
+                    {
+                        "code": "binary_content",
+                        "exit": 0,
+                        "description": "contents/fetch returned undecoded binary bytes instead of usable text"
+                    },
+                    {
+                        "code": "pdf_unextracted",
+                        "exit": 0,
+                        "description": "contents/fetch identified a PDF but received no usable extracted text"
+                    },
+                    {
+                        "code": "empty_answer",
+                        "exit": 0,
+                        "description": "answer/ask returned no usable answer text; inspect citations or follow the search nextAction"
                     },
                 ],
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Examples(args) => emit_robot_docs(
@@ -6643,6 +7815,7 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "exa-agent team info --dry-run --print-request --compact"
                 ],
             }),
+            globals,
             pretty,
         ),
         RobotDocsCmd::Prompts => emit_robot_docs(
@@ -6655,13 +7828,18 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Before live writes, run the same command with `--dry-run --print-request` and inspect the JSON envelope."
                 ],
             }),
+            globals,
             pretty,
         ),
     }
 }
 
-fn emit_robot_docs(value: serde_json::Value, pretty: bool) -> Result<i32, CliError> {
-    emit_stdout(&value, pretty);
+fn emit_robot_docs(
+    value: serde_json::Value,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    emit_document(&value, "robot-docs", globals, pretty)?;
     Ok(0)
 }
 
@@ -7002,7 +8180,14 @@ fn content_option_shape_issue(
             "text",
             "text",
             text_input_range(op),
-        ),
+        )
+        .or_else(|| {
+            validate_highlights_option_shape(
+                body_value_at_path(body, "highlights"),
+                "highlights",
+                "highlights",
+            )
+        }),
         _ => None,
     }
 }
@@ -7075,6 +8260,17 @@ fn validate_highlights_option_shape(
                 query,
             ));
         }
+    }
+
+    if let Some(issue) = validate_positive_integer_field(
+        object.get("numSentences"),
+        field,
+        "numSentences",
+        flag,
+        1,
+        None,
+    ) {
+        return Some(issue);
     }
 
     validate_positive_integer_field(
@@ -7205,7 +8401,17 @@ fn registry_validation_error(outcome: ValidateInputOutcome) -> CliError {
         _ => format!("field `{field}` (flag `{flag}`) is invalid"),
     };
 
-    let mut diag = Diag::new(issue, message).with_details(details);
+    // `details.issue` is the fine-grained validator label; `error.code` must stay inside the
+    // published §5.1 dictionary, so a rejected enum reads as `invalid_value` on every command
+    // rather than `invalid_value` on typed flags and `invalid_enum_value` on registry ones.
+    // Fail closed: only dictionary members may escape as `error.code`; anything the
+    // validator invents later still surfaces in `details.issue`.
+    let code = match issue {
+        "missing_required_field" => "missing_required_argument",
+        "invalid_field_type" => "invalid_field_type",
+        _ => "invalid_value",
+    };
+    let mut diag = Diag::new(code, message).with_details(details);
     if let Some(suggestion) = outcome.suggested_command {
         diag = diag.with_suggestion(suggestion);
     }
@@ -7328,6 +8534,14 @@ fn validate_enum_field(
     value: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let raw = value.as_str()?;
+    if matches!(op.command().as_str(), "search" | "similar")
+        && field.flag == "category"
+        && raw.trim().eq_ignore_ascii_case("research paper")
+    {
+        // --body/--set are explicit pass-through escape hatches. They may retain
+        // the legacy upstream spelling, but typed flags are normalized earlier.
+        return None;
+    }
     let allowed = enum_values_for_field(op, field)?;
     let normalized = raw.trim().to_ascii_lowercase();
     if allowed
@@ -7393,17 +8607,19 @@ fn suggested_validate_input_command(
     format!("exa-agent schema show {} --compact", op.command())
 }
 
-fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_config(sub: &ConfigCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         ConfigCmd::Path => {
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_path.v1",
                     "ok": true,
                     "path": config::config_path().display().to_string(),
                 }),
+                "config path",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::List { effective } => {
@@ -7411,68 +8627,76 @@ fn dispatch_config(sub: &ConfigCmd, pretty: bool) -> Result<i32, CliError> {
             let mut data = cfg.list_json();
             data["effective"] = serde_json::json!(effective);
             data["effectiveBaseUrl"] = serde_json::json!(cfg.effective_base_url());
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_list.v1",
                     "ok": true,
                     "config": data,
                 }),
+                "config list",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::Get { path } => {
             let cfg = config::Config::load()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_get.v1",
                     "ok": true,
                     "path": path,
                     "value": cfg.get_path(path)?,
                 }),
+                "config get",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::Set { path, value } => {
             let mut cfg = config::Config::load()?;
             cfg.set_path(path, value)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_set.v1",
                     "ok": true,
                     "path": path,
                     "configPath": config::config_path().display().to_string(),
                 }),
+                "config set",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigCmd::Unset { path } => {
             let mut cfg = config::Config::load()?;
             cfg.unset_path(path)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_unset.v1",
                     "ok": true,
                     "path": path,
                     "configPath": config::config_path().display().to_string(),
                 }),
+                "config unset",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
-        ConfigCmd::Profiles { sub } => dispatch_config_profiles(sub, pretty),
+        ConfigCmd::Profiles { sub } => dispatch_config_profiles(sub, globals, pretty),
     }
 }
 
-fn dispatch_preset(sub: &PresetCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_preset(sub: &PresetCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
         PresetCmd::List => {
             let presets = presets::load_presets()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.presets.v1",
                     "ok": true,
@@ -7480,110 +8704,138 @@ fn dispatch_preset(sub: &PresetCmd, pretty: bool) -> Result<i32, CliError> {
                     "localPath": presets::local_presets_path().display().to_string(),
                     "presets": presets.keys().collect::<Vec<_>>(),
                 }),
+                "preset list",
+                globals,
                 pretty,
-            );
+            )?;
         }
-        PresetCmd::Show { name } => emit_stdout(
-            &serde_json::json!({
-                "schema": "exa.cli.preset.v1",
-                "ok": true,
-                "preset": presets::find_preset(name)?,
-            }),
-            pretty,
-        ),
+        PresetCmd::Show { name } => {
+            emit_document(
+                &serde_json::json!({
+                    "schema": "exa.cli.preset.v1",
+                    "ok": true,
+                    "preset": presets::find_preset(name)?,
+                }),
+                "preset show",
+                globals,
+                pretty,
+            )?;
+        }
     }
     Ok(0)
 }
 
-fn dispatch_macro(sub: &MacroCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_macro(sub: &MacroCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     match sub {
-        MacroCmd::List => emit_stdout(
-            &serde_json::json!({
-                "schema": "exa.cli.macros.v1",
-                "ok": true,
-                "macros": presets::MACROS.iter().map(|item| item.name).collect::<Vec<_>>(),
-            }),
-            pretty,
-        ),
-        MacroCmd::Show { name } => emit_stdout(
-            &serde_json::json!({
-                "schema": "exa.cli.macro.v1",
-                "ok": true,
-                "macro": presets::get_macro(name)?,
-            }),
-            pretty,
-        ),
+        MacroCmd::List => {
+            emit_document(
+                &serde_json::json!({
+                    "schema": "exa.cli.macros.v1",
+                    "ok": true,
+                    "macros": presets::MACROS.iter().map(|item| item.name).collect::<Vec<_>>(),
+                }),
+                "macro list",
+                globals,
+                pretty,
+            )?;
+        }
+        MacroCmd::Show { name } => {
+            emit_document(
+                &serde_json::json!({
+                    "schema": "exa.cli.macro.v1",
+                    "ok": true,
+                    "macro": presets::get_macro(name)?,
+                }),
+                "macro show",
+                globals,
+                pretty,
+            )?;
+        }
     }
     Ok(0)
 }
 
-fn dispatch_config_profiles(sub: &ConfigProfilesCmd, pretty: bool) -> Result<i32, CliError> {
+fn dispatch_config_profiles(
+    sub: &ConfigProfilesCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
     match sub {
         ConfigProfilesCmd::List => {
             let cfg = config::Config::load()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profiles.v1",
                     "ok": true,
                     "data": cfg.profiles_json(),
                 }),
+                "config profiles list",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Show { name } => {
             let cfg = config::Config::load()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile.v1",
                     "ok": true,
                     "name": name,
                     "profile": cfg.show_profile(name)?,
                 }),
+                "config profiles show",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Use { name } => {
             let mut cfg = config::Config::load()?;
             cfg.use_profile(name)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_use.v1",
                     "ok": true,
                     "activeProfile": name,
                 }),
+                "config profiles use",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Create { name } => {
             let mut cfg = config::Config::load()?;
             cfg.create_profile(name)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_create.v1",
                     "ok": true,
                     "name": name,
                 }),
+                "config profiles create",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
         ConfigProfilesCmd::Delete { name } => {
             let mut cfg = config::Config::load()?;
             cfg.delete_profile(name)?;
             cfg.save()?;
-            emit_stdout(
+            emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_delete.v1",
                     "ok": true,
                     "name": name,
                 }),
+                "config profiles delete",
+                globals,
                 pretty,
-            );
+            )?;
             Ok(0)
         }
     }
@@ -7832,24 +9084,22 @@ fn dispatch_raw_inner(
             "dryRun": true,
         });
         let hash = transport::data_hash(&data);
-        emit_stdout(
-            &response_envelope(ResponseEnvelopeArgs {
-                command: "raw",
-                method,
-                path: &args.path,
-                operation: None,
-                request_id,
-                profile: "default",
-                correlation_id: globals.correlation_id.as_deref(),
-                data,
-                count: None,
-                data_hash: hash,
-                retries: 0,
-                duration_ms: 0,
-                warnings: &[],
-            }),
-            pretty,
-        );
+        let preview = response_envelope(ResponseEnvelopeArgs {
+            command: "raw",
+            method,
+            path: &args.path,
+            operation: None,
+            request_id,
+            profile: "default",
+            correlation_id: globals.correlation_id.as_deref(),
+            data,
+            count: None,
+            data_hash: hash,
+            retries: 0,
+            duration_ms: 0,
+            warnings: &[],
+        });
+        emit_document(&preview, "raw", globals, pretty)?;
         return Ok(0);
     }
 
@@ -7895,12 +9145,7 @@ fn dispatch_raw_inner(
     )?;
 
     if globals.raw {
-        emit_raw(&result.response.body).map_err(|err| {
-            CliError::Interrupted(Diag::new(
-                "interrupted",
-                format!("failed to write raw stdout: {err}"),
-            ))
-        })?;
+        emit_raw_result(&result, None, "raw", globals, pretty, &[])?;
         return Ok(0);
     }
 
@@ -7922,8 +9167,7 @@ fn dispatch_raw_inner(
         duration_ms: result.duration_ms,
         warnings: &[],
     });
-    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
-    emit_response_value(&envelope, globals, pretty);
+    emit_completed_response(&mut envelope, globals, pretty)?;
     Ok(0)
 }
 
@@ -7970,6 +9214,207 @@ fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError>
         .collect()
 }
 
+fn emit_completed_response(
+    envelope: &mut serde_json::Value,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<(), CliError> {
+    if let Some(path) = globals.output.as_deref() {
+        let serialized = serialize_response_output(envelope, globals, pretty)?;
+        match write_requested_output(path, &serialized) {
+            Ok(()) => elide_data(envelope, path, serialized.len() as u64),
+            Err(err) => {
+                // The upstream call already succeeded and its response is the only copy of ids,
+                // nextActions, and dataHash the caller will ever see. Losing it to a failed file
+                // write turns a completed create into an invisible duplicate risk, so fall back
+                // to the full inline envelope and still exit non-zero.
+                push_output_write_warning(envelope, path, &err);
+                // No ceiling here: the promise is the FULL inline response after a write
+                // failure — spilling would need the same filesystem that just failed.
+                emit_response_value(envelope, globals, pretty);
+                return Err(err);
+            }
+        }
+    } else {
+        apply_output_ceiling(envelope, globals.max_output_bytes);
+    }
+    emit_response_value(envelope, globals, pretty);
+    Ok(())
+}
+
+fn push_output_write_warning(envelope: &mut serde_json::Value, path: &str, err: &CliError) {
+    let Some(warnings) = envelope
+        .get_mut("warnings")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    warnings.push(serde_json::json!({
+        "code": "output_write_failed",
+        "message": format!(
+            "failed to write --output file `{path}`; the full response is inline on stdout instead: {}",
+            err.diag().message
+        ),
+        "path": path,
+    }));
+}
+
+/// Route a non-response document (dry-run preview, capabilities, other self-description) through
+/// the same `--output` sink as live responses; stdout then carries the confirmation envelope.
+fn emit_document(
+    value: &serde_json::Value,
+    command: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<(), CliError> {
+    let Some(path) = globals.output.as_deref() else {
+        emit_stdout(value, pretty);
+        return Ok(());
+    };
+    let serialized = serialize_response_output(value, globals, pretty)?;
+    match write_requested_output(path, &serialized) {
+        Ok(()) => {
+            emit_stdout(
+                &output_file_confirmation(command, path, serialized.len() as u64),
+                pretty,
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let mut inline = value.clone();
+            if inline.get("warnings").is_none() {
+                if let Some(object) = inline.as_object_mut() {
+                    object.insert("warnings".to_string(), serde_json::json!([]));
+                }
+            }
+            push_output_write_warning(&mut inline, path, &err);
+            emit_stdout(&inline, pretty);
+            Err(err)
+        }
+    }
+}
+
+/// The documented stdout confirmation for `--output` when there is no response envelope to elide.
+fn output_file_confirmation(command: &str, path: &str, bytes: u64) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "exa.cli.response.v1",
+        "ok": true,
+        "command": command,
+        "data": serde_json::Value::Null,
+        "dataTruncated": true,
+        "dataPath": path,
+        "bytes": bytes,
+    })
+}
+
+fn emit_raw_result(
+    result: &transport::RawExecuteResult,
+    operation: Option<&registry::OperationDef>,
+    command: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+    warnings: &[serde_json::Value],
+) -> Result<(), CliError> {
+    let Some(path) = globals.output.as_deref() else {
+        return emit_raw(&result.response.body).map_err(|err| {
+            CliError::Interrupted(Diag::new(
+                "interrupted",
+                format!("failed to write raw stdout: {err}"),
+            ))
+        });
+    };
+    if let Err(err) = write_requested_output(path, &result.response.body) {
+        // Same recovery contract as the structured path: the upstream bytes are the only
+        // copy, so emit them to stdout before reporting the failed write.
+        let _ = emit_raw(&result.response.body);
+        return Err(err);
+    }
+    let data = transport::parse_response_data(&result.response.body);
+    let mut confirmation = response_envelope(ResponseEnvelopeArgs {
+        command,
+        method: &result.method,
+        path: &result.path,
+        operation,
+        request_id: &result.request_id,
+        profile: &result.profile,
+        correlation_id: result.correlation_id.as_deref(),
+        count: transport::primary_count(&data),
+        data_hash: transport::data_hash(&data),
+        data,
+        retries: result.retries,
+        duration_ms: result.duration_ms,
+        warnings,
+    });
+    elide_data(&mut confirmation, path, result.response.body.len() as u64);
+    emit_response_value(&confirmation, globals, pretty);
+    Ok(())
+}
+
+fn serialize_response_output(
+    envelope: &serde_json::Value,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<Vec<u8>, CliError> {
+    let mut output = match response_output_mode(globals) {
+        OutputMode::Human => render_human_response(envelope)
+            .map(String::into_bytes)
+            .unwrap_or(serde_json::to_vec_pretty(envelope).map_err(output_serialization_error)?),
+        OutputMode::Ndjson => {
+            let mut output = Vec::new();
+            for value in response_ndjson_values(envelope) {
+                serde_json::to_writer(&mut output, &value).map_err(output_serialization_error)?;
+                output.push(b'\n');
+            }
+            output
+        }
+        OutputMode::Json | OutputMode::Raw if pretty => {
+            serde_json::to_vec_pretty(envelope).map_err(output_serialization_error)?
+        }
+        OutputMode::Json | OutputMode::Raw => {
+            serde_json::to_vec(envelope).map_err(output_serialization_error)?
+        }
+    };
+    if !output.ends_with(b"\n") {
+        output.push(b'\n');
+    }
+    Ok(output)
+}
+
+fn output_serialization_error(err: serde_json::Error) -> CliError {
+    CliError::Usage(Diag::new(
+        "invalid_value",
+        format!("failed to serialize --output payload: {err}"),
+    ))
+}
+
+fn write_requested_output(path: &str, bytes: &[u8]) -> Result<(), CliError> {
+    std::fs::write(path, bytes).map_err(|err| output_write_error(path, &err))
+}
+
+fn create_output_file(path: &str) -> Result<std::fs::File, CliError> {
+    std::fs::File::create(path).map_err(|err| output_write_error(path, &err))
+}
+
+fn output_write_error(path: &str, err: &std::io::Error) -> CliError {
+    CliError::Usage(Diag::new(
+        "invalid_value",
+        format!("failed to write --output file `{path}`: {err}"),
+    ))
+}
+
+fn elide_data(envelope: &mut serde_json::Value, path: &str, bytes: u64) {
+    let Some(obj) = envelope.as_object_mut() else {
+        return;
+    };
+    obj.insert("data".to_string(), serde_json::Value::Null);
+    obj.insert("dataTruncated".to_string(), serde_json::Value::Bool(true));
+    obj.insert(
+        "dataPath".to_string(),
+        serde_json::Value::String(path.to_string()),
+    );
+    obj.insert("bytes".to_string(), serde_json::json!(bytes));
+}
+
 fn emit_response_value(envelope: &serde_json::Value, globals: &GlobalArgs, pretty: bool) {
     match response_output_mode(globals) {
         OutputMode::Ndjson => emit_response_ndjson(envelope),
@@ -7999,18 +9444,22 @@ fn response_output_mode(globals: &GlobalArgs) -> OutputMode {
 }
 
 fn emit_response_ndjson(envelope: &serde_json::Value) {
+    for value in response_ndjson_values(envelope) {
+        emit_ndjson(&value);
+    }
+}
+
+fn response_ndjson_values(envelope: &serde_json::Value) -> Vec<serde_json::Value> {
     let items = primary_items(envelope.get("data").unwrap_or(&serde_json::Value::Null));
     if items.is_empty() {
-        emit_ndjson(envelope);
-        return;
+        return vec![envelope.clone()];
     }
-    for item in items {
-        emit_ndjson(&item);
-    }
+    let mut values = items;
     let mut summary = envelope.clone();
     summary["summary"] = serde_json::Value::Bool(true);
     summary["data"] = serde_json::Value::Null;
-    emit_ndjson(&summary);
+    values.push(summary);
+    values
 }
 
 fn render_human_response(envelope: &serde_json::Value) -> Option<String> {
@@ -8170,6 +9619,7 @@ mod tests {
     use super::*;
     use crate::auth::{CredentialInput, NoopKeyring};
     use crate::cli::{SearchCategory, SearchType};
+    use crate::error::error_code_specs;
     use crate::registry::{FieldDef, FieldKind, Method, Namespace, OperationDef, Pagination};
     use crate::transport::{FakeTransport, HttpResponse, RawExecuteResult};
     use clap::ValueEnum;
@@ -8519,66 +9969,6 @@ mod tests {
         let recorded = fake.recorded_requests();
         assert_eq!(recorded[0].method, "GET");
         assert!(recorded[0].body.is_none());
-    }
-
-    #[test]
-    fn paginated_research_list_follows_next_cursor() {
-        let fake = FakeTransport::default();
-        fake.push_ok_json(
-            200,
-            r#"{"data":[{"researchId":"r1"}],"hasMore":true,"nextCursor":"cur2"}"#,
-        );
-        fake.push_ok_json(
-            200,
-            r#"{"data":[{"researchId":"r2"}],"hasMore":false,"nextCursor":null}"#,
-        );
-        let globals = parse_globals(&[
-            "--format",
-            "json",
-            "--api-key",
-            "test-key-abcdef12",
-            "--base-url",
-            "https://example.test",
-        ]);
-        let op = registry::lookup_by_segments(&["research", "list"]).unwrap();
-        let spec = request::build_body(op, &[]).unwrap();
-        let credential = auth::resolve_api_credential(
-            &CredentialInput {
-                explicit: Some("test-key-abcdef12".into()),
-                ..Default::default()
-            },
-            &NoopKeyring,
-        )
-        .unwrap();
-        let pagination = PaginationArgs {
-            limit: Some(1),
-            all: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            execute_paginated_live(
-                &fake,
-                &spec,
-                PaginatedExecution {
-                    globals: &globals,
-                    credential: &credential,
-                    pretty: false,
-                    pagination: &pagination,
-                    route: PaginatedRoute {
-                        path_override: None,
-                        static_query: &[],
-                    },
-                },
-            )
-            .unwrap(),
-            0
-        );
-        let recorded = fake.recorded_requests();
-        assert_eq!(recorded.len(), 2);
-        assert!(recorded[0].url.ends_with("/research/v1?limit=1"));
-        assert!(recorded[1].url.contains("limit=1"));
-        assert!(recorded[1].url.contains("cursor=cur2"));
     }
 
     #[test]
@@ -8933,6 +10323,7 @@ mod tests {
             LiveExtras {
                 secret_output: Some(reservation),
                 extra_warnings: &[],
+                ..LiveExtras::default()
             },
         )
         .unwrap();
@@ -9024,6 +10415,7 @@ mod tests {
             LiveExtras {
                 secret_output: Some(reservation),
                 extra_warnings: &[],
+                ..LiveExtras::default()
             },
         )
         .unwrap_err();
@@ -9096,6 +10488,8 @@ mod tests {
         assert_eq!(
             SearchArgs {
                 query: "rust cli".into(),
+                output_schema: None,
+                system_prompt: None,
                 num_results: Some("7".into()),
                 text: Some(String::new()),
                 highlights: Some("2".into()),
@@ -9114,6 +10508,8 @@ mod tests {
             .into_flag_values(),
             vec![
                 ("query", Some("rust cli".to_string())),
+                ("output-schema", None),
+                ("system-prompt", None),
                 ("num-results", Some("7".to_string())),
                 ("text", Some(String::new())),
                 ("highlights", Some("2".to_string())),
@@ -9136,6 +10532,7 @@ mod tests {
                 ids: Vec::new(),
                 text: Some(String::new()),
                 summary_query: Some("summarize".into()),
+                highlights: None,
                 chunk_size: Some(10),
             }
             .into_flag_values(),
@@ -9144,6 +10541,7 @@ mod tests {
                 ("ids", None),
                 ("text", Some(String::new())),
                 ("summary-query", Some("summarize".to_string())),
+                ("highlights", None),
             ]
         );
 
@@ -9172,7 +10570,7 @@ mod tests {
                 url: "https://example.com".into(),
                 num_results: Some(7),
                 exclude_source_domain: true,
-                category: Some(SearchCategory::ResearchPaper),
+                category: Some("publication".into()),
                 text: Some("1500".into()),
             }
             .into_flag_values(),
@@ -9180,7 +10578,7 @@ mod tests {
                 ("url", Some("https://example.com".to_string())),
                 ("num-results", Some("7".to_string())),
                 ("exclude-source-domain", Some("true".to_string())),
-                ("category", Some("research paper".to_string())),
+                ("category", Some("publication".to_string())),
                 ("text", Some("1500".to_string())),
             ]
         );
@@ -9237,6 +10635,8 @@ mod tests {
             flag_keys(
                 &SearchArgs {
                     query: "q".into(),
+                    output_schema: None,
+                    system_prompt: None,
                     num_results: None,
                     text: None,
                     highlights: None,
@@ -9263,6 +10663,7 @@ mod tests {
                     ids: Vec::new(),
                     text: None,
                     summary_query: None,
+                    highlights: None,
                     chunk_size: None,
                 }
                 .into_flag_values()
@@ -9346,27 +10747,31 @@ mod tests {
     }
 
     #[test]
-    fn research_commands_emit_legacy_api_warning() {
-        let create = registry::lookup_by_segments(&["research", "create"]).unwrap();
-        let list = registry::lookup_by_segments(&["research", "list"]).unwrap();
-        let get = registry::lookup_by_segments(&["research", "get"]).unwrap();
-        for op in [create, list, get] {
-            let warnings = typed_command_warnings(op);
-            assert_eq!(warnings.len(), 1);
-            assert_eq!(warnings[0]["code"], "legacy_api");
-            assert!(warnings[0]["replacement"]
-                .as_str()
-                .unwrap()
-                .contains("agent run"));
+    fn registry_validation_errors_only_emit_published_codes() {
+        let specs = error_code_specs();
+        for issue in [
+            "missing_required_field",
+            "invalid_field_type",
+            "invalid_value",
+            "invalid_enum_value",
+            "future_validator_issue",
+        ] {
+            let err = registry_validation_error(ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(serde_json::json!({
+                    "issue": issue,
+                    "field": "query",
+                    "flag": "query",
+                })),
+                suggested_command: None,
+                note: None,
+            });
+            assert!(
+                specs.contains_key(err.diag().code.as_str()),
+                "unpublished registry validation code: {} for {issue}",
+                err.diag().code
+            );
         }
-    }
-
-    #[test]
-    fn substitute_path_encodes_template_segments() {
-        assert_eq!(
-            substitute_path("/research/v1/{researchId}", &[("researchId", "abc/def")]),
-            "/research/v1/abc%2Fdef"
-        );
     }
 
     fn envelope_with_data(data: serde_json::Value) -> serde_json::Value {

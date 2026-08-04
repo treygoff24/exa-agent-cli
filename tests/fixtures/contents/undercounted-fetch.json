@@ -21,9 +21,11 @@
   "expected": {
     "command": "contents",
     "exit": 10,
+    "outcome": "no_content",
     "correlationId": "fetch-undercount",
     "warnings": [
-      "all_urls_failed"
+      "all_urls_failed",
+      "empty_content"
     ]
   }
 }

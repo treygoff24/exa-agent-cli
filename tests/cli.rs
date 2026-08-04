@@ -1,13 +1,12 @@
 //! Parser tests for the v1 typed command tree (Wave 1A/1C skeleton).
 
-use clap::Parser;
 use exa_agent_cli::cli::{command_path, Cli, Command, SEARCH_TYPE_VALUES};
 use exa_agent_cli::registry::{self, ConfirmProtocol};
 use exa_agent_cli::transport;
 use std::fs;
 use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -116,6 +115,25 @@ fn run_ok_json(args: &[&str]) -> serde_json::Value {
 
 fn stderr_json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stderr).unwrap_or_else(|e| panic!("stderr was not JSON: {e}"))
+}
+
+fn assert_secret_capture(output: Output, secret_path: &Path, secret: &str) {
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        !stdout.contains(secret),
+        "secret must never appear on stdout"
+    );
+    assert!(stdout.contains("<redacted>"));
+    assert_eq!(
+        fs::read_to_string(secret_path).expect("secret file"),
+        secret
+    );
 }
 
 fn assert_confirmation_required(output: &Output, command: &str) -> serde_json::Value {
@@ -253,6 +271,20 @@ fn local_json_server<F>(
 where
     F: FnOnce(String) + Send + 'static,
 {
+    local_json_server_with_status(validate, 200, "OK", response_body)
+}
+
+/// Same harness, with the response status under the test's control — needed to exercise the
+/// error-classification paths (402 billing, 429, …) end to end through the real binary.
+fn local_json_server_with_status<F>(
+    validate: F,
+    status: u16,
+    reason: &'static str,
+    response_body: &'static [u8],
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(String) + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -273,7 +305,7 @@ where
         validate(String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned());
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response_body.len()
         )
         .unwrap();
@@ -444,6 +476,28 @@ fn capabilities_describes_search_content_defaults() {
         .find(|operation| operation["command"] == "search")
         .expect("search operation in schema list");
     assert_eq!(schema_search["contentDefaults"], search["contentDefaults"]);
+}
+
+#[test]
+fn capabilities_publish_named_flag_body_paths() {
+    let json = run_ok_json(&["capabilities", "--compact"]);
+    let commands = json["commands"].as_array().unwrap();
+    let field = |command: &str, flag: &str| {
+        commands
+            .iter()
+            .find(|entry| entry["path"] == command)
+            .and_then(|entry| entry["fields"].as_array())
+            .and_then(|fields| fields.iter().find(|entry| entry["flag"] == flag))
+            .unwrap_or_else(|| panic!("missing {command} --{flag} capability"))
+    };
+
+    assert_eq!(field("search", "output-schema")["bodyPath"], "outputSchema");
+    assert_eq!(field("search", "system-prompt")["bodyPath"], "systemPrompt");
+    assert_eq!(
+        field("agent runs create", "system-prompt")["bodyPath"],
+        "systemPrompt"
+    );
+    assert_eq!(field("contents", "highlights")["bodyPath"], "highlights");
 }
 
 #[test]
@@ -708,7 +762,30 @@ fn search_help_shows_highlight_flags_and_global_options() {
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("--no-highlights"), "help: {help}");
     assert!(help.contains("--highlights"), "help: {help}");
+    assert!(help.contains("--output-schema"), "help: {help}");
+    assert!(help.contains("inline JSON or @file"), "help: {help}");
+    assert!(help.contains("--system-prompt"), "help: {help}");
     assert!(help.contains("Global options"), "help: {help}");
+}
+
+#[test]
+fn named_flag_help_covers_contents_highlights_and_agent_system_prompt() {
+    let contents_help = run(&["contents", "--help"]);
+    assert!(contents_help.status.success());
+    let contents_help = String::from_utf8_lossy(&contents_help.stdout);
+    assert!(
+        contents_help.contains("--highlights"),
+        "help: {contents_help}"
+    );
+
+    let agent_help = run(&["agent", "runs", "create", "--help"]);
+    assert!(agent_help.status.success());
+    let agent_help = String::from_utf8_lossy(&agent_help.stdout);
+    assert!(
+        agent_help.contains("inline JSON or @file"),
+        "help: {agent_help}"
+    );
+    assert!(agent_help.contains("--system-prompt"), "help: {agent_help}");
 }
 
 #[test]
@@ -909,6 +986,22 @@ fn validate_input_rejects_wrong_type_and_out_of_range() {
     ]);
     let v: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
     assert_eq!(v["valid"], true);
+}
+
+#[test]
+fn registry_validation_missing_required_field_uses_published_error_code() {
+    let output = run(&[
+        "search",
+        "q",
+        "--set",
+        "query=null",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "missing_required_argument");
+    assert_eq!(error["error"]["details"]["issue"], "missing_required_field");
 }
 
 #[test]
@@ -1701,6 +1794,369 @@ fn search_defaults_to_query_aware_highlights() {
 }
 
 #[test]
+fn search_output_schema_flag_maps_to_output_schema() {
+    let dir = temp_path("search-output-schema");
+    let schema_path = dir.join("schema.json");
+    fs::write(
+        &schema_path,
+        r#"{"type":"object","properties":{"answer":{"type":"string"}}}"#,
+    )
+    .unwrap();
+
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--output-schema",
+        &format!("@{}", schema_path.display()),
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"object","properties":{"answer":{"type":"string"}}})
+    );
+}
+
+#[test]
+fn search_system_prompt_flag_maps_to_system_prompt() {
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--system-prompt",
+        "Prefer primary sources.",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["systemPrompt"],
+        "Prefer primary sources."
+    );
+}
+
+#[test]
+fn system_prompt_at_file_maps_to_both_commands() {
+    let dir = temp_path("system-prompt");
+    let prompt_path = dir.join("prompt.txt");
+    fs::write(&prompt_path, "Prefer primary sources.\n").unwrap();
+    let prompt_arg = format!("@{}", prompt_path.display());
+
+    let search = run_ok_json(&[
+        "search",
+        "rust async",
+        "--system-prompt",
+        &prompt_arg,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        search["data"]["request"]["body"]["systemPrompt"],
+        "Prefer primary sources.\n"
+    );
+
+    let agent = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "research accounts",
+        "--system-prompt",
+        &prompt_arg,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        agent["data"]["request"]["body"]["systemPrompt"],
+        "Prefer primary sources.\n"
+    );
+}
+
+#[test]
+fn system_prompt_missing_file_is_structured_error() {
+    let path = temp_path("missing-system-prompt").join("missing.txt");
+    let path_arg = format!("@{}", path.display());
+    let output = run_owned(&[
+        "search".into(),
+        "q".into(),
+        "--system-prompt".into(),
+        path_arg,
+        "--compact".into(),
+    ]);
+    assert_eq!(output.status.code(), Some(11));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "no_input");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(path.to_str().unwrap()));
+}
+
+#[test]
+fn empty_system_prompt_is_rejected_for_both_commands() {
+    for args in [
+        vec!["search", "q", "--system-prompt", "   ", "--compact"],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--system-prompt",
+            "\t \n",
+            "--compact",
+        ],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "invalid_value");
+        assert!(error["error"]["suggestedCommand"].is_string());
+    }
+}
+
+#[test]
+fn agent_system_prompt_flag_maps_to_system_prompt() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "research accounts",
+        "--system-prompt",
+        "Avoid duplicate results.",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["systemPrompt"],
+        "Avoid duplicate results."
+    );
+}
+
+#[test]
+fn output_schema_failure_modes_are_structured_errors() {
+    let invalid_json = run(&["search", "q", "--output-schema", "not-json", "--compact"]);
+    assert_eq!(invalid_json.status.code(), Some(1));
+    let invalid_json_error = stderr_json(&invalid_json);
+    assert_eq!(invalid_json_error["error"]["code"], "invalid_value");
+    assert_eq!(
+        invalid_json_error["error"]["message"],
+        "`--output-schema` is not valid JSON"
+    );
+
+    let missing_path = temp_path("missing-output-schema").join("missing.json");
+    let missing_arg = format!("@{}", missing_path.display());
+    let missing_file = run_owned(&[
+        "search".into(),
+        "q".into(),
+        "--output-schema".into(),
+        missing_arg,
+        "--compact".into(),
+    ]);
+    assert_eq!(missing_file.status.code(), Some(11));
+    let missing_error = stderr_json(&missing_file);
+    assert_eq!(missing_error["error"]["code"], "no_input");
+    assert!(missing_error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(missing_path.to_str().unwrap()));
+
+    let bare_at = run(&["search", "q", "--output-schema", "@", "--compact"]);
+    assert_eq!(bare_at.status.code(), Some(1));
+    let bare_at_error = stderr_json(&bare_at);
+    assert_eq!(bare_at_error["error"]["code"], "invalid_value");
+    assert_eq!(
+        bare_at_error["error"]["message"],
+        "`--output-schema @` requires a file path"
+    );
+}
+
+#[test]
+fn contents_highlights_flag_maps_to_spec_shape() {
+    let queried = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "Key advancements",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        queried["data"]["request"]["body"]["highlights"],
+        serde_json::json!({"query":"Key advancements"})
+    );
+
+    let bare = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(bare["data"]["request"]["body"]["highlights"], true);
+
+    let object = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        r#" {"query":"Key advancements","maxCharacters":1200} "#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        object["data"]["request"]["body"]["highlights"],
+        serde_json::json!({"query":"Key advancements","maxCharacters":1200})
+    );
+}
+
+#[test]
+fn contents_highlights_body_shape_is_validated() {
+    let output = run(&[
+        "contents",
+        "https://exa.ai",
+        "--body",
+        r#"{"highlights":"not-an-options-object"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_field_type");
+    assert_eq!(error["error"]["details"]["field"], "highlights");
+}
+
+#[test]
+fn search_output_schema_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--set",
+        r#"outputSchema={"type":"string"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"string"})
+    );
+}
+
+#[test]
+fn search_output_schema_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--body",
+        r#"{"outputSchema":{"type":"string"}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"string"})
+    );
+}
+
+#[test]
+fn search_system_prompt_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--set",
+        "systemPrompt=from set",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from set");
+}
+
+#[test]
+fn search_system_prompt_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--body",
+        r#"{"systemPrompt":"from body"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from body");
+}
+
+#[test]
+fn agent_output_schema_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--body",
+        r#"{"outputSchema":{"type":"string"}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"string"})
+    );
+}
+
+#[test]
+fn agent_system_prompt_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--set",
+        "systemPrompt=from set",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from set");
+}
+
+#[test]
+fn agent_system_prompt_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--body",
+        r#"{"systemPrompt":"from body"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from body");
+}
+
+#[test]
+fn contents_highlights_flag_is_overridden_by_set() {
+    let json = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "from flag",
+        "--set",
+        "highlights=false",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["highlights"], false);
+}
+
+#[test]
 fn search_no_highlights_preserves_metadata_only_body() {
     let json = run_ok_json(&[
         "search",
@@ -2041,18 +2497,82 @@ fn contents_partial_url_failures_warn_and_exit_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["warnings"]
+    let failed = json["warnings"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|warning| warning["code"] == "url_failed"
-            && warning["url"] == "https://partial-b.test"
-            && warning["error"] == serde_json::json!({})));
+        .find(|warning| {
+            warning["code"] == "url_failed" && warning["url"] == "https://partial-b.test"
+        })
+        .expect("per-URL failure warning");
+    // The raw upstream payload is preserved verbatim, empty object and all …
+    assert_eq!(failed["error"], serde_json::json!({}));
+    // … and the fact that upstream gave no reason is stated rather than left as silence.
+    assert_eq!(failed["reason"], "upstream_reason_unavailable");
+
+    let diagnostic = json["contentDiagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "https://partial-b.test")
+        .expect("diagnostic row for the failed URL");
+    assert_eq!(diagnostic["crawl_status"], "error");
+    assert_eq!(diagnostic["error_reason"], "upstream_reason_unavailable");
+
     assert_eq!(json["outcome"], "partial");
 }
 
+/// An out-of-credits account exits 13 with `insufficient_credits`, not exit 1 with `invalid_value`.
 #[test]
-fn contents_all_url_failures_warn_and_exit_partial() {
+fn search_out_of_credits_exits_billing_not_usage() {
+    let (base_url, server) = local_json_server_with_status(
+        |request_text| assert!(request_text.starts_with("POST /search ")),
+        402,
+        "Payment Required",
+        br#"{"tag":"NO_MORE_CREDITS","message":"You have exceeded your credits limit. Please top up to keep using Exa at dashboard.exa.ai"}"#,
+    );
+    let output = run(&[
+        "search",
+        "rust async runtimes",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(
+        output.status.code(),
+        Some(13),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay empty on error: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "insufficient_credits");
+    assert_eq!(error["error"]["category"], "billing");
+    assert_eq!(error["error"]["exitCode"], 13);
+    assert_eq!(error["error"]["retryable"], false);
+    assert_eq!(error["error"]["httpStatus"], 402);
+
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("out of credits"), "{message}");
+    assert!(message.contains("dashboard.exa.ai"), "{message}");
+    // The upstream tag survives for anything matching on it.
+    assert_eq!(
+        error["error"]["details"]["upstream"]["tag"],
+        "NO_MORE_CREDITS"
+    );
+}
+
+#[test]
+fn contents_all_url_failures_warn_and_exit_no_content() {
     let response = br#"{
         "results":[],
         "statuses":[
@@ -2085,7 +2605,7 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["outcome"], "partial");
+    assert_eq!(json["outcome"], "no_content");
     let warning = json["warnings"]
         .as_array()
         .unwrap()
@@ -2096,10 +2616,197 @@ fn contents_all_url_failures_warn_and_exit_partial() {
         .as_str()
         .unwrap()
         .contains("https://a.test=NOT_FOUND"));
+    assert_eq!(
+        warning["suggestedCommand"],
+        "exa-agent contents 'https://a.test' --fresh --text full --json"
+    );
 }
 
 #[test]
-fn contents_compatibility_fixtures_preserve_frozen_legacy_envelopes() {
+fn contents_empty_text_is_no_content_with_diagnostics_and_fallback() {
+    let response = br#"{
+        "results":[{"url":"https://uscode.house.gov/empty","text":""}],
+        "statuses":[{"id":"https://uscode.house.gov/empty","status":"success"}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://uscode.house.gov/empty",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    let data_index = rendered.find("\"data\":").unwrap();
+    let outcome_index = rendered.find("\"outcome\":").unwrap();
+    let diagnostics_index = rendered.find("\"contentDiagnostics\":").unwrap();
+    let hash_index = rendered.find("\"dataHash\":").unwrap();
+    assert!(data_index < outcome_index);
+    assert!(outcome_index < diagnostics_index);
+    assert!(diagnostics_index < hash_index);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_status"],
+        "empty_content"
+    );
+    let warning = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "empty_content")
+        .expect("empty_content warning");
+    assert!(warning["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .starts_with("parallel-cli extract "));
+    assert!(json["nextActions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["command"] == warning["suggestedCommand"]));
+}
+
+#[test]
+fn contents_gzip_text_is_binary_with_warning() {
+    let response = serde_json::to_vec(&serde_json::json!({
+        "results": [{"url": "https://ecfr.gov/current", "text": "\u{1f}\u{8b}\u{8}\0gzip"}],
+        "statuses": [{"id": "https://ecfr.gov/current", "status": "success"}]
+    }))
+    .unwrap();
+    let response = Box::leak(response.into_boxed_slice());
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://ecfr.gov/current",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_status"],
+        "binary_content"
+    );
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_type"],
+        "application/gzip"
+    );
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "binary_content"));
+}
+
+#[test]
+fn contents_crawl_unknown_error_surfaces_http_status_and_parallel_fallback() {
+    let response = br#"{
+        "results":[],
+        "statuses":[{"id":"https://congress.gov/bill/1","status":"error","error":{"tag":"CRAWL_UNKNOWN_ERROR","httpStatusCode":502}}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://congress.gov/bill/1",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(10));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(json["contentDiagnostics"][0]["crawl_status"], "error");
+    assert_eq!(
+        json["contentDiagnostics"][0]["error_tag"],
+        "CRAWL_UNKNOWN_ERROR"
+    );
+    assert_eq!(json["contentDiagnostics"][0]["http_status"], 502);
+    assert!(json["warnings"][0]["suggestedCommand"]
+        .as_str()
+        .unwrap()
+        .starts_with("parallel-cli extract "));
+}
+
+#[test]
+fn contents_empty_pdf_is_explicitly_unextracted() {
+    let response = br#"{
+        "results":[{"url":"https://agency.gov/report.pdf","text":""}],
+        "statuses":[{"id":"https://agency.gov/report.pdf","status":"success"}]
+    }"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "fetch",
+        "https://agency.gov/report.pdf",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_type"],
+        "application/pdf"
+    );
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_type_source"],
+        "inferred_url"
+    );
+    assert_eq!(
+        json["contentDiagnostics"][0]["content_status"],
+        "pdf_unextracted"
+    );
+    assert_eq!(json["contentDiagnostics"][0]["pdf_unextracted"], true);
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "pdf_unextracted"));
+}
+
+#[test]
+fn answer_empty_response_has_no_content_outcome_and_warning() {
+    let response = br#"{"answer":"","citations":[]}"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "ask",
+        "What is the statute?",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "no_content");
+    assert_eq!(json["contentDiagnostics"], serde_json::json!([]));
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "empty_answer"));
+}
+
+#[test]
+fn contents_compatibility_fixtures_preserve_data_while_adding_honest_metadata() {
     for fixture_name in [
         "no-content",
         "partial",
@@ -2152,8 +2859,43 @@ fn contents_compatibility_fixtures_preserve_frozen_legacy_envelopes() {
         let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         envelope["request"]["requestId"] = serde_json::json!("req_legacy");
         envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
-        let mut expected_envelope = fixture["legacyEnvelope"].clone();
-        expected_envelope["outcome"] = expected["outcome"].clone();
+        assert_eq!(envelope["outcome"], expected["outcome"], "{fixture_name}");
+        assert!(envelope["contentDiagnostics"].is_array(), "{fixture_name}");
+        envelope.as_object_mut().unwrap().shift_remove("outcome");
+        envelope
+            .as_object_mut()
+            .unwrap()
+            .shift_remove("contentDiagnostics");
+        envelope["warnings"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|warning| {
+                !matches!(
+                    warning["code"].as_str(),
+                    Some("empty_content" | "binary_content" | "pdf_unextracted")
+                )
+            });
+        envelope["nextActions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|action| action["description"] != "Recover missing upstream content");
+        let expected_envelope = fixture["legacyEnvelope"].clone();
+        for warning in envelope["warnings"].as_array_mut().unwrap() {
+            let code = warning["code"].as_str();
+            let expected_has_suggestion = expected_envelope["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|expected| {
+                    expected["code"].as_str() == code && expected.get("suggestedCommand").is_some()
+                });
+            if !expected_has_suggestion {
+                warning
+                    .as_object_mut()
+                    .unwrap()
+                    .shift_remove("suggestedCommand");
+            }
+        }
         assert_eq!(
             serde_json::to_string(&envelope).unwrap(),
             serde_json::to_string(&expected_envelope).unwrap(),
@@ -2198,8 +2940,17 @@ fn contents_empty_error_uses_stable_reason_and_direct_fetch_action() {
     let mut envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     envelope["request"]["requestId"] = serde_json::json!("req_legacy");
     envelope["diagnostics"]["durationMs"] = serde_json::json!(0);
+    assert_eq!(
+        envelope["outcome"], fixture["expected"]["outcome"],
+        "honest outcome changed"
+    );
+    envelope.as_object_mut().unwrap().shift_remove("outcome");
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .shift_remove("contentDiagnostics");
+    envelope["nextActions"] = serde_json::json!([]);
     let mut expected = fixture["legacyEnvelope"].clone();
-    expected["outcome"] = fixture["expected"]["outcome"].clone();
     // Main labeled a missing upstream reason as "error". Wave 5 changes only that
     // label/action contract in addition to the additive outcome field.
     expected["warnings"][0]["message"] = serde_json::json!(
@@ -2289,7 +3040,7 @@ fn fetch_undercounted_statuses_preserve_legacy_exit_warning_and_correlation() {
     assert!(output.stderr.is_empty());
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["command"], fixture["expected"]["command"]);
-    assert_eq!(envelope["outcome"], "partial");
+    assert_eq!(envelope["outcome"], fixture["expected"]["outcome"]);
     assert_eq!(
         envelope["request"]["correlationId"],
         fixture["expected"]["correlationId"]
@@ -2615,6 +3366,199 @@ fn raw_live_without_credential_is_not_authenticated() {
         .unwrap()
         .iter()
         .any(|value| value.as_str().unwrap_or("").contains("credentials")));
+}
+
+#[test]
+fn contents_output_writes_full_envelope_and_small_confirmation_without_spill() {
+    let dir = temp_path("contents-output");
+    let output_path = dir.join("contents.json");
+    let state_dir = dir.join("state");
+    let response = br#"{"results":[{"url":"https://example.test","text":"captured"}],"statuses":[{"id":"https://example.test","status":"success"}]}"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://example.test",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            &base_url,
+            "--output",
+            output_path.to_str().unwrap(),
+            "--compact",
+        ],
+        &[("EXA_AGENT_STATE", state_dir.to_str().unwrap())],
+    );
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let file_bytes = fs::read(&output_path).expect("requested output file");
+    let full: serde_json::Value = serde_json::from_slice(&file_bytes).unwrap();
+    assert_eq!(full["data"]["results"][0]["text"], "captured");
+    assert_eq!(full["dataTruncated"], false);
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["data"], serde_json::Value::Null);
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["count"], 1);
+    assert_eq!(confirmation["bytes"], file_bytes.len() as u64);
+    assert!(confirmation["dataHash"].as_str().is_some());
+    assert!(!state_dir.join("spill").exists());
+}
+
+#[test]
+fn raw_output_writes_exact_upstream_bytes() {
+    let dir = temp_path("raw-output");
+    let output_path = dir.join("response.bin");
+    let response = b"{\n  \"results\": [{\"text\": \"exact\"}]\n}\n";
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /contents "));
+        },
+        response,
+    );
+    let output = run(&[
+        "contents",
+        "https://example.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        &base_url,
+        "--raw",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    assert_eq!(fs::read(&output_path).unwrap(), response);
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["count"], 1);
+    assert!(confirmation["dataHash"].as_str().is_some());
+    assert_eq!(confirmation["bytes"], response.len() as u64);
+}
+
+#[test]
+fn oversized_output_writes_only_requested_file() {
+    let dir = temp_path("oversized-output");
+    let output_path = dir.join("contents.json");
+    let state_dir = dir.join("state");
+    let response = Box::leak(
+        serde_json::to_vec(&serde_json::json!({
+            "results": [{"url": "https://large.test", "text": "x".repeat(1024)}],
+            "statuses": [{"id": "https://large.test", "status": "success"}]
+        }))
+        .unwrap()
+        .into_boxed_slice(),
+    );
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://large.test",
+            "--api-key",
+            "test-key-abcdef12",
+            "--base-url",
+            &base_url,
+            "--max-output-bytes",
+            "64",
+            "--output",
+            output_path.to_str().unwrap(),
+            "--compact",
+        ],
+        &[("EXA_AGENT_STATE", state_dir.to_str().unwrap())],
+    );
+    server.join().expect("local test server panicked");
+    assert!(output.status.success());
+    let full: serde_json::Value = serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(full["data"]["results"][0]["text"], "x".repeat(1024));
+    assert_eq!(full["dataTruncated"], false);
+    assert!(!state_dir.join("spill").exists());
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+}
+
+#[test]
+fn unwritable_output_path_is_a_clear_error_without_false_success() {
+    let dir = temp_path("unwritable-output");
+    let output_path = dir.join("missing-parent").join("contents.json");
+    let response = br#"{"results":[{"url":"https://example.test","text":"captured"}]}"#;
+    let (base_url, server) = local_json_server(|_| {}, response);
+    let output = run(&[
+        "contents",
+        "https://example.test",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        &base_url,
+        "--max-output-bytes",
+        "1",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!output_path.exists());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("failed to write --output file"));
+    assert!(message.contains(output_path.to_str().unwrap()));
+
+    // The upstream call already succeeded; the response is the only copy of its ids and hashes,
+    // so a failed file write falls back to the full inline envelope instead of discarding it.
+    let inline: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(inline["data"]["results"][0]["text"], "captured");
+    assert_eq!(inline["dataTruncated"], false);
+    let warning = inline["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "output_write_failed")
+        .expect("a warning names the failed --output path");
+    assert_eq!(warning["path"], output_path.to_str().unwrap());
+}
+
+#[test]
+fn raw_unwritable_output_falls_back_to_exact_upstream_bytes() {
+    let dir = temp_path("raw-unwritable-output");
+    let output_path = dir.join("missing-parent").join("response.raw");
+    let response = br#"{"raw":"exact-upstream-bytes"}"#;
+    let (base_url, server) = local_json_server(
+        |request| assert!(request.starts_with("POST /search "), "{request}"),
+        response,
+    );
+    let output = run(&[
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"q"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        &base_url,
+        "--raw",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, response);
+    assert!(!output_path.exists());
+    assert_eq!(stderr_json(&output)["error"]["code"], "invalid_value");
 }
 
 #[test]
@@ -3071,6 +4015,113 @@ fn similar_dry_run_builds_request_body() {
 }
 
 #[test]
+fn category_aliases_coerce_only_on_typed_flags() {
+    for args in [
+        vec![
+            "search",
+            "q",
+            "--category",
+            "publication",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--category",
+            "publication",
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(json["data"]["request"]["body"]["category"], "publication");
+        assert!(!json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "legacy_value_coerced"));
+    }
+
+    for args in [
+        vec![
+            "search",
+            "q",
+            "--category",
+            "research paper",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--category",
+            "research paper",
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(json["data"]["request"]["body"]["category"], "publication");
+        let warning = json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["code"] == "legacy_value_coerced")
+            .expect("legacy category warning");
+        assert_eq!(warning["details"]["field"], "category");
+        assert_eq!(warning["details"]["given"], "research paper");
+        assert_eq!(warning["details"]["sent"], "publication");
+    }
+
+    for args in [
+        vec![
+            "search",
+            "q",
+            "--body",
+            r#"{"category":"research paper"}"#,
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--set",
+            "category=research paper",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "search",
+            "q",
+            "--set",
+            "category=research paper",
+            "--dry-run",
+            "--compact",
+        ],
+        vec![
+            "similar",
+            "https://exa.ai",
+            "--body",
+            r#"{"category":"research paper"}"#,
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        assert_eq!(
+            json["data"]["request"]["body"]["category"],
+            "research paper"
+        );
+        assert!(!json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "legacy_value_coerced"));
+    }
+}
+
+#[test]
 fn team_info_dry_run_builds_get_path() {
     let json = run_ok_json(&["team", "info", "--dry-run", "--print-request", "--compact"]);
     assert_eq!(json["command"], "team info");
@@ -3090,115 +4141,112 @@ fn bare_team_runs_info() {
 }
 
 #[test]
-fn research_dry_run_builds_create_list_and_get_requests() {
-    let create = run_ok_json(&[
-        "research",
-        "create",
-        "legacy topic",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(create["command"], "research create");
-    assert_eq!(create["data"]["request"]["path"], "/research/v1");
-    assert_eq!(
-        create["data"]["request"]["body"]["instructions"],
-        "legacy topic"
+fn research_stub_is_local_and_actionable() {
+    for args in [
+        vec!["capabilities", "--compact"],
+        vec!["schema", "list", "--compact"],
+        vec!["robot-docs", "commands", "--compact"],
+    ] {
+        assert!(
+            !run_ok_json(&args)
+                .to_string()
+                .contains("ResearchController"),
+            "retired Research operations must stay out of generated surfaces"
+        );
+    }
+
+    let create = run_with_env(
+        &[
+            "research",
+            "create",
+            "legacy topic",
+            "--correlation-id",
+            "research-stub-test",
+            "--compact",
+        ],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
     );
-    assert_eq!(create["warnings"][0]["code"], "legacy_api");
-
-    let list = run_ok_json(&[
-        "research",
-        "list",
-        "--limit",
-        "10",
-        "--cursor",
-        "cur_abc",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(list["command"], "research list");
-    assert_eq!(list["data"]["request"]["path"], "/research/v1");
+    assert_eq!(create.status.code(), Some(1));
+    assert!(create.stdout.is_empty());
+    let stderr = stderr_json(&create);
+    assert_eq!(stderr["error"]["code"], "research_retired");
+    assert_eq!(stderr["error"]["category"], "usage");
+    assert_eq!(stderr["error"]["exitCode"], 1);
+    assert_eq!(stderr["error"]["retryable"], false);
+    assert_eq!(stderr["request"]["correlationId"], "research-stub-test");
     assert_eq!(
-        list["data"]["request"]["query"],
-        serde_json::json!([
-            {"name": "limit", "value": "10"},
-            {"name": "cursor", "value": "cur_abc"}
-        ])
+        stderr["error"]["suggestedCommand"],
+        "exa-agent search \"legacy topic\" --type deep-reasoning"
     );
-    assert_eq!(list["data"]["request"]["body"], serde_json::json!(null));
-    assert_eq!(list["warnings"][0]["code"], "legacy_api");
-
-    let get = run_ok_json(&["research", "get", "research/abc", "--dry-run", "--compact"]);
-    assert_eq!(get["command"], "research get");
     assert_eq!(
-        get["data"]["request"]["path"],
-        "/research/v1/research%2Fabc"
+        stderr["error"]["details"]["replacement"],
+        "exa-agent search --type deep-reasoning"
     );
-    assert_eq!(get["data"]["request"]["body"], serde_json::json!(null));
-    assert_eq!(get["warnings"][0]["code"], "legacy_api");
-}
 
-#[test]
-fn research_accepts_all_but_rejects_orphaned_pagination_flags_and_create_stream() {
-    let list_all = run_ok_json(&["research", "list", "--all", "--dry-run", "--compact"]);
-    assert_eq!(list_all["command"], "research list");
-    assert_eq!(list_all["data"]["request"]["path"], "/research/v1");
-    assert_eq!(list_all["data"]["request"]["query"], serde_json::json!([]));
+    for (args, id) in [
+        (
+            &[
+                "research",
+                "get",
+                "research/abc",
+                "--correlation-id",
+                "research-stub-test",
+                "--compact",
+            ][..],
+            Some("research/abc"),
+        ),
+        (
+            &[
+                "research",
+                "list",
+                "--correlation-id",
+                "research-stub-test",
+                "--compact",
+            ][..],
+            None,
+        ),
+    ] {
+        let output = run_with_env(args, &[("EXA_AGENT_NO_NETWORK", "1")]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "research_retired");
+        assert_eq!(stderr["error"]["category"], "usage");
+        assert_eq!(stderr["error"]["exitCode"], 1);
+        assert_eq!(stderr["error"]["retryable"], false);
+        assert_eq!(stderr["request"]["correlationId"], "research-stub-test");
+        assert_eq!(
+            stderr["error"]["suggestedCommand"],
+            "exa-agent search --help"
+        );
+        match id {
+            Some(id) => assert_eq!(stderr["error"]["details"]["researchId"], id),
+            None => assert!(stderr["error"]["details"].get("researchId").is_none()),
+        }
+    }
 
-    let max_pages = run(&[
-        "research",
-        "list",
-        "--max-pages",
-        "3",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(max_pages.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&max_pages.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
-    assert!(stderr["error"]["suggestedCommand"]
-        .as_str()
-        .unwrap()
-        .contains("--all"));
+    let escaped = run_with_env(
+        &[
+            "research",
+            "create",
+            r#"legacy "topic" $HOME `now`"#,
+            "--compact",
+        ],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
+    assert_eq!(
+        stderr_json(&escaped)["error"]["suggestedCommand"],
+        r#"exa-agent search "legacy \"topic\" \$HOME \`now\`" --type deep-reasoning"#
+    );
 
-    let page_delay = run(&[
-        "research",
-        "list",
-        "--page-delay",
-        "100ms",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(page_delay.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&page_delay.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
-
-    let max_pages_zero = run(&[
-        "research",
-        "list",
-        "--all",
-        "--max-pages",
-        "0",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(max_pages_zero.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&max_pages_zero.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_value");
-
-    let create_stream = run(&[
-        "research",
-        "create",
-        "legacy topic",
-        "--stream",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(create_stream.status.code(), Some(1));
-    assert!(create_stream.stdout.is_empty());
-    let stderr: serde_json::Value = serde_json::from_slice(&create_stream.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
-    assert_eq!(stderr["operation"]["path"], "/research/v1");
+    let newlines = run_with_env(
+        &["research", "create", "legacy\nline\rnext", "--compact"],
+        &[("EXA_AGENT_NO_NETWORK", "1")],
+    );
+    assert_eq!(
+        stderr_json(&newlines)["error"]["suggestedCommand"],
+        "exa-agent search \"legacy line next\" --type deep-reasoning"
+    );
 }
 
 #[test]
@@ -3274,6 +4322,7 @@ fn bare_parent_commands_emit_missing_subcommand_details() {
         (&["websets"][..], "list"),
         (&["robot-docs"][..], "guide"),
         (&["schema"][..], "list"),
+        (&["research"][..], "create"),
     ] {
         let output = run(argv);
         assert_eq!(output.status.code(), Some(1), "{argv:?}");
@@ -3353,10 +4402,25 @@ fn clap_unknown_flag_includes_did_you_mean() {
         .as_str()
         .unwrap()
         .contains("--num-results"));
-    assert!(stderr["error"]["suggestedCommand"]
-        .as_str()
-        .unwrap()
-        .contains("--num-results"));
+    // A rejected flag must leave behind a command the agent can rerun, not prose it has to
+    // reassemble: the whole invocation comes back with the corrected spelling substituted in.
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent search --num-results 5 q"
+    );
+}
+
+#[test]
+fn clap_unknown_flag_without_a_near_match_points_at_capabilities() {
+    // A flag before any subcommand has no usage line from which to recover a command path.
+    let output = run(&["--mystery", "search", "q"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent capabilities --compact"
+    );
 }
 
 #[test]
@@ -3756,9 +4820,13 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         body["dataSources"],
         serde_json::json!([
             {"provider":"similarweb"},
-            {"provider":"fiber_ai"}
+            {"provider":"fiber"}
         ])
     );
+    assert_eq!(create["warnings"][0]["code"], "legacy_value_coerced");
+    assert_eq!(create["warnings"][0]["details"]["field"], "provider");
+    assert_eq!(create["warnings"][0]["details"]["given"], "fiber_ai");
+    assert_eq!(create["warnings"][0]["details"]["sent"], "fiber");
     assert_eq!(
         body["metadata"],
         serde_json::json!({"ticket":"T1","owner":"ops"})
@@ -3827,6 +4895,96 @@ fn agent_runs_create_rejects_bad_structured_create_fields() {
         .as_str()
         .unwrap()
         .contains("must not be empty"));
+}
+
+#[test]
+fn agent_provider_aliases_coerce_and_set_passes_through() {
+    let canonical = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        "fiber",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        canonical["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"fiber"}])
+    );
+    assert!(!canonical["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "legacy_value_coerced"));
+
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        "particle_news",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"particle"}])
+    );
+    let warning = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "legacy_value_coerced")
+        .expect("legacy provider warning");
+    assert_eq!(warning["details"]["field"], "provider");
+    assert_eq!(warning["details"]["given"], "particle_news");
+    assert_eq!(warning["details"]["sent"], "particle");
+
+    let case_insensitive = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        " FIBER_AI ",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        case_insensitive["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"fiber"}])
+    );
+    let warning = case_insensitive["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "legacy_value_coerced")
+        .expect("case-insensitive legacy provider warning");
+    assert_eq!(warning["details"]["given"], " FIBER_AI ");
+    assert_eq!(warning["details"]["sent"], "fiber");
+
+    let pass_through = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--set",
+        r#"dataSources=[{"provider":"fiber_ai"}]"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        pass_through["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"fiber_ai"}])
+    );
+    assert!(!pass_through["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "legacy_value_coerced"));
 }
 
 #[cfg(unix)]
@@ -4636,17 +5794,7 @@ fn monitor_create_live_captures_webhook_secret_and_redacts_stdout() {
         "--compact".into(),
     ]);
     server.join().expect("local monitor create server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(!stdout.contains("whsec_live_capture_12345"));
-    assert!(stdout.contains("<redacted>"));
-    let secret = fs::read_to_string(&secret_path).expect("secret file");
-    assert_eq!(secret, "whsec_live_capture_12345");
+    assert_secret_capture(output, &secret_path, "whsec_live_capture_12345");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -4862,6 +6010,21 @@ fn parse_websets_representative_nested() {
     );
     assert_path(&["websets", "list"], "websets list");
     assert_path(&["websets", "get", "webset_abc"], "websets get");
+    assert_path(
+        &[
+            "websets",
+            "exports",
+            "create",
+            "webset_abc",
+            "--format",
+            "csv",
+        ],
+        "websets exports create",
+    );
+    assert_path(
+        &["websets", "exports", "get", "webset_abc", "export_abc"],
+        "websets exports get",
+    );
     assert_path(
         &["websets", "items", "list", "webset_abc"],
         "websets items list",
@@ -5237,6 +6400,77 @@ fn websets_get_update_delete_cancel_dry_run_and_safety_shapes() {
     );
     assert!(get["data"]["request"]["body"].is_null());
 
+    let expanded = run_ok_json(&[
+        "websets",
+        "get",
+        "ws_abc",
+        "--expand",
+        "ITEMS",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        expanded["data"]["request"]["query"],
+        serde_json::json!([{"name": "expand", "value": "items"}])
+    );
+    assert!(expanded["data"]["request"]["body"].is_null());
+
+    let (base_url, server) = local_json_server(
+        |request| {
+            let (head, body) = request
+                .split_once("\r\n\r\n")
+                .expect("request headers and body");
+            assert!(
+                head.starts_with("GET /websets/v0/websets/ws_abc?expand=items "),
+                "unexpected websets get request:\n{request}"
+            );
+            assert!(
+                body.is_empty(),
+                "GET request unexpectedly had body: {body:?}"
+            );
+        },
+        br#"{"id":"ws_abc"}"#,
+    );
+    let body_expand = run_owned(&[
+        "websets".into(),
+        "get".into(),
+        "ws_abc".into(),
+        "--set".into(),
+        "expand=items".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local websets get server panicked");
+    assert!(
+        body_expand.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&body_expand.stdout),
+        String::from_utf8_lossy(&body_expand.stderr)
+    );
+
+    let conflicting_expand = run(&[
+        "websets",
+        "get",
+        "ws_abc",
+        "--expand",
+        "items",
+        "--set",
+        "expand=items",
+        "--compact",
+    ]);
+    assert_eq!(conflicting_expand.status.code(), Some(1));
+    let conflicting_error = stderr_json(&conflicting_expand);
+    assert_eq!(
+        conflicting_error["error"]["code"],
+        "invalid_flag_combination"
+    );
+    let conflicting_message = conflicting_error["error"]["message"].as_str().unwrap();
+    assert!(conflicting_message.contains("--expand"));
+    assert!(conflicting_message.contains("expand"));
+
     let update = run_ok_json(&[
         "websets",
         "update",
@@ -5558,18 +6792,6 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
     let stderr: serde_json::Value = serde_json::from_slice(&source_err.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "invalid_value");
 
-    let url_err = run(&[
-        "websets",
-        "imports",
-        "create",
-        "--url",
-        "https://example.com/data.csv",
-        "--compact",
-    ]);
-    assert_eq!(url_err.status.code(), Some(1));
-    let stderr: serde_json::Value = serde_json::from_slice(&url_err.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "invalid_value");
-
     let csv_err = run(&[
         "websets",
         "imports",
@@ -5580,7 +6802,29 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
     ]);
     assert_eq!(csv_err.status.code(), Some(1));
     let stderr: serde_json::Value = serde_json::from_slice(&csv_err.stderr).unwrap();
-    assert_eq!(stderr["error"]["code"], "not_implemented");
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    let suggested = stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(suggested.contains("--source csv --body"), "{suggested}");
+    assert!(suggested.contains(r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#));
+
+    let url_err = run(&[
+        "websets",
+        "imports",
+        "create",
+        "--url",
+        "https://example.com/data.csv",
+        "--compact",
+    ]);
+    assert_eq!(url_err.status.code(), Some(1));
+    let stderr: serde_json::Value = serde_json::from_slice(&url_err.stderr).unwrap();
+    assert_eq!(stderr["error"]["code"], "unknown_flag");
+    let suggested = stderr["error"]["suggestedCommand"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(suggested.contains("--source csv --body"), "{suggested}");
+    assert!(suggested.contains(r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#));
 
     let list = run_ok_json(&[
         "websets",
@@ -5624,6 +6868,252 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
 
     let delete_live = run(&["websets", "imports", "delete", "imp_abc", "--compact"]);
     assert_eq!(delete_live.status.code(), Some(9));
+}
+
+#[test]
+fn websets_exports_preview_and_live_next_action() {
+    let help = run(&["websets", "exports", "create", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--format"));
+    assert!(!help.contains("--export-format"));
+    assert!(help.contains("Export file format (csv|json)."));
+    assert_eq!(
+        help.lines()
+            .filter(|line| line.trim_start().starts_with("--format "))
+            .count(),
+        1
+    );
+
+    let invalid = run(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "ndjson",
+        "--compact",
+    ]);
+    assert_eq!(invalid.status.code(), Some(1));
+    let invalid_error = stderr_json(&invalid);
+    assert_eq!(invalid_error["error"]["code"], "invalid_value");
+    let invalid_message = invalid_error["error"]["message"].as_str().unwrap();
+    assert!(invalid_message.contains("--format"));
+    assert!(invalid_message.contains("csv"));
+    assert!(invalid_message.contains("json"));
+    assert!(!String::from_utf8_lossy(&invalid.stderr).contains("--export-format"));
+
+    let missing = run(&["websets", "exports", "create", "ws_abc", "--compact"]);
+    assert_eq!(missing.status.code(), Some(1));
+    let missing_error = stderr_json(&missing);
+    assert_eq!(missing_error["error"]["code"], "missing_required_argument");
+    let missing_message = missing_error["error"]["message"].as_str().unwrap();
+    assert!(missing_message.contains("--format"));
+    assert!(missing_message.contains("--body"));
+    assert!(missing_message.contains("--set"));
+    assert!(!String::from_utf8_lossy(&missing.stderr).contains("--export-format"));
+
+    let create = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "JSON",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(create["command"], "websets exports create");
+    assert_eq!(create["data"]["request"]["method"], "POST");
+    assert_eq!(
+        create["data"]["request"]["path"],
+        "/websets/v0/websets/ws_abc/exports"
+    );
+    assert_eq!(create["data"]["request"]["body"]["format"], "json");
+
+    let body_format = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--body",
+        r#"{"format":"csv"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(body_format["data"]["request"]["body"]["format"], "csv");
+
+    let later_global_format = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "csv",
+        "--format",
+        "json",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        later_global_format["data"]["request"]["body"]["format"],
+        "csv"
+    );
+
+    let get = run_ok_json(&[
+        "websets",
+        "exports",
+        "get",
+        "ws_abc",
+        "export_abc",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(get["command"], "websets exports get");
+    assert_eq!(get["data"]["request"]["method"], "GET");
+    assert_eq!(
+        get["data"]["request"]["path"],
+        "/websets/v0/websets/ws_abc/exports/export_abc"
+    );
+    assert!(get["data"]["request"]["body"].is_null());
+
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/websets/exports-create.json")).unwrap();
+    let response = Box::leak(
+        fixture["upstream"]
+            .to_string()
+            .into_bytes()
+            .into_boxed_slice(),
+    );
+    let expected_format = fixture["expected"]["format"].as_str().unwrap().to_string();
+    let (base_url, server) = local_json_server(
+        move |request| {
+            assert!(
+                request.starts_with("POST /websets/v0/websets/ws%2Fabc/exports "),
+                "unexpected export request:\n{request}"
+            );
+            let (_, body) = request
+                .split_once("\r\n\r\n")
+                .expect("request headers and body");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                serde_json::json!({"format": expected_format})
+            );
+        },
+        response,
+    );
+    let output = run_owned(&[
+        "websets".into(),
+        "exports".into(),
+        "create".into(),
+        "ws/abc".into(),
+        "--format".into(),
+        "csv".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local export server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        live["nextActions"][0]["command"],
+        "exa-agent websets exports get 'ws/abc' 'export/123'"
+    );
+}
+
+#[test]
+fn websets_imports_create_upload_next_action_uses_fixture_url() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/websets/imports-create.json")).unwrap();
+    let response = fixture["upstream"].to_string();
+    let response: &'static [u8] = Box::leak(response.into_bytes().into_boxed_slice());
+    let upload_url = fixture["expected"]["uploadUrl"].as_str().unwrap();
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("POST /websets/v0/imports "),
+                "unexpected import request:\n{request}"
+            );
+        },
+        response,
+    );
+    let output = run_owned(&[
+        "websets".into(),
+        "imports".into(),
+        "create".into(),
+        "--source".into(),
+        "csv".into(),
+        "--body".into(),
+        r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#.into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local import server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let quoted_upload_url = format!("'{}'", upload_url.replace('\'', "'\\''"));
+    let expected_command = format!(
+        "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' {quoted_upload_url}"
+    );
+    assert_eq!(live["nextActions"][0]["command"], expected_command);
+}
+
+#[test]
+fn websets_imports_create_missing_upload_url_warns_with_recovery() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(
+                request.starts_with("POST /websets/v0/imports "),
+                "unexpected import request:\n{request}"
+            );
+        },
+        br#"{"id":"import/123","status":"pending"}"#,
+    );
+    let output = run_owned(&[
+        "websets".into(),
+        "imports".into(),
+        "create".into(),
+        "--source".into(),
+        "csv".into(),
+        "--body".into(),
+        r#"{"size":1024,"count":10,"entity":{"type":"company"}}"#.into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server
+        .join()
+        .expect("local malformed import server panicked");
+    // A create without `uploadUrl` cannot be uploaded to, so it is an exit-5 upstream_malformed
+    // error, never a warning riding on a success envelope.
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_malformed");
+    assert_eq!(error["error"]["retryable"], false);
+    assert_eq!(error["error"]["details"]["importId"], "import/123");
+    assert_eq!(
+        error["error"]["suggestedCommand"],
+        "exa-agent websets imports get 'import/123'"
+    );
 }
 
 #[test]
@@ -6285,17 +7775,7 @@ fn websets_webhooks_create_live_captures_secret_and_redacts_stdout() {
     server
         .join()
         .expect("local websets webhook create server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(!stdout.contains("whsec_websets_capture_12345"));
-    assert!(stdout.contains("<redacted>"));
-    let secret = fs::read_to_string(&secret_path).expect("secret file");
-    assert_eq!(secret, "whsec_websets_capture_12345");
+    assert_secret_capture(output, &secret_path, "whsec_websets_capture_12345");
 }
 
 #[test]
@@ -7009,19 +8489,7 @@ fn admin_keys_create_captures_key_to_file_and_redacts_stdout() {
         ],
     );
     server.join().expect("local admin create server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(
-        !stdout.contains("exa_minted_live_secret_123"),
-        "minted key must never appear on stdout: {stdout}"
-    );
-    let secret = fs::read_to_string(&secret_path).expect("secret file");
-    assert_eq!(secret, "exa_minted_live_secret_123");
+    assert_secret_capture(output, &secret_path, "exa_minted_live_secret_123");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -7384,6 +8852,9 @@ fn ask_live_response_does_not_include_macro_metadata() {
     let upstream = serde_json::json!({"answer":"done","citations":[]});
     assert_eq!(json["command"], "answer");
     assert_eq!(json["data"], upstream);
+    assert_eq!(json["outcome"], "full");
+    assert_eq!(json["contentDiagnostics"], serde_json::json!([]));
+    assert_eq!(json["warnings"], serde_json::json!([]));
     assert!(json["data"].get("expandsTo").is_none());
     assert!(json["data"].get("expands_to").is_none());
     assert_eq!(json["dataHash"], transport::data_hash(&upstream).unwrap());
@@ -7531,4 +9002,528 @@ fn debug_redacts_global_secret_values() {
     assert!(!dbg.contains("set-secret"));
     assert!(!dbg.contains("body-secret"));
     assert!(dbg.contains("<redacted>"));
+}
+
+// Output safety and preview regressions.
+
+/// `--output` writing over the reserved `--secret-output` file destroyed the only copy of a
+/// one-time secret and still exited 0. The combination is refused before anything is sent.
+#[test]
+fn output_and_secret_output_may_not_name_the_same_file() {
+    let dir = temp_path("output-vs-secret-output");
+    let unreachable = closed_local_base_url();
+
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        (
+            "collision.secret",
+            vec![
+                "admin".into(),
+                "keys".into(),
+                "create".into(),
+                "--name".into(),
+                "ci".into(),
+            ],
+        ),
+        (
+            "collision.secret",
+            vec![
+                "monitor".into(),
+                "create".into(),
+                "--query".into(),
+                "ai".into(),
+                "--webhook-url".into(),
+                "https://example.test/hook".into(),
+            ],
+        ),
+        (
+            "collision.secret",
+            vec![
+                "websets".into(),
+                "webhooks".into(),
+                "create".into(),
+                "--url".into(),
+                "https://example.test/hook".into(),
+                "--event".into(),
+                "webset.item.created".into(),
+            ],
+        ),
+    ];
+
+    for (name, base_args) in cases {
+        // `x` and `./x` are the same file; only canonicalization catches the second spelling.
+        for (secret_spelling, output_spelling) in [
+            (name.to_string(), name.to_string()),
+            (name.to_string(), format!("./{name}")),
+            (format!("./{name}"), name.to_string()),
+        ] {
+            let secret = dir.join(&secret_spelling);
+            let output_path = dir.join(&output_spelling);
+            let sentinel = b"sentinel-secret-content";
+            fs::write(&secret, sentinel).unwrap();
+
+            let mut args = base_args.clone();
+            args.extend([
+                "--secret-output".into(),
+                secret.to_str().unwrap().into(),
+                "--output".into(),
+                output_path.to_str().unwrap().into(),
+                "--base-url".into(),
+                unreachable.clone(),
+                "--api-key".into(),
+                "test-key-abcdef12".into(),
+                "--service-key".into(),
+                "test-service-key-abcdef12".into(),
+                "--compact".into(),
+            ]);
+            let output = run_owned(&args);
+
+            assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+            let error = stderr_json(&output);
+            assert_eq!(
+                error["error"]["code"], "invalid_flag_combination",
+                "args: {args:?}"
+            );
+            // A usage refusal, not a network failure, proves nothing was sent or overwritten.
+            assert_eq!(fs::read(&secret).unwrap(), sentinel, "args: {args:?}");
+        }
+    }
+}
+
+#[test]
+fn dry_run_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("dry-run-output");
+    let output_path = dir.join("preview.json");
+    let output = run_owned(&[
+        "search".into(),
+        "rust async runtimes".into(),
+        "--num-results".into(),
+        "3".into(),
+        "--dry-run".into(),
+        "--print-request".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success());
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["command"], "search");
+    assert!(confirmation["bytes"].as_u64().unwrap() > 0);
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["data"]["request"]["path"], "/search");
+}
+
+#[test]
+fn doctor_json_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("doctor-output");
+    let output_path = dir.join("doctor.json");
+    let output = run_owned(&[
+        "doctor".into(),
+        "--check".into(),
+        "base-url".into(),
+        "--json".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["command"], "doctor");
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["dataTruncated"], true);
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["schema"], "exa.cli.doctor.v1");
+}
+
+#[test]
+fn warning_bearing_typed_dry_run_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("typed-warning-output");
+    let output_path = dir.join("monitor-preview.json");
+    let output = run_owned(&[
+        "monitor".into(),
+        "create".into(),
+        "--query".into(),
+        "ai".into(),
+        "--webhook-url".into(),
+        "https://example.test/hook".into(),
+        "--dry-run".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["command"], "monitor create");
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["command"], "monitor create");
+    assert!(written["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "webhook_secret_ephemeral"));
+}
+
+#[test]
+fn raw_preview_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("raw-preview-output");
+    let output_path = dir.join("raw-preview.json");
+    let output = run_owned(&[
+        "raw".into(),
+        "POST".into(),
+        "/search".into(),
+        "--body".into(),
+        r#"{"query":"q"}"#.into(),
+        "--dry-run".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["command"], "raw");
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["data"]["request"]["path"], "/search");
+    assert_eq!(written["data"]["request"]["body"]["query"], "q");
+}
+
+#[test]
+fn capabilities_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("capabilities-output");
+    let output_path = dir.join("capabilities.json");
+    let output = run_owned(&[
+        "capabilities".into(),
+        "search".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    assert!(output.status.success());
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["command"], "capabilities");
+    assert!(output.stdout.len() < fs::read(&output_path).unwrap().len());
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["schema"], "exa.cli.capabilities.v1");
+}
+
+#[test]
+fn structured_stream_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("stream-output");
+    let output_path = dir.join("stream.json");
+    let (base_url, server) = local_json_server(
+        |request| assert!(request.starts_with("POST /answer "), "{request}"),
+        br#"{"answer":"streamed","citations":[]}"#,
+    );
+    let output = run_owned(&[
+        "answer".into(),
+        "what is exa".into(),
+        "--stream".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataTruncated"], true);
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert!(confirmation["data"].is_null());
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(written["data"]["answer"], "streamed");
+}
+
+#[test]
+fn raw_stream_honors_output_and_confirms_on_stdout() {
+    let dir = temp_path("raw-stream-output");
+    let output_path = dir.join("stream.raw");
+    let (base_url, server) = local_json_server(
+        |request| assert!(request.starts_with("POST /answer "), "{request}"),
+        br#"{"answer":"raw streamed"}"#,
+    );
+    let output = run_owned(&[
+        "answer".into(),
+        "what is exa".into(),
+        "--stream".into(),
+        "--raw".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--output".into(),
+        output_path.to_str().unwrap().into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(&output_path).unwrap(),
+        br#"{"answer":"raw streamed"}"#
+    );
+    let confirmation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
+    assert_eq!(confirmation["dataTruncated"], true);
+}
+
+/// The stub never sends anything, so borrowing `search`'s registry entry advertised a
+/// `POST /search` that did not happen.
+#[test]
+fn research_stub_error_reports_no_operation() {
+    for extra in [vec!["--compact"], vec!["--ndjson"], vec!["--raw"]] {
+        let mut args = vec!["research", "create", "anything"];
+        args.extend(extra.iter().copied());
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "research_retired", "args: {args:?}");
+        assert!(error["operation"]["method"].is_null(), "args: {args:?}");
+        assert!(error["operation"]["path"].is_null(), "args: {args:?}");
+        assert!(
+            error["request"]["requestId"].as_str().is_some(),
+            "args: {args:?}"
+        );
+    }
+}
+
+/// `search` rejected an unknown category as `invalid_value` while `similar` said
+/// `invalid_enum_value`, which is not in the published dictionary at all.
+#[test]
+fn rejected_category_uses_the_published_error_code_on_every_command() {
+    let search = run(&["search", "q", "--category", "github", "--compact"]);
+    assert_eq!(search.status.code(), Some(1));
+    assert_eq!(stderr_json(&search)["error"]["code"], "invalid_value");
+
+    let similar = run(&[
+        "similar",
+        "https://exa.ai",
+        "--category",
+        "github",
+        "--compact",
+    ]);
+    assert_eq!(similar.status.code(), Some(1));
+    let error = stderr_json(&similar);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    // The fine-grained validator label stays available in details.
+    assert_eq!(error["error"]["details"]["issue"], "invalid_enum_value");
+}
+
+#[test]
+fn output_schema_rejects_non_objects() {
+    for command in [
+        vec!["search", "q", "--output-schema", "[1]"],
+        vec!["answer", "q", "--output-schema", "[1]"],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "do it",
+            "--output-schema",
+            "\"nope\"",
+        ],
+    ] {
+        let mut args = command.clone();
+        args.push("--compact");
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(
+            error["error"]["code"], "invalid_field_type",
+            "args: {args:?}"
+        );
+        assert_eq!(error["error"]["details"]["field"], "outputSchema");
+    }
+}
+
+#[test]
+fn contents_highlights_json_is_validated_rather_than_demoted_to_a_query() {
+    let malformed = run(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        r#"{"numSentences": 3"#,
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(malformed.status.code(), Some(1));
+    let error = stderr_json(&malformed);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not valid JSON"));
+
+    // Whitespace-only is a bare highlights request, not a search for spaces.
+    let blank = run(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        "   ",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(blank.status.success());
+    let preview: serde_json::Value = serde_json::from_slice(&blank.stdout).unwrap();
+    assert_eq!(preview["data"]["request"]["body"]["highlights"], true);
+
+    let bad_inner = run(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        r#"{"numSentences":"three"}"#,
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert_eq!(bad_inner.status.code(), Some(1));
+    let error = stderr_json(&bad_inner);
+    assert_eq!(
+        error["error"]["details"]["field"],
+        "highlights.numSentences"
+    );
+}
+
+/// The rewrite used to latch onto the `websets exports create` token run anywhere in argv, so
+/// these positional URLs silently became an export-format rewrite.
+#[test]
+fn export_format_rewrite_ignores_matching_positional_arguments() {
+    let output = run(&[
+        "contents",
+        "websets",
+        "exports",
+        "create",
+        "--format",
+        "ndjson",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(preview["command"], "contents");
+
+    let export = run(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "csv",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(
+        export.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
+    assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
+
+    let profiled = run(&[
+        "--profile",
+        "default",
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "csv",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(profiled.status.success(), "{profiled:?}");
+    let preview: serde_json::Value = serde_json::from_slice(&profiled.stdout).unwrap();
+    assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
+
+    let search = run(&[
+        "search",
+        "websets exports create",
+        "--dry-run",
+        "--print-request",
+        "--compact",
+    ]);
+    assert!(search.status.success(), "{search:?}");
+    let preview: serde_json::Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(preview["command"], "search");
+    assert_eq!(
+        preview["data"]["request"]["body"]["query"],
+        "websets exports create"
+    );
+}
+
+#[test]
+fn empty_positional_ids_are_refused_before_the_path_is_built() {
+    let output = run(&["websets", "get", "", "--expand", "items", "--compact"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "placeholder_argument");
+    assert!(error["error"]["suggestedCommand"].as_str().is_some());
+}
+
+#[test]
+fn rejected_enum_values_come_back_as_a_runnable_command() {
+    let expand = run(&["websets", "get", "item", "--expand", "item", "--compact"]);
+    assert_eq!(expand.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&expand)["error"]["suggestedCommand"],
+        "exa-agent websets get item --expand items --compact"
+    );
+
+    let format = run(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "parquet",
+        "--compact",
+    ]);
+    assert_eq!(format.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&format)["error"]["suggestedCommand"],
+        "exa-agent websets exports create ws_1 --format csv --compact"
+    );
 }

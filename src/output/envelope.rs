@@ -82,6 +82,19 @@ impl ErrorEnvelope {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 
+    /// Attach request identity without claiming an upstream operation. Local-only errors (the
+    /// retired `research` stub) send nothing, so `operation.method`/`operation.path` must stay
+    /// null rather than borrowing a neighbouring registry entry's method and path.
+    pub fn with_request_context(
+        mut self,
+        request_id: impl Into<String>,
+        correlation_id: Option<String>,
+    ) -> Self {
+        self.request.request_id = Some(request_id.into());
+        self.request.correlation_id = correlation_id;
+        self
+    }
+
     pub fn with_context(
         mut self,
         method: impl Into<String>,

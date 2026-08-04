@@ -26,10 +26,6 @@ fn similar_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["similar"]).expect("similar op")
 }
 
-fn research_create_op() -> &'static registry::OperationDef {
-    registry::lookup_by_segments(&["research", "create"]).expect("research create op")
-}
-
 fn team_info_op() -> &'static registry::OperationDef {
     registry::lookup_by_segments(&["team", "info"]).expect("team info op")
 }
@@ -146,18 +142,6 @@ fn similar_fields_map_core_flags() {
             "category": "company"
         })
     );
-}
-
-#[test]
-fn research_create_maps_query_to_instructions() {
-    let spec = request::build_body(
-        research_create_op(),
-        &[("query", Some("legacy research topic".into()))],
-    )
-    .unwrap();
-
-    assert_eq!(spec.body["instructions"], "legacy research topic");
-    assert_eq!(spec.op.api_path, "/research/v1");
 }
 
 #[test]
@@ -404,6 +388,7 @@ fn agent_runs_create_fields_map_query_effort_and_omits_stream_body() {
                 "output-schema",
                 Some(json!({"type":"object","properties":{"name":{"type":"string"}}}).to_string()),
             ),
+            ("system-prompt", Some("Prefer primary sources.".into())),
             (
                 "input",
                 Some(json!({"exclusion":[{"domain":"old.example"}]}).to_string()),
@@ -433,6 +418,7 @@ fn agent_runs_create_fields_map_query_effort_and_omits_stream_body() {
         spec.body["outputSchema"],
         json!({"type":"object","properties":{"name":{"type":"string"}}})
     );
+    assert_eq!(spec.body["systemPrompt"], "Prefer primary sources.");
     assert_eq!(
         spec.body["input"]["data"],
         json!([{"company":"OpenAI"},{"company":"Anthropic"}])

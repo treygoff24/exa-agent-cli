@@ -1,7 +1,6 @@
 //! Process-isolated transport guard tests. This binary mutates the environment, so it stays
 //! separate from the parallel transport seam tests.
 
-use clap::Parser;
 use exa_agent_cli::auth::{self, NoopKeyring};
 use exa_agent_cli::cli::Cli;
 use exa_agent_cli::error::{CliError, Diag};

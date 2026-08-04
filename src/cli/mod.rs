@@ -2,6 +2,7 @@
 //! collect flags; logic lives in `request`/`exec`/dispatch.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 
 #[derive(Parser)]
 #[command(
@@ -15,6 +16,113 @@ pub struct Cli {
     pub globals: GlobalArgs,
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Clap cannot represent a local option that shadows a global option name. Keep the
+    /// documented export `--format` spelling by normalizing it to an internal id before Clap
+    /// parses the command tree.
+    pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        <Self as Parser>::try_parse_from(normalize_export_format_flag(itr))
+    }
+
+    pub fn try_parse() -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::env::args_os())
+    }
+}
+
+fn normalize_export_format_flag<I, T>(itr: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut export_create = false;
+    let mut export_format_value_pending = false;
+    let mut export_format_consumed = false;
+    let mut command_parts = 0usize;
+    // Give up on the first positional that cannot be part of `websets exports create`, rather
+    // than restarting the match. Restarting made the rewrite latch onto the token run wherever
+    // it appeared — including `contents websets exports create` positionals.
+    let mut abandoned = false;
+    let mut index = 0usize;
+    let mut previous_was_flag = false;
+    // Global options whose separate next token is a VALUE, not a command word. Mirrors the
+    // value-taking fields of `GlobalArgs`; boolean globals (--json, --raw, --yes, …) are
+    // deliberately absent so `--json websets exports create` still matches the command path.
+    const VALUE_TAKING_GLOBALS: &[&str] = &[
+        "-o",
+        "--output",
+        "--format",
+        "--max-output-bytes",
+        "--correlation-id",
+        "--api-key",
+        "--service-key",
+        "--profile",
+        "--base-url",
+        "--header",
+        "--beta",
+        "--timeout",
+        "--connect-timeout",
+        "--retry",
+        "--idempotency-key",
+        "--input",
+        "--input-format",
+        "--set",
+        "--body",
+        "--trace",
+    ];
+    itr.into_iter()
+        .map(Into::into)
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            if !export_create {
+                let is_flag = text.starts_with('-');
+                let was_flag = previous_was_flag;
+                previous_was_flag =
+                    is_flag && !text.contains('=') && VALUE_TAKING_GLOBALS.contains(&text.as_ref());
+                // argv[0] is the binary name, never part of the command path.
+                let skip = index == 0;
+                index += 1;
+                if abandoned || skip || is_flag {
+                    return arg;
+                }
+                // A token bound to the preceding value-taking global is data, never a command
+                // word — checked BEFORE the command arms so `--profile websets` can't advance
+                // the match (it used to, leaving `--format csv` parsed as the global format).
+                if was_flag {
+                    return arg;
+                }
+                match (command_parts, text.as_ref()) {
+                    (0, "websets") => command_parts = 1,
+                    (1, "exports") => command_parts = 2,
+                    (2, "create") => export_create = true,
+                    _ => abandoned = true,
+                }
+                return arg;
+            }
+            if export_format_value_pending {
+                export_format_value_pending = false;
+                export_format_consumed = true;
+                return arg;
+            }
+            if export_format_consumed {
+                return arg;
+            }
+            if text == "--format" {
+                export_format_value_pending = true;
+                return OsString::from("--export-format");
+            }
+            if let Some(value) = text.strip_prefix("--format=") {
+                export_format_consumed = true;
+                return OsString::from(format!("--export-format={value}"));
+            }
+            arg
+        })
+        .collect()
 }
 
 impl std::fmt::Debug for Cli {
@@ -71,8 +179,7 @@ pub const SEARCH_TYPE_VALUES: &[&str] = &[
 pub enum SearchCategory {
     Company,
     People,
-    #[value(name = "research paper")]
-    ResearchPaper,
+    Publication,
     News,
     #[value(name = "personal site")]
     PersonalSite,
@@ -83,7 +190,7 @@ pub enum SearchCategory {
 pub const SEARCH_CATEGORY_VALUES: &[&str] = &[
     "company",
     "people",
-    "research paper",
+    "publication",
     "news",
     "personal site",
     "financial report",
@@ -94,7 +201,7 @@ impl SearchCategory {
         match self {
             SearchCategory::Company => "company",
             SearchCategory::People => "people",
-            SearchCategory::ResearchPaper => "research paper",
+            SearchCategory::Publication => "publication",
             SearchCategory::News => "news",
             SearchCategory::PersonalSite => "personal site",
             SearchCategory::FinancialReport => "financial report",
@@ -166,7 +273,7 @@ pub struct GlobalArgs {
     /// Emit compact single-line JSON envelopes.
     #[arg(long, global = true)]
     pub compact: bool,
-    /// Write output to a file when supported.
+    /// Write full output to FILE; stdout receives a confirmation envelope.
     #[arg(short = 'o', long, global = true)]
     pub output: Option<String>,
     /// Spill oversized `data` payloads above this byte limit; 0 disables.
@@ -368,7 +475,7 @@ pub enum Command {
         #[command(subcommand)]
         sub: AgentCmd,
     },
-    /// Legacy research API (/research/v1).
+    /// Retired Research API; use `search --type deep-reasoning`.
     Research {
         #[command(subcommand)]
         sub: ResearchCmd,
@@ -436,6 +543,20 @@ pub struct SearchArgs {
     /// The search query.
     #[arg(value_name = crate::registry::field_value_name("search", "query").expect("search query metadata"))]
     pub query: String,
+    /// JSON Schema for structured search output; accepts inline JSON or `@file`.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("search", "output-schema").expect("search output-schema metadata"),
+        value_name = crate::registry::field_value_name("search", "output-schema").expect("search output-schema metadata")
+    )]
+    pub output_schema: Option<String>,
+    /// Additional instructions for search output or behavior.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("search", "system-prompt").expect("search system-prompt metadata"),
+        value_name = crate::registry::field_value_name("search", "system-prompt").expect("search system-prompt metadata")
+    )]
+    pub system_prompt: Option<String>,
     /// Number of results, 1..=100 (maps `numResults`). Search is not cursor-paginated.
     #[arg(
         short = 'n',
@@ -476,7 +597,7 @@ pub struct SearchArgs {
     pub r#type: Option<SearchType>,
     /// Result category.
     ///
-    /// Valid values: company, people, research paper, news, personal site, financial report.
+    /// Valid values: company, people, publication, news, personal site, financial report.
     #[arg(
         long,
         value_name = "CATEGORY",
@@ -531,6 +652,8 @@ impl SearchArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
         vec![
             ("query", Some(self.query.clone())),
+            ("output-schema", self.output_schema.clone()),
+            ("system-prompt", self.system_prompt.clone()),
             ("num-results", self.num_results.clone()),
             ("text", self.text.clone()),
             ("highlights", self.highlights.clone()),
@@ -581,6 +704,15 @@ pub struct ContentsArgs {
         num_args = 1
     )]
     pub summary_query: Option<String>,
+    /// Return highlights, optionally guided by a custom query or JSON options object.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("contents", "highlights").expect("contents highlights metadata"),
+        value_name = crate::registry::field_value_name("contents", "highlights").expect("contents highlights metadata"),
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    pub highlights: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub chunk_size: Option<u32>,
 }
@@ -592,6 +724,7 @@ impl ContentsArgs {
             ("ids", str_array_flag(&self.ids)),
             ("text", self.text.clone()),
             ("summary-query", self.summary_query.clone()),
+            ("highlights", self.highlights.clone()),
         ]
     }
 }
@@ -610,8 +743,12 @@ pub struct SimilarArgs {
     pub num_results: Option<u32>,
     #[arg(long)]
     pub exclude_source_domain: bool,
-    #[arg(long, value_enum, ignore_case = true)]
-    pub category: Option<SearchCategory>,
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        value_parser = crate::registry::permissive_enum_string_value_parser(SEARCH_CATEGORY_VALUES)
+    )]
+    pub category: Option<String>,
     /// Return text in each result. Bare --text caps similar text at 1500 chars/result; use --text full for uncapped.
     #[arg(
         long,
@@ -629,8 +766,8 @@ fn similar_num_results_flag(value: &Option<u32>) -> Option<String> {
     value.map(|n| n.to_string())
 }
 
-fn similar_category_flag(value: &Option<SearchCategory>) -> Option<String> {
-    value.map(|category| category.as_str().to_string())
+fn similar_category_flag(value: &Option<String>) -> Option<String> {
+    value.clone()
 }
 
 impl SimilarArgs {
@@ -656,7 +793,11 @@ pub struct AnswerArgs {
     pub text: bool,
     #[arg(long)]
     pub stream: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("answer", "output-schema").expect("answer output-schema metadata"),
+        value_name = crate::registry::field_value_name("answer", "output-schema").expect("answer output-schema metadata")
+    )]
     pub output_schema: Option<String>,
 }
 
@@ -801,8 +942,19 @@ pub struct AgentRunsEventsArgs {
 #[derive(Args, Debug)]
 pub struct AgentRunArgs {
     pub query: String,
-    #[arg(long)]
+    /// JSON Schema for structured agent output; accepts inline JSON or `@file`.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("agent runs create", "output-schema").expect("agent output-schema metadata"),
+        value_name = crate::registry::field_value_name("agent runs create", "output-schema").expect("agent output-schema metadata")
+    )]
     pub output_schema: Option<String>,
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("agent runs create", "system-prompt").expect("agent system-prompt metadata"),
+        value_name = crate::registry::field_value_name("agent runs create", "system-prompt").expect("agent system-prompt metadata")
+    )]
+    pub system_prompt: Option<String>,
     #[arg(long)]
     pub input: Option<String>,
     #[arg(long)]
@@ -839,11 +991,11 @@ pub enum AgentRunsCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ResearchCmd {
-    /// POST /research/v1 [create-POST].
+    /// Retired; use `exa-agent search --type deep-reasoning`.
     Create(ResearchCreateArgs),
-    /// GET /research/v1.
+    /// Retired; use `exa-agent search --help`.
     List(PaginationArgs),
-    /// GET /research/v1/{researchId}.
+    /// Retired; use `exa-agent search --help`.
     Get { research_id: String },
 }
 
@@ -861,7 +1013,7 @@ pub enum WebsetsCmd {
     /// GET /websets/v0/websets.
     List(WebsetsListArgs),
     /// GET /websets/v0/websets/{id}.
-    Get { id: String },
+    Get(WebsetsGetArgs),
     /// POST /websets/v0/websets/{id}.
     Update { id: String },
     /// DELETE /websets/v0/websets/{id}.
@@ -885,7 +1037,12 @@ pub enum WebsetsCmd {
         #[command(subcommand)]
         sub: WebsetsEnrichmentsCmd,
     },
-    /// CSV/URL imports.
+    /// Webset exports.
+    Exports {
+        #[command(subcommand)]
+        sub: WebsetsExportsCmd,
+    },
+    /// CSV imports.
     Imports {
         #[command(subcommand)]
         sub: WebsetsImportsCmd,
@@ -913,6 +1070,13 @@ pub struct WebsetsListArgs {
     pub pagination: PaginationArgs,
     #[arg(long)]
     pub search: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct WebsetsGetArgs {
+    pub id: String,
+    #[arg(long, value_enum, ignore_case = true)]
+    pub expand: Option<WebsetExpand>,
 }
 
 #[derive(Args, Debug)]
@@ -953,6 +1117,20 @@ pub enum WebsetEnrichmentFormat {
     Email,
     Phone,
     Url,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetExpand {
+    Items,
+}
+
+impl WebsetExpand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetExpand::Items => "items",
+        }
+    }
 }
 
 impl WebsetEnrichmentFormat {
@@ -1045,16 +1223,48 @@ pub enum WebsetsEnrichmentsCmd {
     },
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebsetExportFormat {
+    Csv,
+    Json,
+}
+
+impl WebsetExportFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebsetExportFormat::Csv => "csv",
+            WebsetExportFormat::Json => "json",
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebsetsExportsCmd {
+    /// POST /websets/v0/websets/{webset}/exports [create-POST].
+    Create {
+        webset_id: String,
+        #[arg(
+            long = "export-format",
+            value_enum,
+            ignore_case = true,
+            help = "Export file format (csv|json). On this command --format selects the export format, so the global --format envelope selector is unavailable here: choose the envelope shape with --json or --ndjson (or EXA_OUTPUT)."
+        )]
+        export_format: Option<WebsetExportFormat>,
+    },
+    /// GET /websets/v0/websets/{webset}/exports/{id}.
+    Get {
+        webset_id: String,
+        export_id: String,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 pub enum WebsetsImportsCmd {
     /// POST /websets/v0/imports [create-POST].
     Create {
         #[arg(long)]
         source: Option<String>,
-        #[arg(long)]
-        url: Option<String>,
-        #[arg(long)]
-        csv: Option<String>,
     },
     /// GET /websets/v0/imports.
     List(PaginationArgs),
@@ -1582,7 +1792,7 @@ pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
     match sub {
         WebsetsCmd::Create(_) => "websets create".to_string(),
         WebsetsCmd::List(_) => "websets list".to_string(),
-        WebsetsCmd::Get { .. } => "websets get".to_string(),
+        WebsetsCmd::Get(_) => "websets get".to_string(),
         WebsetsCmd::Update { .. } => "websets update".to_string(),
         WebsetsCmd::Delete { .. } => "websets delete".to_string(),
         WebsetsCmd::Cancel { .. } => "websets cancel".to_string(),
@@ -1603,6 +1813,10 @@ pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
             WebsetsEnrichmentsCmd::Update { .. } => "websets enrichments update".to_string(),
             WebsetsEnrichmentsCmd::Delete { .. } => "websets enrichments delete".to_string(),
             WebsetsEnrichmentsCmd::Cancel { .. } => "websets enrichments cancel".to_string(),
+        },
+        WebsetsCmd::Exports { sub } => match sub {
+            WebsetsExportsCmd::Create { .. } => "websets exports create".to_string(),
+            WebsetsExportsCmd::Get { .. } => "websets exports get".to_string(),
         },
         WebsetsCmd::Imports { sub } => match sub {
             WebsetsImportsCmd::Create { .. } => "websets imports create".to_string(),

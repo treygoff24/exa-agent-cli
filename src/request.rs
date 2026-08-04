@@ -214,6 +214,20 @@ pub fn read_json_value_arg(raw: &str, flag: &str) -> Result<Value, CliError> {
     })
 }
 
+/// Read a text-valued flag from inline text or `@file`, preserving the text exactly.
+pub fn read_text_value_arg(raw: &str, flag: &str) -> Result<String, CliError> {
+    if let Some(path) = raw.strip_prefix('@') {
+        if path.is_empty() {
+            return Err(usage(
+                "invalid_value",
+                format!("`--{flag} @` requires a file path"),
+            ));
+        }
+        return read_named_file(path, flag);
+    }
+    Ok(raw.to_string())
+}
+
 fn read_file(path: &str) -> Result<String, CliError> {
     read_named_file(path, "body")
 }

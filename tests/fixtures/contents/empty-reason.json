@@ -61,7 +61,7 @@
     "dataTruncated": false
   },
   "expected": {
-    "outcome": "partial",
+    "outcome": "no_content",
     "exit": 10,
     "reason": "upstream_reason_unavailable",
     "suggestedCommand": "exa-agent contents 'https://opaque.test' --text full"

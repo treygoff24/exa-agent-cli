@@ -335,7 +335,12 @@ fn ci() -> Result<()> {
             "warnings",
         ],
     )?;
-    run("cargo", &["test", "--workspace", "--locked"])?;
+    // Generator-only EXA_AGENT_NO_NETWORK must not reach loopback/fake-transport tests.
+    run_without_env(
+        "cargo",
+        &["test", "--workspace", "--locked"],
+        "EXA_AGENT_NO_NETWORK",
+    )?;
     println!("ci: OK");
     Ok(())
 }
@@ -689,23 +694,6 @@ fn phase_gate(n: Option<&str>) -> Result<()> {
                 "--",
                 "team",
                 "info",
-                "--dry-run",
-                "--print-request",
-                "--compact",
-            ],
-            "exa.cli.response.v1",
-        )?;
-        run_json(
-            "cargo",
-            &[
-                "run",
-                "--quiet",
-                "--bin",
-                "exa-agent",
-                "--",
-                "research",
-                "create",
-                "legacy topic",
                 "--dry-run",
                 "--print-request",
                 "--compact",
@@ -1645,6 +1633,17 @@ fn run_json_value_with_network_guard(
 
 fn run(cmd: &str, args: &[&str]) -> Result<()> {
     run_env(cmd, args, &[])
+}
+
+fn run_without_env(cmd: &str, args: &[&str], removed: &str) -> Result<()> {
+    eprintln!("$ {cmd} {}", args.join(" "));
+    let mut command = Command::new(cmd);
+    command.args(args).env_remove(removed);
+    let status = command.status().with_context(|| format!("spawn {cmd}"))?;
+    if !status.success() {
+        bail!("{cmd} {} failed ({status})", args.join(" "));
+    }
+    Ok(())
 }
 
 fn run_env(cmd: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {

@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, research, monitors, the whole Websets tree, and team/key administration — as 68 non-interactive commands. Every call prints exactly one JSON envelope and returns a stable exit code. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 67 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints the upstream bytes as-is, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 
@@ -59,18 +59,19 @@ Before running any mutation for real, preview the exact upstream request it woul
 exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
 ```
 
-For generated docs, examples, and local probes that must not touch credentials or the network,
-set `EXA_AGENT_NO_NETWORK` (any value, including empty; unset it to turn the guard off). It refuses live typed, raw, streaming, `auth test`/`status`,
+**Repo-work rule:** every local `exa-agent` invocation used for generated docs, examples, or
+probing MUST export `EXA_AGENT_NO_NETWORK` (any value, including empty) to prevent unintended
+billed live calls; unset it only for an intentionally live test. The guard refuses live typed, raw, streaming, `auth test`/`status`,
 `schema refresh --check`, and `doctor --online` before credential resolution; dry-run and
 self-description commands still work.
 
 ## Reading the output
 
-Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. Live `contents` and `fetch` result envelopes carry `outcome` (`full`, `partial`, or `no_content`) independently of exit classification. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
+Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. Live `contents`/`fetch` and `answer`/`ask` result envelopes carry text-aware `outcome` (`full`, `partial`, or `no_content`) independently of exit classification. They also carry `contentDiagnostics[]`: contents entries expose exact upstream `crawl_status`, `error_tag`, and `http_status` when present plus honestly inferred `content_type`, `content_status`, `usable`, and `pdf_unextracted`; answer currently emits `[]` because Exa provides no per-citation diagnostics. Empty/binary/PDF/crawl failures always add a warning and fallback action. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
 
 Error envelope (`exa.cli.error.v1`, stderr): `error.code` (from the published dictionary below), `error.message`, and often `suggestedCommand`. Stdout stays empty on error.
 
-Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits the exact upstream bytes with no CLI envelope.
+Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits the exact upstream bytes with no CLI envelope. `-o/--output FILE` writes the complete selected output (exact bytes for `--raw`) to `FILE`; stdout carries only a small confirmation envelope with `dataPath`, and an explicit output path supersedes state-dir auto-spill.
 
 ## Exit codes
 
@@ -89,8 +90,11 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 10 | partial | batch partially succeeded (per-item statuses) |
 | 11 | no_input | required stdin/@file input absent, or a TTY would block |
 | 12 | interrupted | SIGINT / stream interrupted |
+| 13 | billing | 402; the Exa account is out of credits (key is valid, command was fine) |
 
-`error.code` is the finer-grained signal — 27 codes map onto these 13 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+`error.code` is the finer-grained signal — 33 codes map onto these 14 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+
+**Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** A 402 means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane. `exa-agent auth test` and `doctor --online` report this state without spending anything, and are the only credit preflight available: the Exa API publishes no balance endpoint, so exhaustion is observable only as a 402 on the billing-free probe.
 
 Dispatch-level body validation runs before credential resolution and network I/O. Body-level mistakes (unknown fields, out-of-range values, missing required fields, or a malformed `--body`/`--set`) exit `1` as a local `usage` error rather than being sent upstream and returning `5`. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
 
@@ -106,7 +110,7 @@ Dispatch-level body validation runs before credential resolution and network I/O
 These run with no credential and no network call:
 
 ```sh
-exa-agent capabilities --json    # all 68 commands: method, path, read-only/destructive/idempotency-sensitive, full exit-code + error-code dictionaries, embedded spec hash
+exa-agent capabilities --json    # all 67 commands: method, path, read-only/destructive/idempotency-sensitive, full exit-code + error-code dictionaries, embedded spec hash
 exa-agent robot-docs guide        # short paste-ready playbook for agents
 exa-agent schema --help           # embedded API/CLI schema
 exa-agent doctor                  # read-only health checks (add --online for a live probe)

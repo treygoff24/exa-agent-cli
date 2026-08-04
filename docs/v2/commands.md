@@ -36,14 +36,13 @@ exa-agent
 │       ├── events                 # GET    /agent/runs/{id}/events
 │       ├── cancel                 # POST   /agent/runs/{id}/cancel
 │       └── delete                 # DELETE /agent/runs/{id}                [--yes]
-├── research                       # Research API: /research/v1             [legacy; prefer agent]
-│   ├── create                     # POST   /research/v1                    [create-POST]
-│   ├── list                       # GET    /research/v1
-│   └── get                        # GET    /research/v1/{researchId}
+├── research                       # RETIRED upstream (0.5.0): local stub, exits 1 with
+│   │                              #   `research_retired` + replacement `search --type deep-reasoning`
+│   ├── create|list|get            # no network call; absent from capabilities
 ├── websets                        # Websets API: /websets/v0/websets
 │   ├── create                     # POST   /websets/v0/websets                     [create-POST]
 │   ├── list                       # GET    /websets/v0/websets
-│   ├── get                        # GET    /websets/v0/websets/{id}
+│   ├── get                        # GET    /websets/v0/websets/{id}   [--expand items → ?expand=items, 0.5.0]
 │   ├── update                     # POST   /websets/v0/websets/{id}   (POST, not PATCH)
 │   ├── delete                     # DELETE /websets/v0/websets/{id}                [--yes]
 │   ├── cancel                     # POST   /websets/v0/websets/{id}/cancel         [--yes]
@@ -62,6 +61,9 @@ exa-agent
 │   │   ├── update                 # PATCH  /websets/v0/websets/{webset}/enrichments/{id}
 │   │   ├── delete                 # DELETE /websets/v0/websets/{webset}/enrichments/{id}    [--yes]
 │   │   └── cancel                 # POST   /websets/v0/websets/{webset}/enrichments/{id}/cancel [--yes]
+│   ├── exports                    # overlay-defined (docs-only, D40/D17 precedent; added 0.5.0)
+│   │   ├── create                 # POST   /websets/v0/websets/{webset}/exports  --format csv|json  [create-POST]
+│   │   └── get                    # GET    /websets/v0/websets/{webset}/exports/{id}
 │   ├── imports
 │   │   ├── create                 # POST   /websets/v0/imports   (returns uploadUrl)        [create-POST]
 │   │   ├── list                   # GET    /websets/v0/imports
@@ -164,8 +166,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
 | `POST /agent/runs/{id}/cancel` | `exa-agent agent runs cancel ID` | Safe; returns terminal run if already done. |
 | `DELETE /agent/runs/{id}` | `exa-agent agent runs delete ID --yes` | Destructive. |
-| `GET/POST /research/v1` | `exa-agent research list/create` | `create` is `[create-POST]`. **Legacy**; warns and points to `agent`. |
-| `GET /research/v1/{id}` | `exa-agent research get ID` | Status read. |
+| `/research/v1` (all verbs) | `exa-agent research …` (stub) | **Retired upstream** (HTTP 410, 2026-08). Local stub errors with `research_retired` and the deep-reasoning replacement; see D40. |
 | `GET/POST /websets/v0/websets` | `exa-agent websets list/create` | `create` is `[create-POST]`. Body-first; `--body @file` + `--set`. |
 | `GET/POST/DELETE /websets/v0/websets/{id}` | `exa-agent websets get/update/delete` | `update` is **POST**, not PATCH. `delete` requires `--yes`. |
 | `POST /websets/v0/websets/{id}/cancel` | `exa-agent websets cancel ID --yes` | Discards running work. |
@@ -173,7 +174,8 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET/DELETE /websets/v0/websets/{w}/items` | `exa-agent websets items list/get/delete` | List: `--limit/--cursor/--all`, `--source-id`. `delete` `--yes`. |
 | `POST/GET/cancel searches` | `exa-agent websets searches create/get/cancel` | `create` is `[create-POST]`. |
 | `POST/GET/PATCH/DELETE/cancel enrichments` | `exa-agent websets enrichments create/get/update/delete/cancel` | `create` is `[create-POST]`. `delete`/`cancel` require `--yes`. |
-| `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl`; `--csv FILE` uploads only when explicit. `delete` `--yes`. |
+| `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl` and a `nextActions` PUT template for the documented upload step (the former `--csv`/`--url` conveniences were removed in 0.5.0 — D40d). `delete` `--yes`. |
+| `POST/GET exports` | `exa-agent websets exports create/get` | Overlay-defined (D40e). `create` requires `--format csv\|json`, is `[create-POST]`, and nextActions → `exports get`. Responses are opaque upstream `data`. |
 | `POST/GET/PATCH/DELETE /websets/v0/monitors` | `exa-agent websets monitors create/list/get/update/delete` | `create` is `[create-POST]`. Distinct from top-level `monitor`. |
 | `GET /websets/v0/monitors/{m}/runs[/id]` | `exa-agent websets monitors runs list/get` | Cursor on list. |
 | `GET /websets/v0/events[/id]` | `exa-agent websets events list/get` | List: cursor, `--type`, `--created-before/after`. |
@@ -270,9 +272,9 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 
 ### Input forgiveness (coerce at the edges, stay deterministic)
 
-Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest of the program sees only canonical values (design-principle "Input forgiveness"; architecture §6):
+Normalization happens at the parse boundary and in post-parse coercion so the rest of the program sees canonical values (design-principle "Input forgiveness"; architecture §6):
 
-- **Enums are case-insensitive.** Every `ValueEnum` flag (`--type`, `--format`, `--effort`, `--category`, `--livecrawl`, `--input-format`, enrichments `--format`, admin `--group-by`, …) sets `ignore_case = true`, so `--type Fast`, `--format JSON`, `--effort Medium` all resolve; an invalid choice lists the valid values (clap's possible-value suggestion). `--category` is a `ValueEnum` with multi-word variants (`research paper`), not a free string, so typos get suggestions too. The canonical (lowercase/kebab) spelling is what reaches the body.
+- **Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--enrichment-format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
 - **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..10000`; `--highlights[=N]` accepts a positive character cap.
 - **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
 - **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
@@ -283,7 +285,9 @@ Normalization happens in the clap `value_parser`/`ValueEnum` layer so the rest o
 
 Universal flags (§3) are assumed throughout; only command-specific flags are listed. Local validation guards run **before** the API call and exit 1 (usage) with a copy-pasteable `suggestedCommand`.
 
-**Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `research create` → `research get <id>`; `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand` — the agent never has to guess the next call.
+> The per-command blocks below are design targets and may drift from what has shipped. `exa-agent capabilities [COMMAND]` reflects the actual flags, types, and metadata of the running binary and is the source of truth when this document and the binary disagree.
+
+**Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand` — the agent never has to guess the next call.
 
 ### `search` — `POST /search`
 
@@ -292,7 +296,7 @@ exa-agent search QUERY
   --type auto|fast|instant|deep-lite|deep|deep-reasoning   # default auto
   --fast | --instant | --deep | --deep-reasoning           # shortcuts for --type
   --num-results N                                           # maps numResults; 1..100. Short alias: -n. NOT --limit
-  --category 'company|people|research paper|news|personal site|financial report'
+  --category 'company|people|publication|news|personal site|financial report' # legacy 'research paper' coerces to publication
   --include-domain DOMAIN        # repeatable; includeDomains[]; supports paths + wildcards
   --exclude-domain DOMAIN        # repeatable; excludeDomains[]
   --start-published-date ISO     # alias --published-after
@@ -343,6 +347,11 @@ Guards:
 - `--stream` without `--output-schema` → `warnings[]`: streaming has no effect; falls back to a single JSON envelope.
 - Deprecated knobs (`--livecrawl`, `--context*`) used → non-fatal `warnings[]` with replacement.
 
+Query/domain distinction:
+- `site:agency.gov` is text inside `QUERY`; it participates in Exa's query interpretation and ranking. Use it when the site constraint is part of what the query means, and keep it quoted with the rest of the query: `exa-agent search "site:congress.gov clean air act" ...`.
+- `--include-domain agency.gov` and `--exclude-domain example.com` populate the typed upstream `includeDomains[]`/`excludeDomains[]` filters independently of query wording. Use them for a hard allow/deny domain set, repeat the flag for multiple domains, and do not put `site:` in the flag value.
+- `similar --exclude-source-domain` is narrower: it excludes the source URL's own domain for similarity search. It is not an alias for `search --exclude-domain`.
+
 ### `contents` — `POST /contents`
 
 ```text
@@ -367,13 +376,15 @@ Guards:
 - `--stream` → exit 1 (contents does not stream).
 - `--livecrawl` + `--max-age-hours` → exit 1.
 - Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; a batch with mixed outcomes exits 0 with `url_failed` warnings and `outcome: "partial"`, while a batch where every item fails exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
+- `outcome` is text-aware: empty, whitespace-only, gzip/PDF-signature, or control-heavy rows do not count as usable. `contentDiagnostics[]` summarizes the exact status/error/HTTP fields Exa returned and labels empty/binary/PDF rows; `warnings[]` and `nextActions[]` always provide a fallback when outcome is not `full`.
+- Government/primary-source fallback: Exa is the fast default, but its crawler can return `no_content`/`partial` for `uscode.house.gov`, `govinfo.gov`, eCFR, Congress.gov, and agency sites. For authority-critical statutory or regulatory text, follow the emitted action: `parallel-cli extract 'URL' --full-content --json`. This is an upstream crawl boundary, not content the CLI can safely reconstruct. PDFs are reported as `pdf_unextracted` because Exa returns extracted JSON text, not trustworthy raw PDF bytes; the CLI does not direct-download outside the Exa request path.
 
 ### `similar` — `POST /findSimilar` (deprecated upstream)
 
 ```text
 exa-agent similar URL
   --exclude-source-domain
-  --category ...               --num-results N
+  --category 'company|people|publication|news|personal site|financial report' --num-results N # legacy 'research paper' coerces to publication
   --include-domain DOMAIN      --exclude-domain DOMAIN
   --start/end-published-date   --start/end-crawl-date
   # content-extraction + freshness flags from `search` apply
@@ -407,6 +418,7 @@ Returns `data.response`, `data.resultsCount`, `data.searchTime`, `data.outputTok
 exa-agent agent run QUERY
 exa-agent agent runs create QUERY
   --output-schema JSON|@file   # JSON Schema draft-07/2019-09/2020-12
+  --system-prompt TEXT|@file  # additional instructions for the run
   --input JSON|@file           # request.input (rows + exclusions)
   --input-row JSON             # repeatable convenience → input.data[]
   --exclusion JSON|@file       # input.exclusion
@@ -434,15 +446,15 @@ Guards / notes:
 - `--data-source` count > 5 → exit 1.
 - Surface `stopReason` in output; treat `budget_reached` as not-fully-complete (do not silently report success).
 
-### `research` — `/research/v1` (legacy)
+### `research` — `/research/v1` (retired upstream)
 
 ```text
-exa-agent research create QUERY   # [create-POST]; --stream where supported
-exa-agent research list           --limit N --cursor TOKEN --all
+exa-agent research create QUERY
+exa-agent research list
 exa-agent research get RESEARCH_ID
 ```
 
-Emits a non-fatal `warnings[]` entry: research v1 is legacy; new work should target `agent`. Kept for breadth.
+All three verbs are local stubs: they make no network call, exit 1 with `research_retired`, and are absent from `capabilities`. `create` suggests `exa-agent search "QUERY" --type deep-reasoning`; `list` and `get` suggest `exa-agent search --help`, while `get` preserves the supplied id in `error.details.researchId`.
 
 ### `monitor` — top-level Search Monitors `/monitors`
 
@@ -468,7 +480,7 @@ Guard: `monitor create` with `--webhook-url` but no `--secret-output` and a non-
 exa-agent websets create   --query TEXT --count N
                            --body @webset.json --set path=value      # [create-POST]
 exa-agent websets list     --limit N --cursor TOKEN --all
-exa-agent websets get      ID
+exa-agent websets get      ID --expand items
 exa-agent websets update   ID --set path=value --body @file          # POST upstream, not PATCH
 exa-agent websets delete   ID --yes
 exa-agent websets cancel   ID --yes                                  # discards running work
@@ -486,21 +498,24 @@ exa-agent websets items get    WEBSET ITEM_ID
 exa-agent websets items delete WEBSET ITEM_ID --yes
 
 # searches
-exa-agent websets searches create WEBSET --query TEXT --count N --criteria TEXT --scope JSON|@file  # [create-POST]
+exa-agent websets searches create WEBSET --query TEXT --count N --criteria TEXT  # [create-POST]
 exa-agent websets searches get    WEBSET SEARCH_ID
 exa-agent websets searches cancel WEBSET SEARCH_ID
 
 # enrichments
 exa-agent websets enrichments create WEBSET --description TEXT \
-    --format text|number|date|boolean|options --body @json          # [create-POST]
+    --enrichment-format text|date|number|options|email|phone|url --body @json  # [create-POST]
 exa-agent websets enrichments get    WEBSET ENRICHMENT_ID
 exa-agent websets enrichments update WEBSET ENRICHMENT_ID --set path=value
 exa-agent websets enrichments delete WEBSET ENRICHMENT_ID --yes
 exa-agent websets enrichments cancel WEBSET ENRICHMENT_ID --yes
 
+# exports
+exa-agent websets exports create WEBSET --format csv|json       # [create-POST]
+exa-agent websets exports get    WEBSET EXPORT_ID
+
 # imports
-exa-agent websets imports create --source csv --url URL             # [create-POST]; returns uploadUrl
-exa-agent websets imports create --csv FILE                         # convenience: create then upload (explicit only)
+exa-agent websets imports create --set format=csv …                 # [create-POST]; returns uploadUrl + nextActions PUT template (D40d)
 exa-agent websets imports list   --limit N --cursor TOKEN --all
 exa-agent websets imports get    IMPORT_ID
 exa-agent websets imports update IMPORT_ID --set path=value
@@ -594,14 +609,14 @@ Notes:
 
 ## 5. Deprecations
 
-Kept for breadth; each warns on stderr (`warnings[]`) with the recommended replacement.
+Kept for breadth where upstream still exists; deprecated surfaces warn on stderr (`warnings[]`). The retired `research` stub returns a structured usage error instead.
 
 | Surface / flag | Status | Replacement |
 |---|---|---|
 | `similar` / `POST /findSimilar` | Deprecated upstream | `search --similar-to URL` |
 | `--livecrawl never\|always\|fallback\|preferred` | Deprecated | `--max-age-hours N` / `--fresh` / `--cache-only` |
 | `--context` / `--context-max-characters` | Deprecated | `--highlights` / `--text` |
-| `research` / `/research/v1` | Legacy | `agent run` |
+| `research` / `/research/v1` | Retired | `search --type deep-reasoning` |
 | `useAutoprompt` | Removed from schema | not exposed; not a flag |
 | legacy highlight count/sentence sizing | Deprecated | `--highlights N` / `--highlight-max-characters` |
 | `resolvedSearchType`, response `context` | Deprecated upstream fields | ignore; not surfaced as flags |

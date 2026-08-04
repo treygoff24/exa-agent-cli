@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.0 — 2026-08-04
+
+Restores typed parity with the current Exa API under D16/D40: the surface now matches the live spec (2.0.0 as served 2026-08-03) and the documented docs-only endpoints. OpenAI-compatible routes remain raw-only; MPP/x402 remain unsupported (`raw` covers them; see decisions.md D40).
+
+### Breaking
+
+- **Research commands are now a local retirement stub.** Upstream retired `/research/v1` (HTTP 410 `RESEARCH_RETIRED`). `research create|get|list` no longer call the network; each exits 1 with error code `research_retired` and a copy-pasteable replacement — `research create "<query>"` interpolates your query into `exa-agent search "<query>" --type deep-reasoning`. The three operations left `capabilities`, and the registry count is now 67.
+- **`websets imports create --csv/--url` removed.** They were advertised but returned `not_implemented`. The documented flow is create → `PUT` your file to the returned `uploadUrl`; the create envelope now carries a ready-to-paste `nextActions` curl template for that second step. A one-shot convenience returns only alongside a resumable-upload design (D40d).
+
+### Added
+
+- **Websets exports**: `websets exports create <webset> --format csv|json` and `websets exports get <webset> <export-id>` (docs-only endpoints, overlay-defined like `/context`; `create` is idempotency-sensitive under D7 and its envelope points at the matching `exports get`).
+- **`websets get --expand items`** — a real query-string parameter; `--set expand=items` is also lifted into the query for this command instead of landing in a GET body.
+- **Named flags**: `search --output-schema`, `search --system-prompt`, `agent runs create --system-prompt`, `contents --highlights [QUERY]`.
+- **Category `publication`** accepted on `search`/`similar` (the canonical spelling upstream renamed from `research paper`). Legacy spellings on typed flags — `research paper`, `fiber_ai`, `particle_news` — are coerced to canonical and flagged with a structured `legacy_value_coerced` warning; `--body`/`--set` values pass through untouched.
+- **`-o`/`--output FILE`** writes the full response envelope to a file; stdout receives a small confirmation envelope instead, independent of the automatic spill-on-size behavior. Same-path collisions with `--secret-output` are refused before any request is sent.
+- Live `contents`/`fetch` and `answer`/`ask` envelopes carry the `outcome` field (`full`/`partial`/`no_content`) plus per-item `contentDiagnostics[]` (crawl status, error tag, HTTP status, inferred content type); answer/ask emit an empty diagnostics array because the upstream response exposes no per-citation crawl data.
+- New exit code `13` (`billing`) and error code `insufficient_credits` for HTTP 402. An
+  out-of-credits account previously surfaced as `invalid_value` / exit `1` — a *usage* error —
+  so callers read it as "my flags were wrong" and retried with different arguments against an
+  account that could not pay for any of them. The 402 path now says the account is out of
+  credits, names the top-up URL, is marked non-retryable, and is skipped by the retry policy.
+  Credit exhaustion is also detected from a `NO_MORE_CREDITS` body on any 4xx, since the tag has
+  been observed outside 402.
+- `auth test` and `doctor --online` distinguish "credential valid but account out of credits"
+  from both acceptance and rejection. The Exa API publishes no balance endpoint, so this
+  billing-free probe is the only credit preflight available.
+
+### Changed
+
+- Re-vendored both OpenAPI snapshots (drift absorbed: crawl-date fields now marked deprecated upstream, `evaluate` on webset import scoping, `scopeId`, integer `limit`/`employees` types, entity research fields, publication `abstract`/`doi`, 402 responses on search/contents).
+
+### Fixed
+
+- Rejected enum flag values now name the accepted set. `similar --category github` reported only
+  `invalid value 'github' for '--category <CATEGORY>'`; it now lists the six valid categories.
+  (`search --category` already did this.)
+- `contents` and `fetch` rows whose upstream crawl failed with an empty `error: {}` now carry
+  `error_reason: "upstream_reason_unavailable"` in `contentDiagnostics[]` instead of a bare
+  `crawl_status: "error"` with no reason at all. The matching per-URL warning label no longer
+  depends on a fallback command being constructible. This complements the 0.4.0 `outcome` field
+  (`full`/`partial`/`no_content`) on the same result rows.
+- `probe_inconclusive` and `invalid_field_type` were emitted but missing from the published
+  `errorCodes` dictionary; both are now declared.
+
 ## 0.4.0 — 2026-07-16
 
 ### Changed

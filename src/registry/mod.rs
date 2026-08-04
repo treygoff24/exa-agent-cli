@@ -150,6 +150,18 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
         .iter()
         .find(|field| field.flag == flag)?;
     let name = field.input_name?;
+    if command == "contents" && flag == "highlights" {
+        return Some(
+            "Return highlights, optionally using a query or inline JSON options object."
+                .to_string(),
+        );
+    }
+    if flag == "output-schema" {
+        return Some(format!(
+            "Set the `{}` request field; accepts inline JSON or @file.",
+            field.body_path
+        ));
+    }
     match field_range(field) {
         Some((min, max)) if flag == "text" => Some(format!(
             "Optional character cap: {name} accepts bare, `full`, or {min}..={max}."

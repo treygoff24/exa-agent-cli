@@ -416,6 +416,7 @@ Returns `data.response`, `data.resultsCount`, `data.searchTime`, `data.outputTok
 exa-agent agent run QUERY
 exa-agent agent runs create QUERY
   --output-schema JSON|@file   # JSON Schema draft-07/2019-09/2020-12
+  --system-prompt TEXT|@file  # additional instructions for the run
   --input JSON|@file           # request.input (rows + exclusions)
   --input-row JSON             # repeatable convenience → input.data[]
   --exclusion JSON|@file       # input.exclusion

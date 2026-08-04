@@ -640,11 +640,36 @@ fn build_search_spec(
             .transpose()?
             .map(|value| value.to_string());
     }
+    if let Some((_, value)) = flag_values
+        .iter_mut()
+        .find(|(flag, _)| *flag == "system-prompt")
+    {
+        *value = args
+            .system_prompt
+            .as_deref()
+            .map(|raw| read_system_prompt_arg(raw, "search", &args.query))
+            .transpose()?;
+    }
     let flag_values = normalize_content_flag_values(op, flag_values, &args.query)?;
     let mut spec = build_typed_spec(op, &flag_values, globals)?;
     normalize_and_validate_search_body(&mut spec.body, &args.query)?;
     validate_content_options(op, &spec.body)?;
     Ok(spec)
+}
+
+fn read_system_prompt_arg(raw: &str, command: &str, query: &str) -> Result<String, CliError> {
+    let value = request::read_text_value_arg(raw, "system-prompt")?;
+    if value.trim().is_empty() {
+        return Err(CliError::Usage(
+            Diag::new("invalid_value", "`--system-prompt` must not be empty").with_suggestion(
+                format!(
+                    "exa-agent {command} {} --system-prompt \"instructions\"",
+                    shell_quote(query)
+                ),
+            ),
+        ));
+    }
+    Ok(value)
 }
 
 fn validate_search_intent_args(args: &SearchArgs) -> Result<(), CliError> {
@@ -1875,6 +1900,11 @@ fn build_agent_run_spec(
         .transpose()?
         .map(|value| value.to_string());
     let data_sources = agent_data_sources_json(&args.data_source)?;
+    let system_prompt = args
+        .system_prompt
+        .as_deref()
+        .map(|raw| read_system_prompt_arg(raw, "agent runs create", &args.query))
+        .transpose()?;
     let metadata = args
         .metadata
         .as_deref()
@@ -1884,7 +1914,7 @@ fn build_agent_run_spec(
     let flag_values = [
         ("query", Some(args.query.clone())),
         ("output-schema", output_schema),
-        ("system-prompt", args.system_prompt.clone()),
+        ("system-prompt", system_prompt),
         ("input", input),
         ("input-row", input_rows),
         ("exclusion", exclusion),
@@ -4929,6 +4959,14 @@ fn normalize_contents_highlights_flag(raw: &str) -> String {
     if raw.is_empty() {
         return "true".to_string();
     }
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if value.is_object() {
+                return value.to_string();
+            }
+        }
+    }
     serde_json::json!({ "query": raw }).to_string()
 }
 
@@ -7183,7 +7221,11 @@ fn dispatch_robot_docs(sub: &RobotDocsCmd, pretty: bool) -> Result<i32, CliError
                     "Use --dry-run --print-request before live mutations.",
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
-                    "Named output controls include search --output-schema JSON and --system-prompt TEXT, contents --highlights [QUERY], and agent runs create --system-prompt TEXT.",
+                    "Named output controls include search --output-schema JSON|@file and --system-prompt TEXT|@file, contents --highlights [QUERY|JSON], and agent runs create --system-prompt TEXT|@file.",
+                    "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
+                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `websets exports get WEBSET EXPORT_ID`.",
+                    "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
+                    "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
                     "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
                     "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
@@ -7635,7 +7677,14 @@ fn content_option_shape_issue(
             "text",
             "text",
             text_input_range(op),
-        ),
+        )
+        .or_else(|| {
+            validate_highlights_option_shape(
+                body_value_at_path(body, "highlights"),
+                "highlights",
+                "highlights",
+            )
+        }),
         _ => None,
     }
 }

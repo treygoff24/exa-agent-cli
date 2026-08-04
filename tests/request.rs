@@ -388,6 +388,7 @@ fn agent_runs_create_fields_map_query_effort_and_omits_stream_body() {
                 "output-schema",
                 Some(json!({"type":"object","properties":{"name":{"type":"string"}}}).to_string()),
             ),
+            ("system-prompt", Some("Prefer primary sources.".into())),
             (
                 "input",
                 Some(json!({"exclusion":[{"domain":"old.example"}]}).to_string()),
@@ -417,6 +418,7 @@ fn agent_runs_create_fields_map_query_effort_and_omits_stream_body() {
         spec.body["outputSchema"],
         json!({"type":"object","properties":{"name":{"type":"string"}}})
     );
+    assert_eq!(spec.body["systemPrompt"], "Prefer primary sources.");
     assert_eq!(
         spec.body["input"]["data"],
         json!([{"company":"OpenAI"},{"company":"Anthropic"}])

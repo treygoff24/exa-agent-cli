@@ -658,7 +658,7 @@ pub struct ContentsArgs {
         num_args = 1
     )]
     pub summary_query: Option<String>,
-    /// Return highlights, optionally guided by a custom query.
+    /// Return highlights, optionally guided by a custom query or JSON options object.
     #[arg(
         long,
         help = crate::registry::field_input_help("contents", "highlights").expect("contents highlights metadata"),
@@ -747,7 +747,11 @@ pub struct AnswerArgs {
     pub text: bool,
     #[arg(long)]
     pub stream: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("answer", "output-schema").expect("answer output-schema metadata"),
+        value_name = crate::registry::field_value_name("answer", "output-schema").expect("answer output-schema metadata")
+    )]
     pub output_schema: Option<String>,
 }
 
@@ -892,7 +896,12 @@ pub struct AgentRunsEventsArgs {
 #[derive(Args, Debug)]
 pub struct AgentRunArgs {
     pub query: String,
-    #[arg(long)]
+    /// JSON Schema for structured agent output; accepts inline JSON or `@file`.
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("agent runs create", "output-schema").expect("agent output-schema metadata"),
+        value_name = crate::registry::field_value_name("agent runs create", "output-schema").expect("agent output-schema metadata")
+    )]
     pub output_schema: Option<String>,
     #[arg(
         long,

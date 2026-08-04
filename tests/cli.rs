@@ -744,6 +744,7 @@ fn search_help_shows_highlight_flags_and_global_options() {
     assert!(help.contains("--no-highlights"), "help: {help}");
     assert!(help.contains("--highlights"), "help: {help}");
     assert!(help.contains("--output-schema"), "help: {help}");
+    assert!(help.contains("inline JSON or @file"), "help: {help}");
     assert!(help.contains("--system-prompt"), "help: {help}");
     assert!(help.contains("Global options"), "help: {help}");
 }
@@ -761,6 +762,10 @@ fn named_flag_help_covers_contents_highlights_and_agent_system_prompt() {
     let agent_help = run(&["agent", "runs", "create", "--help"]);
     assert!(agent_help.status.success());
     let agent_help = String::from_utf8_lossy(&agent_help.stdout);
+    assert!(
+        agent_help.contains("inline JSON or @file"),
+        "help: {agent_help}"
+    );
     assert!(agent_help.contains("--system-prompt"), "help: {agent_help}");
 }
 
@@ -1794,6 +1799,84 @@ fn search_system_prompt_flag_maps_to_system_prompt() {
 }
 
 #[test]
+fn system_prompt_at_file_maps_to_both_commands() {
+    let dir = temp_path("system-prompt");
+    let prompt_path = dir.join("prompt.txt");
+    fs::write(&prompt_path, "Prefer primary sources.\n").unwrap();
+    let prompt_arg = format!("@{}", prompt_path.display());
+
+    let search = run_ok_json(&[
+        "search",
+        "rust async",
+        "--system-prompt",
+        &prompt_arg,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        search["data"]["request"]["body"]["systemPrompt"],
+        "Prefer primary sources.\n"
+    );
+
+    let agent = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "research accounts",
+        "--system-prompt",
+        &prompt_arg,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        agent["data"]["request"]["body"]["systemPrompt"],
+        "Prefer primary sources.\n"
+    );
+}
+
+#[test]
+fn system_prompt_missing_file_is_structured_error() {
+    let path = temp_path("missing-system-prompt").join("missing.txt");
+    let path_arg = format!("@{}", path.display());
+    let output = run_owned(&[
+        "search".into(),
+        "q".into(),
+        "--system-prompt".into(),
+        path_arg,
+        "--compact".into(),
+    ]);
+    assert_eq!(output.status.code(), Some(11));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "no_input");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(path.to_str().unwrap()));
+}
+
+#[test]
+fn empty_system_prompt_is_rejected_for_both_commands() {
+    for args in [
+        vec!["search", "q", "--system-prompt", "   ", "--compact"],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--system-prompt",
+            "\t \n",
+            "--compact",
+        ],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(error["error"]["code"], "invalid_value");
+        assert!(error["error"]["suggestedCommand"].is_string());
+    }
+}
+
+#[test]
 fn agent_system_prompt_flag_maps_to_system_prompt() {
     let json = run_ok_json(&[
         "agent",
@@ -1808,6 +1891,44 @@ fn agent_system_prompt_flag_maps_to_system_prompt() {
     assert_eq!(
         json["data"]["request"]["body"]["systemPrompt"],
         "Avoid duplicate results."
+    );
+}
+
+#[test]
+fn output_schema_failure_modes_are_structured_errors() {
+    let invalid_json = run(&["search", "q", "--output-schema", "not-json", "--compact"]);
+    assert_eq!(invalid_json.status.code(), Some(1));
+    let invalid_json_error = stderr_json(&invalid_json);
+    assert_eq!(invalid_json_error["error"]["code"], "invalid_value");
+    assert_eq!(
+        invalid_json_error["error"]["message"],
+        "`--output-schema` is not valid JSON"
+    );
+
+    let missing_path = temp_path("missing-output-schema").join("missing.json");
+    let missing_arg = format!("@{}", missing_path.display());
+    let missing_file = run_owned(&[
+        "search".into(),
+        "q".into(),
+        "--output-schema".into(),
+        missing_arg,
+        "--compact".into(),
+    ]);
+    assert_eq!(missing_file.status.code(), Some(11));
+    let missing_error = stderr_json(&missing_file);
+    assert_eq!(missing_error["error"]["code"], "no_input");
+    assert!(missing_error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(missing_path.to_str().unwrap()));
+
+    let bare_at = run(&["search", "q", "--output-schema", "@", "--compact"]);
+    assert_eq!(bare_at.status.code(), Some(1));
+    let bare_at_error = stderr_json(&bare_at);
+    assert_eq!(bare_at_error["error"]["code"], "invalid_value");
+    assert_eq!(
+        bare_at_error["error"]["message"],
+        "`--output-schema @` requires a file path"
     );
 }
 
@@ -1834,6 +1955,35 @@ fn contents_highlights_flag_maps_to_spec_shape() {
         "--compact",
     ]);
     assert_eq!(bare["data"]["request"]["body"]["highlights"], true);
+
+    let object = run_ok_json(&[
+        "contents",
+        "https://exa.ai",
+        "--highlights",
+        r#" {"query":"Key advancements","maxCharacters":1200} "#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        object["data"]["request"]["body"]["highlights"],
+        serde_json::json!({"query":"Key advancements","maxCharacters":1200})
+    );
+}
+
+#[test]
+fn contents_highlights_body_shape_is_validated() {
+    let output = run(&[
+        "contents",
+        "https://exa.ai",
+        "--body",
+        r#"{"highlights":"not-an-options-object"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_field_type");
+    assert_eq!(error["error"]["details"]["field"], "highlights");
 }
 
 #[test]
@@ -1845,6 +1995,24 @@ fn search_output_schema_flag_is_overridden_by_set() {
         r#"{"type":"object"}"#,
         "--set",
         r#"outputSchema={"type":"string"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"string"})
+    );
+}
+
+#[test]
+fn search_output_schema_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--body",
+        r#"{"outputSchema":{"type":"string"}}"#,
         "--dry-run",
         "--compact",
     ]);
@@ -1870,6 +2038,41 @@ fn search_system_prompt_flag_is_overridden_by_set() {
 }
 
 #[test]
+fn search_system_prompt_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "search",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--body",
+        r#"{"systemPrompt":"from body"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from body");
+}
+
+#[test]
+fn agent_output_schema_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--body",
+        r#"{"outputSchema":{"type":"string"}}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        json["data"]["request"]["body"]["outputSchema"],
+        serde_json::json!({"type":"string"})
+    );
+}
+
+#[test]
 fn agent_system_prompt_flag_is_overridden_by_set() {
     let json = run_ok_json(&[
         "agent",
@@ -1884,6 +2087,23 @@ fn agent_system_prompt_flag_is_overridden_by_set() {
         "--compact",
     ]);
     assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from set");
+}
+
+#[test]
+fn agent_system_prompt_flag_is_overridden_by_body() {
+    let json = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--system-prompt",
+        "from flag",
+        "--body",
+        r#"{"systemPrompt":"from body"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["data"]["request"]["body"]["systemPrompt"], "from body");
 }
 
 #[test]

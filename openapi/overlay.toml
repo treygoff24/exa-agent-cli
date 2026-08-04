@@ -497,6 +497,10 @@ kind = "bool"
 flag = "output-schema"
 body_path = "outputSchema"
 kind = "json"
+input_kind = "flag"
+input_name = "--output-schema"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
 
 [[operations."findSimilar".fields]]
 flag = "url"
@@ -553,7 +557,7 @@ body_path = "outputSchema"
 kind = "json"
 input_kind = "flag"
 input_name = "--output-schema"
-value_name = "JSON"
+value_name = "JSON|@file"
 arity = { min = 1, max = 1 }
 
 [[operations."search".fields]]
@@ -562,7 +566,7 @@ body_path = "systemPrompt"
 kind = "str"
 input_kind = "flag"
 input_name = "--system-prompt"
-value_name = "TEXT"
+value_name = "TEXT|@file"
 arity = { min = 1, max = 1 }
 
 [[operations."search".fields]]
@@ -754,6 +758,10 @@ arity = { min = 1, max = 1 }
 flag = "output-schema"
 body_path = "outputSchema"
 kind = "json"
+input_kind = "flag"
+input_name = "--output-schema"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
 
 [[operations."createAgentRun".fields]]
 flag = "system-prompt"
@@ -761,7 +769,7 @@ body_path = "systemPrompt"
 kind = "str"
 input_kind = "flag"
 input_name = "--system-prompt"
-value_name = "TEXT"
+value_name = "TEXT|@file"
 arity = { min = 1, max = 1 }
 
 [[operations."createAgentRun".fields]]

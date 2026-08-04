@@ -6,9 +6,9 @@ The Exa MCP is good at what it does. For a Claude Desktop or Cursor user who wan
 
 The MCP exposes 4 tools: `web_search_exa`, `web_fetch_exa`, `web_search_advanced_exa`, and `agent_run`. That covers `/search`, `/contents`, and the Agent API.
 
-The Exa Public API (spec 2.0.0) also has: `/answer`, `/findSimilar`, `/context` (exa-code), the research endpoints, search Monitors (create/list/get/update/delete/trigger, plus runs), the entire Websets tree (websets, items, searches, enrichments, imports, monitors, webhooks, webhook attempts, events), and the Team Management API for key administration. None of that is reachable through the MCP today.
+The Exa Public API (spec 2.0.0) also has: `/answer`, `/findSimilar`, `/context` (exa-code), search Monitors (create/list/get/update/delete/trigger, plus runs), the entire Websets tree (websets, items, searches, enrichments, imports, exports, monitors, webhooks, webhook attempts, events), and the Team Management API for key administration. None of that is reachable through the MCP today.
 
-`exa-agent` wraps all of it: 68 generated API commands across ~20 namespaces, generated at build time from the committed OpenAPI spec, plus a `raw` passthrough so anything Exa ships tomorrow is usable before we model it. When an agent's job is "stand up a Webset, attach an enrichment, wire a webhook, monitor it weekly," the MCP has no verbs for any of those sentences.
+`exa-agent` wraps all of it: 67 generated API commands across ~20 namespaces, generated at build time from the committed OpenAPI spec, plus a `raw` passthrough so anything Exa ships tomorrow is usable before we model it. When an agent's job is "stand up a Webset, attach an enrichment, wire a webhook, monitor it weekly," the MCP has no verbs for any of those sentences.
 
 ## 2. Context-window economics
 

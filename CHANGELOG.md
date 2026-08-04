@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## 0.5.0 — 2026-08-04
+
+Restores typed parity with the current Exa API under D16/D40: the surface now matches the live spec (2.0.0 as served 2026-08-03) and the documented docs-only endpoints, with OpenAI-compat routes and MPP/x402 access modes intentionally deferred (`raw` covers them; see decisions.md D40).
+
+### Breaking
+
+- **Research commands are now a local retirement stub.** Upstream retired `/research/v1` (HTTP 410 `RESEARCH_RETIRED`). `research create|get|list` no longer call the network; each exits 1 with error code `research_retired` and a copy-pasteable replacement — `research create "<query>"` interpolates your query into `exa-agent search "<query>" --type deep-reasoning`. The three operations left `capabilities`, and the registry count is now 67.
+- **`websets imports create --csv/--url` removed.** They were advertised but returned `not_implemented`. The documented flow is create → `PUT` your file to the returned `uploadUrl`; the create envelope now carries a ready-to-paste `nextActions` curl template for that second step. A one-shot convenience returns only alongside a resumable-upload design (D40d).
+
+### Added
+
+- **Websets exports**: `websets exports create <webset> --format csv|json` and `websets exports get <webset> <export-id>` (docs-only endpoints, overlay-defined like `/context`; `create` is idempotency-sensitive under D7 and its envelope points at the matching `exports get`).
+- **`websets get --expand items`** — a real query-string parameter; `--set expand=items` is also lifted into the query for this command instead of landing in a GET body.
+- **Named flags**: `search --output-schema`, `search --system-prompt`, `agent runs create --system-prompt`, `contents --highlights [QUERY]`.
+- **Category `publication`** accepted on `search`/`similar` (the canonical spelling upstream renamed from `research paper`). Legacy spellings on typed flags — `research paper`, `fiber_ai`, `particle_news` — are coerced to canonical and flagged with a structured `legacy_value_coerced` warning; `--body`/`--set` values pass through untouched.
+
+### Changed
+
+- Re-vendored both OpenAPI snapshots (drift absorbed: crawl-date fields now marked deprecated upstream, `evaluate` on webset import scoping, `scopeId`, integer `limit`/`employees` types, entity research fields, publication `abstract`/`doi`, 402 responses on search/contents).
+
 ## Unreleased
 
 ### Added

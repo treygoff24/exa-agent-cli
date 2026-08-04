@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, research, monitors, the whole Websets tree, and team/key administration — as 68 non-interactive commands. Every call prints exactly one JSON envelope and returns a stable exit code. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 67 non-interactive commands. Every call prints exactly one JSON envelope and returns a stable exit code. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 
@@ -110,7 +110,7 @@ Dispatch-level body validation runs before credential resolution and network I/O
 These run with no credential and no network call:
 
 ```sh
-exa-agent capabilities --json    # all 68 commands: method, path, read-only/destructive/idempotency-sensitive, full exit-code + error-code dictionaries, embedded spec hash
+exa-agent capabilities --json    # all 67 commands: method, path, read-only/destructive/idempotency-sensitive, full exit-code + error-code dictionaries, embedded spec hash
 exa-agent robot-docs guide        # short paste-ready playbook for agents
 exa-agent schema --help           # embedded API/CLI schema
 exa-agent doctor                  # read-only health checks (add --online for a live probe)

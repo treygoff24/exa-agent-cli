@@ -586,7 +586,7 @@ fn rewrite_argv_value_for(
     for arg in args.iter_mut().skip(1) {
         let bound_to_owner = match (&owner_long, &previous) {
             (Some(owner), Some(prev)) => prev == owner,
-            // No owner flag recoverable: any match is the best we can do (old behavior).
+            // No owner flag is recoverable, so replace the first matching token.
             (None, _) => true,
             _ => false,
         };

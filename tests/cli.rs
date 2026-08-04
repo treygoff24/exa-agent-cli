@@ -2503,9 +2503,7 @@ fn contents_partial_url_failures_warn_and_exit_zero() {
     assert_eq!(json["outcome"], "partial");
 }
 
-/// End-to-end proof of the papercut cluster's root cause: an out-of-credits account must exit 13
-/// with `insufficient_credits`, not exit 1 with `invalid_value`. Exit 1 read as "bad flags" and
-/// sent agents into three or four more doomed retries before they switched research lanes.
+/// An out-of-credits account exits 13 with `insufficient_credits`, not exit 1 with `invalid_value`.
 #[test]
 fn search_out_of_credits_exits_billing_not_usage() {
     let (base_url, server) = local_json_server_with_status(
@@ -9019,7 +9017,7 @@ fn debug_redacts_global_secret_values() {
     assert!(dbg.contains("<redacted>"));
 }
 
-// --- Endgame regressions (2026-08-03 review) -------------------------------------------------
+// Output safety and preview regressions.
 
 /// `--output` writing over the reserved `--secret-output` file destroyed the only copy of a
 /// one-time secret and still exited 0. The combination is refused before anything is sent.
@@ -9234,7 +9232,6 @@ fn capabilities_honors_output_and_confirms_on_stdout() {
     assert_eq!(confirmation["dataTruncated"], true);
     assert_eq!(confirmation["dataPath"], output_path.to_str().unwrap());
     assert_eq!(confirmation["command"], "capabilities");
-    // The point of --output is that stdout stays small.
     assert!(output.stdout.len() < fs::read(&output_path).unwrap().len());
 
     let written: serde_json::Value =
@@ -9458,7 +9455,6 @@ fn export_format_rewrite_ignores_matching_positional_arguments() {
     let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(preview["command"], "contents");
 
-    // The real command still gets the documented `--format` spelling.
     let export = run(&[
         "websets",
         "exports",

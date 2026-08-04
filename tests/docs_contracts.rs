@@ -5,8 +5,7 @@ fn commands_doc_matches_contents_mixed_outcome_exit_contract() {
     assert!(!commands.contains("batch with mixed outcomes exits 10"));
 }
 
-/// The §5.1 table drifted three codes behind the binary before anyone noticed, because nothing
-/// compared them. Pin both directions plus the count AGENTS.md publishes.
+/// Keep the §5.1 error-code table and the published count synchronized with the binary.
 #[test]
 fn contracts_error_dictionary_matches_the_binary() {
     let contracts = include_str!("../docs/v2/contracts.md");

@@ -335,8 +335,7 @@ fn ci() -> Result<()> {
             "warnings",
         ],
     )?;
-    // A caller-level EXA_AGENT_NO_NETWORK is meant for the generator steps above; if it
-    // leaks into cargo test it false-fails the loopback/fake-transport suites (pc_7281ca17bc9a).
+    // Generator-only EXA_AGENT_NO_NETWORK must not reach loopback/fake-transport tests.
     run_without_env(
         "cargo",
         &["test", "--workspace", "--locked"],

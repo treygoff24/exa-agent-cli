@@ -6,7 +6,7 @@ use exa_agent_cli::transport;
 use std::fs;
 use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -115,6 +115,25 @@ fn run_ok_json(args: &[&str]) -> serde_json::Value {
 
 fn stderr_json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stderr).unwrap_or_else(|e| panic!("stderr was not JSON: {e}"))
+}
+
+fn assert_secret_capture(output: Output, secret_path: &Path, secret: &str) {
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        !stdout.contains(secret),
+        "secret must never appear on stdout"
+    );
+    assert!(stdout.contains("<redacted>"));
+    assert_eq!(
+        fs::read_to_string(secret_path).expect("secret file"),
+        secret
+    );
 }
 
 fn assert_confirmation_required(output: &Output, command: &str) -> serde_json::Value {
@@ -5775,17 +5794,7 @@ fn monitor_create_live_captures_webhook_secret_and_redacts_stdout() {
         "--compact".into(),
     ]);
     server.join().expect("local monitor create server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(!stdout.contains("whsec_live_capture_12345"));
-    assert!(stdout.contains("<redacted>"));
-    let secret = fs::read_to_string(&secret_path).expect("secret file");
-    assert_eq!(secret, "whsec_live_capture_12345");
+    assert_secret_capture(output, &secret_path, "whsec_live_capture_12345");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -7766,17 +7775,7 @@ fn websets_webhooks_create_live_captures_secret_and_redacts_stdout() {
     server
         .join()
         .expect("local websets webhook create server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(!stdout.contains("whsec_websets_capture_12345"));
-    assert!(stdout.contains("<redacted>"));
-    let secret = fs::read_to_string(&secret_path).expect("secret file");
-    assert_eq!(secret, "whsec_websets_capture_12345");
+    assert_secret_capture(output, &secret_path, "whsec_websets_capture_12345");
 }
 
 #[test]
@@ -8490,19 +8489,7 @@ fn admin_keys_create_captures_key_to_file_and_redacts_stdout() {
         ],
     );
     server.join().expect("local admin create server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(
-        !stdout.contains("exa_minted_live_secret_123"),
-        "minted key must never appear on stdout: {stdout}"
-    );
-    let secret = fs::read_to_string(&secret_path).expect("secret file");
-    assert_eq!(secret, "exa_minted_live_secret_123");
+    assert_secret_capture(output, &secret_path, "exa_minted_live_secret_123");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

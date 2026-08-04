@@ -1251,15 +1251,12 @@ fn typed_category_alias_warnings(
     if given.is_some_and(|value| value.trim().eq_ignore_ascii_case("research paper"))
         && body.get("category").and_then(serde_json::Value::as_str) == Some("publication")
     {
-        return vec![serde_json::json!({
-            "code": "legacy_value_coerced",
-            "message": "legacy category spelling was coerced to the canonical publication value",
-            "details": {
-                "field": "category",
-                "given": given.unwrap_or_default(),
-                "sent": "publication"
-            }
-        })];
+        return vec![legacy_value_coerced_warning(
+            "category",
+            given.unwrap_or_default(),
+            "publication",
+            "legacy category spelling was coerced to the canonical publication value",
+        )];
     }
     Vec::new()
 }
@@ -1773,7 +1770,6 @@ fn dispatch_admin_keys_create(
                 ),
             ));
         };
-        ensure_output_targets_distinct(globals, secret_path)?;
         let secret_output = reserve_webhook_secret_file(secret_path)?;
         dispatch_typed_command_with_extras(
             spec,
@@ -2272,17 +2268,33 @@ fn typed_provider_alias_warnings(
             } else {
                 return None;
             };
-            sent.contains(&sent_value).then_some(serde_json::json!({
-                "code": "legacy_value_coerced",
-                "message": format!("legacy data-source provider spelling was coerced to `{canonical}`"),
-                "details": {
-                    "field": "provider",
-                    "given": raw,
-                    "sent": canonical
-                }
-            }))
+            sent.contains(&sent_value).then(|| {
+                legacy_value_coerced_warning(
+                    "provider",
+                    raw,
+                    canonical,
+                    format!("legacy data-source provider spelling was coerced to `{canonical}`"),
+                )
+            })
         })
         .collect()
+}
+
+fn legacy_value_coerced_warning(
+    field: &str,
+    given: &str,
+    sent: &str,
+    message: impl Into<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": "legacy_value_coerced",
+        "message": message.into(),
+        "details": {
+            "field": field,
+            "given": given,
+            "sent": sent
+        }
+    })
 }
 
 fn dispatch_agent_runs_list(
@@ -2597,10 +2609,7 @@ fn dispatch_monitor_create(
         let secret_output = args
             .secret_output
             .as_deref()
-            .map(|path| {
-                ensure_output_targets_distinct(globals, path)?;
-                reserve_webhook_secret_file(path)
-            })
+            .map(reserve_webhook_secret_file)
             .transpose()?;
         dispatch_typed_command_with_extras(
             spec,
@@ -4771,10 +4780,7 @@ fn dispatch_websets_webhooks_create(
         let secret_output = args
             .secret_output
             .as_deref()
-            .map(|path| {
-                ensure_output_targets_distinct(globals, path)?;
-                reserve_webhook_secret_file(path)
-            })
+            .map(reserve_webhook_secret_file)
             .transpose()?;
         dispatch_typed_command_with_extras(
             spec,

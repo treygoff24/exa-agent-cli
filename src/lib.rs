@@ -47,8 +47,8 @@ use output::{
 use request::RequestOverrides;
 use transport::{
     body_wants_stream, execute_raw_stream_with_request_id, execute_raw_with_request_id,
-    infer_stream_event_type, parse_user_headers, terminal_stream_data, RawExecuteParams,
-    StreamItem, Transport, UreqTransport,
+    infer_stream_event_type, parse_user_headers, search_terminal_stream_data, terminal_stream_data,
+    RawExecuteParams, StreamItem, Transport, UreqTransport,
 };
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
@@ -2161,7 +2161,7 @@ fn build_agent_run_spec(
         .map(|raw| request::read_json_value_arg(raw, "exclusion"))
         .transpose()?
         .map(|value| value.to_string());
-    let data_sources = agent_data_sources_json(&args.data_source)?;
+    let data_sources = agent_data_sources_json(&args.data_source, &args.query)?;
     let system_prompt = args
         .system_prompt
         .as_deref()
@@ -2209,7 +2209,17 @@ fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError
     Ok(Some(serde_json::Value::Array(rows).to_string()))
 }
 
-fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliError> {
+const AGENT_DATA_SOURCE_PROVIDERS: &[&str] = &[
+    "fiber",
+    "financial_datasets",
+    "similarweb",
+    "baselayer",
+    "affiliate",
+    "particle",
+    "jinko",
+];
+
+fn agent_data_sources_json(providers: &[String], query: &str) -> Result<Option<String>, CliError> {
     if providers.is_empty() {
         return Ok(None);
     }
@@ -2225,20 +2235,42 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
     let mut sources = Vec::with_capacity(providers.len());
     for provider in providers {
         let provider = provider.trim();
-        let provider = if provider.eq_ignore_ascii_case("fiber_ai") {
-            "fiber"
-        } else if provider.eq_ignore_ascii_case("particle_news") {
-            "particle"
-        } else {
-            provider
-        };
         if provider.is_empty() {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 "`--data-source` provider must not be empty",
             )));
         }
-        sources.push(serde_json::json!({ "provider": provider }));
+        let canonical = match provider.to_ascii_lowercase().as_str() {
+            "fiber" | "fiber_ai" => "fiber",
+            "financial_datasets" => "financial_datasets",
+            "similarweb" => "similarweb",
+            "baselayer" => "baselayer",
+            "affiliate" => "affiliate",
+            "particle" | "particle_news" => "particle",
+            "jinko" => "jinko",
+            _ => {
+                return Err(CliError::Usage(
+                    Diag::new(
+                        "invalid_value",
+                        format!(
+                            "invalid `--data-source` provider `{provider}`; accepted providers are {}",
+                            AGENT_DATA_SOURCE_PROVIDERS.join(", ")
+                        ),
+                    )
+                    .with_details(serde_json::json!({
+                        "field": "dataSources.provider",
+                        "given": provider,
+                        "accepted": AGENT_DATA_SOURCE_PROVIDERS,
+                    }))
+                    .with_suggestion(format!(
+                        "exa-agent agent runs create {} --data-source fiber",
+                        shell_quote(query)
+                    )),
+                ));
+            }
+        };
+        sources.push(serde_json::json!({ "provider": canonical }));
     }
     Ok(Some(serde_json::Value::Array(sources).to_string()))
 }
@@ -6434,14 +6466,13 @@ fn execute_streaming_live<T: Transport>(
     transport: &T,
     params: RawExecuteParams<'_>,
     command: &str,
-    operation: Option<&registry::OperationDef>,
+    operation: Option<&'static registry::OperationDef>,
     globals: &GlobalArgs,
     pretty: bool,
     warnings: &[serde_json::Value],
 ) -> Result<i32, CliError> {
-    let answer_request_body = operation
-        .is_some_and(|op| op.command() == "answer")
-        .then(|| params.body.clone());
+    let request_body = params.body.clone();
+    let answer_stream = operation.is_some_and(|op| op.command() == "answer");
     let stream_mode = stream_output_mode(globals, stdout_is_tty());
     let ndjson = !globals.raw && stream_mode == OutputMode::Ndjson;
     let human = !globals.raw && stream_mode == OutputMode::Human;
@@ -6469,6 +6500,7 @@ fn execute_streaming_live<T: Transport>(
                     &mut out,
                     &frame,
                     command,
+                    operation,
                     &mut seq,
                     globals.correlation_id.as_deref(),
                 )?;
@@ -6503,9 +6535,7 @@ fn execute_streaming_live<T: Transport>(
             }
         }
         let mut response_warnings = warnings.to_vec();
-        if let Some(request_body) = answer_request_body.as_ref() {
-            append_answer_warning(request_body, &data, &mut response_warnings);
-        }
+        postprocess_stream_response(operation, &request_body, &mut data, &mut response_warnings);
         let mut envelope = response_envelope(ResponseEnvelopeArgs {
             command,
             method: &result.method,
@@ -6521,14 +6551,8 @@ fn execute_streaming_live<T: Transport>(
             duration_ms: result.duration_ms,
             warnings: &response_warnings,
         });
-        let answer_outcome = answer_request_body
-            .as_ref()
-            .map(|_| transport::answer_outcome(&envelope["data"]));
-        attach_content_metadata(
-            &mut envelope,
-            answer_outcome,
-            answer_request_body.as_ref().map(|_| Vec::new()),
-        );
+        let answer_outcome = answer_stream.then(|| transport::answer_outcome(&envelope["data"]));
+        attach_content_metadata(&mut envelope, answer_outcome, answer_stream.then(Vec::new));
         append_warning_next_actions(&mut envelope);
         if let Some(path) = output_path {
             write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
@@ -6542,11 +6566,18 @@ fn execute_streaming_live<T: Transport>(
         return Ok(0);
     }
 
-    let terminal_data = terminal_stream_data(&frames);
+    let mut terminal_data = if operation.is_some_and(|op| op.operation_id == "search") {
+        search_terminal_stream_data(&frames)?
+    } else {
+        terminal_stream_data(&frames)
+    };
     let mut response_warnings = warnings.to_vec();
-    if let Some(request_body) = answer_request_body.as_ref() {
-        append_answer_warning(request_body, &terminal_data, &mut response_warnings);
-    }
+    postprocess_stream_response(
+        operation,
+        &request_body,
+        &mut terminal_data,
+        &mut response_warnings,
+    );
     let count = transport::primary_count(&terminal_data);
     let hash = transport::data_hash(&terminal_data);
     let mut terminal = response_envelope(ResponseEnvelopeArgs {
@@ -6564,14 +6595,8 @@ fn execute_streaming_live<T: Transport>(
         duration_ms: result.duration_ms,
         warnings: &response_warnings,
     });
-    let answer_outcome = answer_request_body
-        .as_ref()
-        .map(|_| transport::answer_outcome(&terminal["data"]));
-    attach_content_metadata(
-        &mut terminal,
-        answer_outcome,
-        answer_request_body.as_ref().map(|_| Vec::new()),
-    );
+    let answer_outcome = answer_stream.then(|| transport::answer_outcome(&terminal["data"]));
+    attach_content_metadata(&mut terminal, answer_outcome, answer_stream.then(Vec::new));
     append_warning_next_actions(&mut terminal);
     let last_event_id = last_frame_event_id(&frames);
     if let Some(path) = output_path {
@@ -6613,6 +6638,7 @@ fn write_stream_event_ndjson(
     out: &mut impl std::io::Write,
     frame: &transport::SseFrame,
     command: &str,
+    operation: Option<&registry::OperationDef>,
     seq: &mut u64,
     correlation_id: Option<&str>,
 ) -> Result<(), CliError> {
@@ -6624,7 +6650,7 @@ fn write_stream_event_ndjson(
         let event = serde_json::from_str::<serde_json::Value>(chunk)
             .unwrap_or_else(|_| serde_json::Value::String(chunk.clone()));
         let envelope = event_envelope(EventEnvelopeArgs {
-            event_type: infer_stream_event_type(&event),
+            event_type: typed_stream_event_type(operation, &event),
             command,
             seq: next_seq,
             event_id: frame.id.as_deref(),
@@ -6635,6 +6661,21 @@ fn write_stream_event_ndjson(
         *seq = next_seq;
     }
     Ok(())
+}
+
+fn typed_stream_event_type(
+    operation: Option<&registry::OperationDef>,
+    event: &serde_json::Value,
+) -> &'static str {
+    if operation.is_some_and(|op| op.operation_id == "search") {
+        return match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("text-delta") => "delta",
+            Some("done") => "done",
+            Some("error") => "error",
+            _ => "item",
+        };
+    }
+    infer_stream_event_type(event)
 }
 
 fn write_stream_event_human(
@@ -6842,6 +6883,19 @@ fn omit_empty_resolved_search_type(op: &registry::OperationDef, data: &mut serde
     }
 }
 
+fn postprocess_stream_response(
+    operation: Option<&'static registry::OperationDef>,
+    request_body: &serde_json::Value,
+    data: &mut serde_json::Value,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    let Some(op) = operation else {
+        return;
+    };
+    omit_empty_resolved_search_type(op, data);
+    append_response_warnings(op, request_body, data, None, None, warnings);
+}
+
 #[cfg(test)]
 fn stream_ndjson_values(
     result: &transport::RawExecuteResult,
@@ -6929,7 +6983,7 @@ fn request_body_warnings(
     op: &'static registry::OperationDef,
     body: &serde_json::Value,
 ) -> Vec<serde_json::Value> {
-    text_max_characters(op, body)
+    let mut warnings = text_max_characters(op, body)
         .map(|cap| {
             vec![serde_json::json!({
                 "code": "text_capped",
@@ -6939,7 +6993,31 @@ fn request_body_warnings(
                 "suggestedCommand": "exa-agent contents <url> --text full"
             })]
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if op.command() == "search"
+        && body.get("stream").and_then(serde_json::Value::as_bool) == Some(true)
+        && body
+            .get("outputSchema")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<query>");
+        warnings.push(serde_json::json!({
+            "code": "stream_ignored",
+            "message": "Search streaming requires a non-null outputSchema upstream; stream:true falls back to the normal JSON response.",
+            "details": {
+                "field": "outputSchema",
+                "stream": true,
+            },
+            "suggestedCommand": format!(
+                "exa-agent search {} --stream --output-schema '{{\"type\":\"object\"}}'",
+                shell_quote(query)
+            ),
+        }));
+    }
+    warnings
 }
 
 fn text_max_characters(
@@ -7716,6 +7794,8 @@ fn dispatch_robot_docs(
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Named output controls include search --output-schema JSON|@file and --system-prompt TEXT|@file, contents --highlights [QUERY|JSON], and agent runs create --system-prompt TEXT|@file.",
+                    "Search --stream requests SSE for synthesized output. Without a final non-null outputSchema, upstream returns normal JSON and the envelope warns with stream_ignored; --body/--set overrides determine the final request.",
+                    "Agent --data-source accepts fiber, financial_datasets, similarweb, baselayer, affiliate, particle, and jinko case-insensitively (max 5) and sends canonical spellings. Legacy fiber_ai and particle_news remain accepted with legacy_value_coerced; --body/--set values pass through unchanged.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
                     "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
@@ -7761,6 +7841,11 @@ fn dispatch_robot_docs(
                 }).collect::<Vec<_>>(),
                 "errorCodes": error_codes_json(),
                 "warningCodes": [
+                    {
+                        "code": "stream_ignored",
+                        "exit": 0,
+                        "description": "search requested stream:true without a non-null outputSchema, so upstream returned its normal JSON response"
+                    },
                     {
                         "code": "legacy_value_coerced",
                         "exit": 0,
@@ -9832,15 +9917,17 @@ mod tests {
             id: Some("evt-1".into()),
             data: vec![r#"{"type":"progress","message":"first"}"#.into()],
         };
-        write_stream_event_ndjson(&mut out, &first, "agent runs events", &mut seq, None).unwrap();
+        write_stream_event_ndjson(&mut out, &first, "agent runs events", None, &mut seq, None)
+            .unwrap();
         assert_eq!(seq, 1);
 
         let second = transport::SseFrame {
             id: Some("evt-2".into()),
             data: vec![r#"{"type":"progress","message":"second"}"#.into()],
         };
-        let err = write_stream_event_ndjson(&mut out, &second, "agent runs events", &mut seq, None)
-            .unwrap_err();
+        let err =
+            write_stream_event_ndjson(&mut out, &second, "agent runs events", None, &mut seq, None)
+                .unwrap_err();
 
         assert_eq!(err.category(), 12);
         assert_eq!(err.diag().code, "interrupted");
@@ -10489,6 +10576,7 @@ mod tests {
             SearchArgs {
                 query: "rust cli".into(),
                 output_schema: None,
+                stream: false,
                 system_prompt: None,
                 num_results: Some("7".into()),
                 text: Some(String::new()),
@@ -10509,6 +10597,7 @@ mod tests {
             vec![
                 ("query", Some("rust cli".to_string())),
                 ("output-schema", None),
+                ("stream", None),
                 ("system-prompt", None),
                 ("num-results", Some("7".to_string())),
                 ("text", Some(String::new())),
@@ -10636,6 +10725,7 @@ mod tests {
                 &SearchArgs {
                     query: "q".into(),
                     output_schema: None,
+                    stream: false,
                     system_prompt: None,
                     num_results: None,
                     text: None,

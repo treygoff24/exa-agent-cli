@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Added
+
+- `search --stream` now maps to the upstream Search SSE field, is advertised by help and
+  capabilities, and emits `stream_ignored` when upstream will fall back to normal JSON because
+  the final request has no non-null `outputSchema`. Canonical Search SSE events expose
+  `text-delta` as NDJSON `delta` records and reconstruct terminal results, output, timing, and
+  cost metadata. Search stream error events and streams missing a terminal `done` event now
+  fail with structured upstream errors instead of returning partial data as success; malformed
+  or non-terminal `done` events are rejected as upstream contract violations.
+
+### Changed
+
+- Typed `agent runs create --data-source` values are validated case-insensitively against the
+  current provider enum (`fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`,
+  `particle`, `jinko`) and sent canonically. Legacy aliases and explicit `--body`/`--set`
+  pass-through behavior are unchanged.
+
 ## 0.5.0 — 2026-08-04
 
 Restores typed parity with the current Exa API under D16/D40: the surface now matches the live spec (2.0.0 as served 2026-08-03) and the documented docs-only endpoints. OpenAI-compatible routes remain raw-only; MPP/x402 remain unsupported (`raw` covers them; see decisions.md D40).

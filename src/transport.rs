@@ -1468,6 +1468,96 @@ pub fn terminal_stream_data(frames: &[SseFrame]) -> Value {
     }
 }
 
+/// Reconstruct the normal Search response shape from canonical `/search` SSE events.
+pub(crate) fn search_terminal_stream_data(frames: &[SseFrame]) -> Result<Value, CliError> {
+    let mut results = None;
+    let mut first_request_id = None;
+    let mut done = None;
+
+    for event in parsed_stream_events(frames) {
+        let event = event
+            .map_err(|_| search_stream_malformed("Search stream contained a non-JSON event"))?;
+        if done.is_some() {
+            return Err(search_stream_malformed(
+                "Search stream contained an event after the terminal `done` event",
+            ));
+        }
+        if first_request_id.is_none() {
+            first_request_id = event
+                .get("requestId")
+                .and_then(Value::as_str)
+                .filter(|request_id| !request_id.trim().is_empty())
+                .map(str::to_string);
+        }
+        match event.get("type").and_then(Value::as_str) {
+            Some("results") => {
+                results = event.get("results").cloned();
+            }
+            Some("done") => {
+                let done_event = event
+                    .as_object()
+                    .expect("an event with a type field is an object");
+                if !done_event.contains_key("output") {
+                    return Err(search_stream_malformed(
+                        "Search stream `done` event omitted required `output`",
+                    ));
+                }
+                if !done_event.get("searchTime").is_some_and(Value::is_number) {
+                    return Err(search_stream_malformed(
+                        "Search stream `done` event omitted numeric `searchTime`",
+                    ));
+                }
+                done = Some(done_event.clone());
+            }
+            Some("error") => return Err(search_stream_error(&event)),
+            _ => {}
+        }
+    }
+
+    let Some(mut data) = done else {
+        return Err(search_stream_malformed(
+            "Search stream ended before a final `done` event",
+        ));
+    };
+    data.remove("type");
+    data.remove("choices");
+    if let Some(results) = results {
+        data.insert("results".to_string(), results);
+    }
+    if !data.contains_key("requestId") {
+        if let Some(request_id) = first_request_id {
+            data.insert("requestId".to_string(), Value::String(request_id));
+        }
+    }
+    Ok(Value::Object(data))
+}
+
+fn search_stream_malformed(message: &'static str) -> CliError {
+    CliError::Upstream(Diag::new("upstream_malformed", message))
+}
+
+fn search_stream_error(event: &Value) -> CliError {
+    const MESSAGE_CAP_BYTES: usize = 1024;
+
+    let upstream_message = event
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("upstream Search stream error");
+    let safe_message = truncate_at_char_boundary(upstream_message, MESSAGE_CAP_BYTES);
+    let mut diag = Diag::new(
+        "upstream_error",
+        format!("Search stream failed upstream: {safe_message}"),
+    )
+    .with_details(serde_json::json!({
+        "streamEvent": "error",
+        "upstreamMessage": safe_message,
+        "upstreamTruncated": upstream_message.len() > safe_message.len(),
+    }));
+    diag.retryable = true;
+    CliError::Upstream(diag)
+}
+
 fn parsed_stream_events(frames: &[SseFrame]) -> impl Iterator<Item = Result<Value, String>> + '_ {
     frames.iter().flat_map(|frame| {
         frame

@@ -285,6 +285,29 @@ fn local_json_server_with_status<F>(
 where
     F: FnOnce(String) + Send + 'static,
 {
+    local_response_server(validate, status, reason, "application/json", response_body)
+}
+
+fn local_sse_server<F>(
+    validate: F,
+    response_body: &'static [u8],
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(String) + Send + 'static,
+{
+    local_response_server(validate, 200, "OK", "text/event-stream", response_body)
+}
+
+fn local_response_server<F>(
+    validate: F,
+    status: u16,
+    reason: &'static str,
+    content_type: &'static str,
+    response_body: &'static [u8],
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(String) + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -305,13 +328,49 @@ where
         validate(String::from_utf8_lossy(&read_http_request(&mut stream)).into_owned());
         write!(
             stream,
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             response_body.len()
         )
         .unwrap();
         stream.write_all(response_body).unwrap();
     });
     (format!("http://{addr}"), server)
+}
+
+const SEARCH_SSE_FIXTURE: &[u8] = br#"data: {"type":"text-delta","delta":"hello","requestId":"search_req_early"}
+
+data: {"type":"results","results":[{"title":"Rust Async","url":"https://example.com/rust"}],"requestId":"search_req_results"}
+
+data: {"type":"done","output":{"content":{"summary":"hello"},"grounding":[]},"searchTime":1.25,"costDollars":{"total":0.012,"search":{"neural":0.007}},"requestId":"search_req_1"}
+
+data: [DONE]
+
+"#;
+
+fn local_search_sse_server_with_response(
+    response_body: &'static [u8],
+) -> (String, thread::JoinHandle<()>) {
+    local_sse_server(
+        |request| {
+            assert!(request.starts_with("POST /search "), "{request}");
+            assert!(request.contains(r#""stream":true"#), "{request}");
+            assert!(
+                request.contains(r#""outputSchema":{"type":"object"}"#),
+                "{request}"
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("accept: text/event-stream"),
+                "{request}"
+            );
+        },
+        response_body,
+    )
+}
+
+fn local_search_sse_server() -> (String, thread::JoinHandle<()>) {
+    local_search_sse_server_with_response(SEARCH_SSE_FIXTURE)
 }
 
 fn local_sse_stall_server(
@@ -492,6 +551,20 @@ fn capabilities_publish_named_flag_body_paths() {
     };
 
     assert_eq!(field("search", "output-schema")["bodyPath"], "outputSchema");
+    assert_eq!(field("search", "stream")["bodyPath"], "stream");
+    assert_eq!(field("search", "stream")["name"], "--stream");
+    assert_eq!(field("search", "stream")["inputKind"], "flag");
+    assert_eq!(
+        field("search", "stream")["arity"],
+        serde_json::json!({"min": 0, "max": 0})
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .find(|entry| entry["path"] == "search")
+            .expect("search capabilities")["streaming"],
+        true
+    );
     assert_eq!(field("search", "system-prompt")["bodyPath"], "systemPrompt");
     assert_eq!(
         field("agent runs create", "system-prompt")["bodyPath"],
@@ -765,6 +838,7 @@ fn search_help_shows_highlight_flags_and_global_options() {
     assert!(help.contains("--output-schema"), "help: {help}");
     assert!(help.contains("inline JSON or @file"), "help: {help}");
     assert!(help.contains("--system-prompt"), "help: {help}");
+    assert!(help.contains("--stream"), "help: {help}");
     assert!(help.contains("Global options"), "help: {help}");
 }
 
@@ -1815,6 +1889,433 @@ fn search_output_schema_flag_maps_to_output_schema() {
         json["data"]["request"]["body"]["outputSchema"],
         serde_json::json!({"type":"object","properties":{"answer":{"type":"string"}}})
     );
+}
+
+#[test]
+fn search_stream_flag_maps_to_body_and_body_set_override_it() {
+    let streamed = run_ok_json(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(streamed["data"]["request"]["body"]["stream"], true);
+    assert!(streamed["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|warning| warning["code"] != "stream_ignored"));
+
+    for override_args in [["--body", r#"{"stream":false}"#], ["--set", "stream=false"]] {
+        let json = run_ok_json(&[
+            "search",
+            "rust async",
+            "--stream",
+            override_args[0],
+            override_args[1],
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(json["data"]["request"]["body"]["stream"], false);
+        assert!(json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|warning| warning["code"] != "stream_ignored"));
+    }
+}
+
+#[test]
+fn search_stream_without_output_schema_warns_on_typed_body_and_live_paths() {
+    for args in [
+        vec!["search", "rust async", "--stream", "--dry-run", "--compact"],
+        vec![
+            "search",
+            "rust async",
+            "--body",
+            r#"{"stream":true}"#,
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let json = run_ok_json(&args);
+        let warning = json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["code"] == "stream_ignored")
+            .expect("stream_ignored warning");
+        assert_eq!(warning["details"]["field"], "outputSchema");
+        assert_eq!(warning["details"]["stream"], true);
+    }
+
+    let response = format!(
+        r#"{{"resolvedSearchType":"","results":[{{"title":"Rust Async","url":"https://example.com","text":"{}"}}]}}"#,
+        "x".repeat(11_000)
+    );
+    let response: &'static [u8] = Box::leak(response.into_bytes().into_boxed_slice());
+    let (base_url, server) = local_json_server(
+        |request_text| {
+            assert!(request_text.starts_with("POST /search "));
+            assert!(request_text.contains(r#""stream":true"#));
+            assert!(request_text
+                .to_ascii_lowercase()
+                .contains("accept: text/event-stream"));
+        },
+        response,
+    );
+    let live = run_ok_json(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--text",
+        "full",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(live["data"]["results"][0]["title"], "Rust Async");
+    assert!(live["data"].get("resolvedSearchType").is_none());
+    assert!(live["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "stream_ignored"));
+    assert!(live["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "oversized_search_response"));
+}
+
+#[test]
+fn search_sse_json_reconstructs_results_done_metadata_and_cost() {
+    let (base_url, server) = local_search_sse_server();
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(json["data"]["results"][0]["title"], "Rust Async");
+    assert_eq!(json["data"]["output"]["content"]["summary"], "hello");
+    assert_eq!(json["data"]["searchTime"], 1.25);
+    assert_eq!(json["data"]["costDollars"]["total"], 0.012);
+    assert_eq!(json["data"]["costDollars"]["search"]["neural"], 0.007);
+    assert_eq!(json["data"]["requestId"], "search_req_1");
+    assert_eq!(json["count"], 1);
+    assert_eq!(
+        json["dataHash"],
+        transport::data_hash(&json["data"]).unwrap()
+    );
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|warning| warning["code"] != "stream_ignored"));
+}
+
+#[test]
+fn search_sse_ndjson_maps_text_delta_and_keeps_terminal_shape() {
+    let (base_url, server) = local_search_sse_server();
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--ndjson",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8(output.stdout).unwrap();
+    let lines = lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[0]["schema"], "exa.cli.event.v1");
+    assert_eq!(lines[0]["type"], "delta");
+    assert_eq!(lines[0]["event"]["type"], "text-delta");
+    assert_eq!(lines[0]["event"]["delta"], "hello");
+    assert_eq!(lines[2]["type"], "done");
+    assert_eq!(lines[3]["schema"], "exa.cli.response.v1");
+    assert_eq!(lines[3]["data"]["results"][0]["title"], "Rust Async");
+    assert_eq!(lines[3]["data"]["costDollars"]["total"], 0.012);
+    assert_eq!(lines[3]["data"]["requestId"], "search_req_1");
+    assert_eq!(lines[3]["count"], 1);
+    assert_eq!(
+        lines[3]["dataHash"],
+        transport::data_hash(&lines[3]["data"]).unwrap()
+    );
+    assert!(lines[3]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|warning| warning["code"] != "stream_ignored"));
+}
+
+#[test]
+fn search_sse_error_event_exits_upstream_with_empty_stdout() {
+    let response = br#"data: {"type":"error","error":{"message":"Search provider timed out"},"requestId":"search_req_error"}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_error");
+    assert_eq!(error["error"]["retryable"], true);
+    assert_eq!(
+        error["error"]["details"]["upstreamMessage"],
+        "Search provider timed out"
+    );
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Search provider timed out"));
+}
+
+#[test]
+fn search_sse_without_done_exits_upstream_malformed_with_empty_stdout() {
+    let response = br#"data: {"type":"results","results":[{"title":"Partial","url":"https://example.com"}],"requestId":"search_req_partial"}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_malformed");
+    assert_eq!(error["error"]["retryable"], false);
+    assert!(error["error"]["message"].as_str().unwrap().contains("done"));
+}
+
+#[test]
+fn search_sse_bare_done_exits_upstream_malformed() {
+    let response = br#"data: {"type":"done"}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_malformed");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("output"));
+}
+
+#[test]
+fn search_sse_done_requires_numeric_search_time() {
+    let response = br#"data: {"type":"done","output":null,"searchTime":"fast"}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_malformed");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("searchTime"));
+}
+
+#[test]
+fn search_sse_rejects_json_event_after_done() {
+    let response =
+        br#"data: {"type":"done","output":null,"searchTime":0,"requestId":"search_req_done"}
+
+data: {"type":"grounding","grounding":[],"requestId":"search_req_done"}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "upstream_malformed");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("after the terminal"));
+}
+
+#[test]
+fn search_sse_uses_first_event_request_id_when_done_omits_it() {
+    let response = br#"data: {"type":"text-delta","delta":"hello","requestId":"search_req_delta"}
+
+data: {"type":"results","results":[{"title":"Rust Async","url":"https://example.com/rust"}]}
+
+data: {"type":"done","output":null,"searchTime":0}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(json["data"]["requestId"], "search_req_delta");
+    assert_eq!(json["data"]["output"], serde_json::Value::Null);
+    assert_eq!(json["data"]["searchTime"], 0);
+    assert_eq!(json["count"], 1);
+}
+
+#[test]
+fn search_sse_oversized_full_text_uses_normal_response_warning() {
+    let response = format!(
+        "data: {{\"type\":\"results\",\"results\":[{{\"url\":\"https://example.com\",\"text\":\"{}\"}}],\"requestId\":\"search_req_large\"}}\n\ndata: {{\"type\":\"done\",\"output\":null,\"searchTime\":0,\"requestId\":\"search_req_large\"}}\n\ndata: [DONE]\n\n",
+        "x".repeat(11_000)
+    );
+    let response: &'static [u8] = Box::leak(response.into_bytes().into_boxed_slice());
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let json = run_ok_json(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--text",
+        "full",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "oversized_search_response"));
 }
 
 #[test]
@@ -4985,6 +5486,87 @@ fn agent_provider_aliases_coerce_and_set_passes_through() {
         .unwrap()
         .iter()
         .any(|warning| warning["code"] == "legacy_value_coerced"));
+
+    let body_pass_through = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--body",
+        r#"{"dataSources":[{"provider":"custom_provider"}]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        body_pass_through["data"]["request"]["body"]["dataSources"],
+        serde_json::json!([{"provider":"custom_provider"}])
+    );
+}
+
+#[test]
+fn agent_data_source_accepts_current_enum_case_insensitively() {
+    for canonical in [
+        "fiber",
+        "financial_datasets",
+        "similarweb",
+        "baselayer",
+        "affiliate",
+        "particle",
+        "jinko",
+    ] {
+        for given in [canonical.to_string(), canonical.to_ascii_uppercase()] {
+            let json = run_ok_json(&[
+                "agent",
+                "runs",
+                "create",
+                "q",
+                "--data-source",
+                &given,
+                "--dry-run",
+                "--compact",
+            ]);
+            assert_eq!(
+                json["data"]["request"]["body"]["dataSources"],
+                serde_json::json!([{"provider":canonical}]),
+                "given={given}"
+            );
+        }
+    }
+}
+
+#[test]
+fn agent_data_source_rejects_unknown_typed_provider_with_accepted_set() {
+    let output = run(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--data-source",
+        "custom_provider",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert_eq!(error["error"]["details"]["given"], "custom_provider");
+    assert_eq!(
+        error["error"]["details"]["accepted"],
+        serde_json::json!([
+            "fiber",
+            "financial_datasets",
+            "similarweb",
+            "baselayer",
+            "affiliate",
+            "particle",
+            "jinko"
+        ])
+    );
+    assert_eq!(
+        error["error"]["suggestedCommand"],
+        "exa-agent agent runs create 'q' --data-source fiber"
+    );
 }
 
 #[cfg(unix)]

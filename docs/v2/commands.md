@@ -149,7 +149,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 
 | Official operation | Canonical command | Notes |
 |---|---|---|
-| `POST /search` | `exa-agent search QUERY` | `type`: `auto`(default)`,fast,instant,deep-lite,deep,deep-reasoning`. Content extraction nested under `contents.*`. Streaming only when `--output-schema` is set. Uses `--num-results` (1..100), **not** `--limit`. |
+| `POST /search` | `exa-agent search QUERY` | `type`: `auto`(default)`,fast,instant,deep-lite,deep,deep-reasoning`. Content extraction nested under `contents.*`. `--stream` requests SSE; without a non-null `outputSchema`, upstream falls back to normal JSON and the CLI warns. Uses `--num-results` (1..100), **not** `--limit`. |
 | `POST /contents` | `exa-agent contents URL...` | URLs are positional. The legacy `urls` self-description body-field key is not a CLI spelling (`legacyFlagIsCliFlag: false`); `inputKind: argument` and `name: URLS` are authoritative. Accepts positional URLS or `--ids` (mutually exclusive). 1..100 urls/ids; >100 needs `--chunk-size`. Top-level `text/highlights/summary` upstream. |
 | `POST /findSimilar` | `exa-agent similar URL` | **Deprecated upstream**; warns on stderr, suggests `exa-agent search --similar-to URL`. Kept for breadth. |
 | `POST /answer` | `exa-agent answer QUESTION` | `--text`, `--output-schema`, `--stream`. Returns `data.answer` + `data.citations`. |
@@ -310,9 +310,9 @@ exa-agent search QUERY
   --compliance hipaa             # enterprise-only
   --additional-query QUERY       # repeatable; deep-* variants only
   --system-prompt TEXT|@file
-  --output-schema JSON|@file     # enables synthesized output + streaming
+  --output-schema JSON|@file     # enables synthesized output; required upstream for effective SSE
   --similar-to URL               # future-safe replacement for `similar`
-  --stream                       # SSE; valid only with --output-schema
+  --stream                       # request SSE; warns + returns normal JSON without --output-schema
   # ---- content extraction (nested under contents.*) ----
   --text[=N|full]                # bare search/similar: maxCharacters=1500; full uncapped
   --text-verbosity compact|standard|full
@@ -344,7 +344,7 @@ Guards:
 - `--category people` with `--start/end-published-date` or `--exclude-domain` → exit 1; `--include-domain` accepts LinkedIn domains only.
 - More than one `--include-text` / `--exclude-text` → exit 1 (single-phrase arrays only).
 - `--offset` / `--page` are not defined (search has no offset pagination).
-- `--stream` without `--output-schema` → `warnings[]`: streaming has no effect; falls back to a single JSON envelope.
+- `--stream` without a final non-null `outputSchema` → `warnings[]` code `stream_ignored`: upstream ignores streaming and falls back to a single JSON envelope. Explicit `--body`/`--set` overrides determine the final value.
 - Deprecated knobs (`--livecrawl`, `--context*`) used → non-fatal `warnings[]` with replacement.
 
 Query/domain distinction:
@@ -424,7 +424,7 @@ exa-agent agent runs create QUERY
   --exclusion JSON|@file       # input.exclusion
   --previous-run-id ID         # continue a completed run (same team)
   --effort auto|minimal|low|medium|high|xhigh   # default auto; `medium` good single-entity default
-  --data-source PROVIDER       # repeatable; max 5 (e.g. similarweb, fiber_ai)
+  --data-source PROVIDER       # repeatable; max 5; fiber|financial_datasets|similarweb|baselayer|affiliate|particle|jinko
   --metadata JSON
   --stream                     # SSE via Accept: text/event-stream
   --beta VALUE
@@ -444,6 +444,7 @@ exa-agent agent runs delete ID --yes
 Guards / notes:
 - Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --since ...` (D7, contracts §7).
 - `--data-source` count > 5 → exit 1.
+- Typed `--data-source` values are case-insensitive and sent with canonical spelling; invalid values exit 1 with the accepted set. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; explicit `--body`/`--set` values pass through unchanged.
 - Surface `stopReason` in output; treat `budget_reached` as not-fully-complete (do not silently report success).
 
 ### `research` — `/research/v1` (retired upstream)

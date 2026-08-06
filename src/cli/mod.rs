@@ -550,6 +550,9 @@ pub struct SearchArgs {
         value_name = crate::registry::field_value_name("search", "output-schema").expect("search output-schema metadata")
     )]
     pub output_schema: Option<String>,
+    /// Request SSE for synthesized output; without outputSchema upstream returns normal JSON.
+    #[arg(long)]
+    pub stream: bool,
     /// Additional instructions for search output or behavior.
     #[arg(
         long,
@@ -653,6 +656,7 @@ impl SearchArgs {
         vec![
             ("query", Some(self.query.clone())),
             ("output-schema", self.output_schema.clone()),
+            ("stream", self.stream.then(|| "true".to_string())),
             ("system-prompt", self.system_prompt.clone()),
             ("num-results", self.num_results.clone()),
             ("text", self.text.clone()),
@@ -965,7 +969,8 @@ pub struct AgentRunArgs {
     pub previous_run_id: Option<String>,
     #[arg(long, value_enum, ignore_case = true)]
     pub effort: Option<Effort>,
-    #[arg(long)]
+    /// Repeatable provider (max 5): fiber, financial_datasets, similarweb, baselayer, affiliate, particle, or jinko.
+    #[arg(long, value_name = "PROVIDER")]
     pub data_source: Vec<String>,
     #[arg(long)]
     pub metadata: Option<String>,

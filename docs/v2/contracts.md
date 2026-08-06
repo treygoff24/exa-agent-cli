@@ -103,6 +103,7 @@ Rules:
 - `costDollars` always present; `{ "total": 0.0 }` when upstream reports none.
 - `warnings[]` carries non-fatal notices (deprecated flag used, livecrawl fallback, empty-result broaden hint, etc.) — never on stdout as prose, always here.
 - **`legacy_value_coerced`** (added 0.5.0): a typed flag accepted a legacy enum spelling and sent the canonical one upstream; details name `field`, `given`, `sent`. Mappings: category `research paper`→`publication` (search + similar), agent data-source provider `fiber_ai`→`fiber`, `particle_news`→`particle`. Coercion applies to typed flags only — `--body`/`--set` values are the explicit escape hatch and pass through unrewritten, unwarned.
+- **`stream_ignored`**: the final Search request has `stream:true` but no non-null `outputSchema`, so upstream falls back to its normal JSON response. This is non-fatal and appears on both request previews and live envelopes; add `--output-schema` to receive SSE.
 - For a `/contents` status whose upstream `error` object is empty or has no non-empty `tag`, `message`, or `reason`, warnings use the stable label `upstream_reason_unavailable` and include a suggested direct-fetch command. The CLI never invents an upstream reason.
 - A non-`full` contents/answer result always carries a non-empty warning naming the empty crawl, binary body, crawl error, or unextracted PDF and a paste-ready fallback in `suggestedCommand`/`nextActions[]`. Government URLs and `CRAWL_UNKNOWN_ERROR` use `parallel-cli extract URL --full-content --json`; other empty rows suggest a fresh full-text Exa retry. The API returns extracted text strings, not trustworthy raw response bytes, so this version reports `pdf_unextracted` rather than passing a lossy JSON string to `pdftotext` or introducing an out-of-band downloader.
 - `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
@@ -233,6 +234,8 @@ This is a deliberate small-integer scheme, **not** sysexits — it is the publis
 ```
 
 `type` is a stable top-level kind discriminator (`begin` | `delta` | `item` | `progress` | `summary` | `error` | `done`) so an agent routes records without unwrapping the opaque upstream `event` blob. `timestamp` is a JSON field (never free-text prose), `SOURCE_DATE_EPOCH`-aware and scrubbed in goldens; `correlationId` echoes `--correlation-id` as in §4. The terminal `exa.cli.response.v1` line still carries the accumulated `data` + final cost.
+
+For Search SSE, upstream `type:"text-delta"` events map to envelope `type:"delta"`; the terminal response combines the `results` event with the terminal `done` event's required `output` and numeric `searchTime`, plus `costDollars` when present. A canonical `error` event exits 5 with `upstream_error`; a framed Search stream with a malformed `done`, an event after `done`, or no `done` exits 5 with `upstream_malformed` rather than returning partial data as success.
 
 Interrupted stream → exit 12 + `exa.cli.error.v1` on stderr including the last observed `eventId` when available. `--last-event-id ID` resumes Agent event replay.
 

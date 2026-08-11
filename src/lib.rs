@@ -203,6 +203,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             let mut details = serde_json::Map::new();
             let mut message = public_clap_text(first_line(&e.to_string()));
             let mut suggestion = None;
+            let mut suggestion_omits_process_flags = false;
             let invalid_flag = (kind == ErrorKind::UnknownArgument)
                 .then(|| {
                     clap_ctx_strings(&e, ContextKind::InvalidArg)
@@ -237,11 +238,12 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             }
 
             if kind == ErrorKind::UnknownArgument {
-                if let Some((targeted_message, targeted_suggestion)) =
+                if let Some((targeted_message, targeted_suggestion, omitted_process_flags)) =
                     known_cli_trap_suggestion(&e, invalid_flag.as_deref())
                 {
                     message = targeted_message.to_string();
                     suggestion = Some(targeted_suggestion);
+                    suggestion_omits_process_flags = omitted_process_flags;
                 }
             }
 
@@ -310,12 +312,16 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     .last()
                     .map(public_clap_text);
                 let command = command_path_from_error(&e);
-                suggestion = flag
-                    .as_deref()
-                    .zip(corrected.as_deref())
-                    .and_then(|(flag, corrected)| {
-                        rewrite_argv_value(flag, corrected, command.as_deref())
-                    })
+                let rewritten =
+                    flag.as_deref()
+                        .zip(corrected.as_deref())
+                        .and_then(|(flag, corrected)| {
+                            rewrite_argv_value(flag, corrected, command.as_deref())
+                        });
+                if rewritten.is_some() {
+                    suggestion_omits_process_flags = true;
+                }
+                suggestion = rewritten
                     .or_else(|| {
                         command
                             .as_deref()
@@ -329,6 +335,12 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             if replaceable && matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
                 if let Some(rewritten) = rejected_value_suggestion(&e) {
                     suggestion = Some(rewritten);
+                }
+            }
+            if suggestion_omits_process_flags {
+                let omitted_flags = omitted_process_flags(&std::env::args().collect::<Vec<_>>());
+                if !omitted_flags.is_empty() {
+                    details.insert("omittedFlags".to_string(), serde_json::json!(omitted_flags));
                 }
             }
 
@@ -526,7 +538,7 @@ fn unknown_flag_suggestion(command: &str, flag: Option<&str>) -> String {
 fn known_cli_trap_suggestion(
     error: &clap::Error,
     flag: Option<&str>,
-) -> Option<(&'static str, String)> {
+) -> Option<(&'static str, String, bool)> {
     let command = command_path_from_error(error)?;
     let clap_token = flag?.split_whitespace().next()?;
     let trap_flag = if clap_token.starts_with('-') {
@@ -535,35 +547,56 @@ fn known_cli_trap_suggestion(
         known_process_trap_flag(&command)?
     };
     match (command.as_str(), trap_flag) {
-        ("search", "--query") => Some((
-            "search QUERY is positional; remove --query",
-            positionalize_search_query_flag()
-                .unwrap_or_else(|| "exa-agent search --help".to_string()),
-        )),
-        ("search", "--contents") => Some((
-            "search has no --contents flag; use --text [N|full] or --highlights [N] for inline content",
-            rewrite_search_contents_process_flag()
-                .unwrap_or_else(|| "exa-agent search --help".to_string()),
-        )),
+        ("search", "--query") => {
+            let rewritten = positionalize_search_query_flag();
+            let omitted = rewritten.is_some();
+            Some((
+                "search QUERY is positional; remove --query",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("search", "--contents") => {
+            let rewritten = rewrite_search_contents_process_flag();
+            let omitted = rewritten.is_some();
+            Some((
+                "search has no --contents flag; use --text [N|full] or --highlights [N] for inline content",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
         ("search", "--content-size") => Some((
             "search has no --content-size preset; use --text [N|full] or --highlights [N], or run contents for known URLs",
             "exa-agent search --help".to_string(),
+            false,
         )),
-        ("search", "--include-domains") => Some((
-            "search uses repeatable --include-domain flags, not --include-domains",
-            rewrite_search_process_flag("--include-domains", "--include-domain")
-                .unwrap_or_else(|| "exa-agent search --help".to_string()),
-        )),
-        ("search", "--exclude-domains") => Some((
-            "search uses repeatable --exclude-domain flags, not --exclude-domains",
-            rewrite_search_process_flag("--exclude-domains", "--exclude-domain")
-                .unwrap_or_else(|| "exa-agent search --help".to_string()),
-        )),
-        ("contents", "--no-highlights") => Some((
-            "contents highlights are opt-in; omit --highlights instead of passing --no-highlights",
-            remove_process_flag_with_optional_bool("--no-highlights")
-                .unwrap_or_else(|| "exa-agent contents --help".to_string()),
-        )),
+        ("search", "--include-domains") => {
+            let rewritten = rewrite_search_process_flag("--include-domains", "--include-domain");
+            let omitted = rewritten.is_some();
+            Some((
+                "search uses repeatable --include-domain flags, not --include-domains",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("search", "--exclude-domains") => {
+            let rewritten = rewrite_search_process_flag("--exclude-domains", "--exclude-domain");
+            let omitted = rewritten.is_some();
+            Some((
+                "search uses repeatable --exclude-domain flags, not --exclude-domains",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("contents", "--no-highlights") => {
+            let rewritten = remove_process_flag_with_optional_bool("--no-highlights");
+            let omitted = rewritten.is_some();
+            Some((
+                "contents highlights are opt-in; omit --highlights instead of passing --no-highlights",
+                rewritten.unwrap_or_else(|| "exa-agent contents --help".to_string()),
+                omitted,
+            ))
+        }
         _ => None,
     }
 }
@@ -775,17 +808,31 @@ fn sanitize_process_argv(args: &mut Vec<String>) {
     while index < args.len() {
         if matches!(
             args[index].as_str(),
-            "--api-key" | "--service-key" | "--header" | "--set" | "--base-url"
+            "--api-key" | "--service-key" | "--header" | "--set"
         ) {
             args.remove(index);
             if index < args.len() {
                 args.remove(index);
             }
+        } else if args[index] == "--base-url" {
+            if args
+                .get(index + 1)
+                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value))
+            {
+                args.remove(index);
+                if index < args.len() {
+                    args.remove(index);
+                }
+            } else {
+                index += 2;
+            }
         } else if args[index].starts_with("--api-key=")
             || args[index].starts_with("--service-key=")
             || args[index].starts_with("--header=")
             || args[index].starts_with("--set=")
-            || args[index].starts_with("--base-url=")
+            || args[index]
+                .strip_prefix("--base-url=")
+                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value))
         {
             args.remove(index);
         } else if args[index] == "--body" {
@@ -810,6 +857,59 @@ fn sanitize_process_argv(args: &mut Vec<String>) {
             index += 1;
         }
     }
+}
+
+fn omitted_process_flags(args: &[String]) -> Vec<&'static str> {
+    let mut omitted = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        let flag = match args[index].as_str() {
+            "--api-key" => Some(("--api-key", 2)),
+            "--service-key" => Some(("--service-key", 2)),
+            "--header" => Some(("--header", 2)),
+            "--set" => Some(("--set", 2)),
+            "--body"
+                if args
+                    .get(index + 1)
+                    .is_none_or(|value| !value.starts_with('@')) =>
+            {
+                Some(("--body", 2))
+            }
+            "--base-url"
+                if args
+                    .get(index + 1)
+                    .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
+            {
+                Some(("--base-url", 2))
+            }
+            arg if arg.starts_with("--api-key=") => Some(("--api-key", 1)),
+            arg if arg.starts_with("--service-key=") => Some(("--service-key", 1)),
+            arg if arg.starts_with("--header=") => Some(("--header", 1)),
+            arg if arg.starts_with("--set=") => Some(("--set", 1)),
+            arg if arg
+                .strip_prefix("--body=")
+                .is_some_and(|value| !value.starts_with('@')) =>
+            {
+                Some(("--body", 1))
+            }
+            arg if arg
+                .strip_prefix("--base-url=")
+                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
+            {
+                Some(("--base-url", 1))
+            }
+            _ => None,
+        };
+        if let Some((flag, step)) = flag {
+            if !omitted.contains(&flag) {
+                omitted.push(flag);
+            }
+            index += step;
+        } else {
+            index += 1;
+        }
+    }
+    omitted
 }
 
 fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {
@@ -2517,13 +2617,14 @@ fn build_agent_run_spec(
         ("metadata", metadata),
     ];
     let spec = build_typed_spec(op, &flag_values, globals)?;
-    validate_agent_run_budget(&spec.body, globals)?;
+    validate_agent_run_budget(&spec.body, globals, &args.query)?;
     Ok(spec)
 }
 
 fn validate_agent_run_budget(
     body: &serde_json::Value,
     globals: &GlobalArgs,
+    query: &str,
 ) -> Result<(), CliError> {
     let effort = body.get("effort").and_then(serde_json::Value::as_str);
     let budget = body.get("budget");
@@ -2539,9 +2640,7 @@ fn validate_agent_run_budget(
                     "invalid_flag_combination",
                     "`effort:max` requires an explicit budget.maxCostDollars cap from 1 to 100",
                 )
-                .with_suggestion(
-                    "exa-agent agent runs create 'query' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27",
-                ),
+                .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
             ));
         }
         if !beta_has_token(globals.beta.as_deref(), "agent-max-effort-2026-07-27") {
@@ -2550,9 +2649,7 @@ fn validate_agent_run_budget(
                     "invalid_flag_combination",
                     "`effort:max` requires --beta agent-max-effort-2026-07-27",
                 )
-                .with_suggestion(
-                    "exa-agent agent runs create 'query' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27",
-                ),
+                .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
             ));
         }
     }
@@ -2561,28 +2658,40 @@ fn validate_agent_run_budget(
         return Ok(());
     };
     let Some(object) = budget.as_object() else {
-        return Err(CliError::Usage(Diag::new(
-            "invalid_value",
-            "`budget` must be a JSON object with maxCostDollars",
-        )));
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget` must be a JSON object with maxCostDollars",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
     };
     let Some(value) = object.get("maxCostDollars") else {
-        return Err(CliError::Usage(Diag::new(
-            "invalid_value",
-            "`budget.maxCostDollars` is required when budget is present",
-        )));
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget.maxCostDollars` is required when budget is present",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
     };
     let Some(max_cost) = value.as_f64().filter(|value| value.is_finite()) else {
-        return Err(CliError::Usage(Diag::new(
-            "invalid_value",
-            "`budget.maxCostDollars` must be a finite number",
-        )));
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget.maxCostDollars` must be a finite number",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
     };
     if !(1.0..=100.0).contains(&max_cost) {
-        return Err(CliError::Usage(Diag::new(
-            "invalid_value",
-            "`budget.maxCostDollars` must be between 1 and 100",
-        )));
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget.maxCostDollars` must be between 1 and 100",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
     }
     match effort {
         None | Some("auto") | Some("max") => Ok(()),
@@ -2591,8 +2700,29 @@ fn validate_agent_run_budget(
                 "invalid_flag_combination",
                 format!("budget is only valid with omitted, auto, or max effort; got `{other}`"),
             )
-            .with_suggestion("remove budget or use --effort auto"),
+            .with_suggestion(agent_budget_suggestion(query, "auto", max_cost, false)),
         )),
+    }
+}
+
+fn agent_budget_suggestion(query: &str, effort: &str, max_cost: f64, beta: bool) -> String {
+    let mut command = format!(
+        "exa-agent agent runs create {} --effort {effort} --max-cost-dollars {}",
+        shell_quote(query),
+        format_agent_cost(max_cost)
+    );
+    if beta {
+        command.push_str(" --beta agent-max-effort-2026-07-27");
+    }
+    command.push_str(" --dry-run --print-request");
+    command
+}
+
+fn format_agent_cost(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as u64)
+    } else {
+        value.to_string()
     }
 }
 
@@ -2638,7 +2768,10 @@ fn agent_data_sources_json(providers: &[String], query: &str) -> Result<Option<S
                 "invalid_value",
                 "`--data-source` accepts at most 5 providers",
             )
-            .with_suggestion("exa-agent agent runs create <query> --data-source similarweb"),
+            .with_suggestion(format!(
+                "exa-agent agent runs create {} --data-source similarweb",
+                shell_quote(query)
+            )),
         ));
     }
     let mut sources = Vec::with_capacity(providers.len());
@@ -7109,7 +7242,7 @@ fn stream_write_error(err: std::io::Error, last_event_id: Option<&str>) -> CliEr
         format!("failed to write stream stdout: {err}"),
     );
     if let Some(last_event_id) = last_event_id {
-        diag = diag.with_details(serde_json::json!({ "lastEventId": last_event_id }));
+        diag = diag.with_details(transport::stream_event_id_details(last_event_id));
     }
     CliError::Interrupted(diag)
 }
@@ -9703,11 +9836,19 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
+    let mut envelope = raw_response_envelope(&result, payment_requested(globals), &[]);
+    emit_completed_response(&mut envelope, globals, pretty)?;
+    Ok(0)
+}
+
+fn raw_response_envelope(
+    result: &transport::RawExecuteResult,
+    signed_payment: bool,
+    warnings: &[serde_json::Value],
+) -> serde_json::Value {
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
-    let payment = payment_requested(globals)
-        .then(|| transport::payment_headers_metadata(&result.response.headers, "receipt"));
     let mut envelope = response_envelope(ResponseEnvelopeArgs {
         command: "raw",
         method: &result.method,
@@ -9721,13 +9862,13 @@ fn dispatch_raw_inner(
         data_hash: hash,
         retries: result.retries,
         duration_ms: result.duration_ms,
-        warnings: &[],
+        warnings,
     });
-    if let Some(payment) = payment {
-        envelope["payment"] = payment;
+    if signed_payment {
+        envelope["payment"] =
+            transport::payment_headers_metadata(&result.response.headers, "receipt");
     }
-    emit_completed_response(&mut envelope, globals, pretty)?;
-    Ok(0)
+    envelope
 }
 
 fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
@@ -10479,6 +10620,74 @@ mod tests {
         );
     }
 
+    fn signed_payment_raw_result() -> RawExecuteResult {
+        RawExecuteResult {
+            request_id: "req_payment".into(),
+            method: "POST".into(),
+            path: "/search".into(),
+            profile: "payment".into(),
+            correlation_id: None,
+            response: HttpResponse {
+                status: 200,
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("Payment-Receipt".into(), "receipt-abc".into()),
+                ],
+                body: format!(
+                    r#"{{"results":[{{"title":"paid"}}],"echo":"{}"}}"#,
+                    redaction::REDACTED
+                )
+                .into_bytes(),
+            },
+            retries: 0,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn signed_payment_json_envelope_puts_receipt_metadata_after_data_truncated() {
+        let result = signed_payment_raw_result();
+        let envelope = raw_response_envelope(&result, true, &[]);
+
+        assert_eq!(envelope["data"]["results"][0]["title"], "paid");
+        assert_eq!(envelope["payment"]["kind"], "receipt");
+        assert_eq!(envelope["payment"]["headers"][0]["name"], "Payment-Receipt");
+        assert_eq!(envelope["payment"]["headers"][0]["value"], "receipt-abc");
+        assert_eq!(
+            envelope["payment"]["headers"][0]["bytes"],
+            "receipt-abc".len()
+        );
+        assert!(envelope["data"].get("payment").is_none());
+
+        let rendered = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            rendered.contains(r#""dataTruncated":false,"payment":{"kind":"receipt""#),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn raw_output_writes_already_redacted_payment_bytes_without_envelope_metadata() {
+        let result = signed_payment_raw_result();
+        let output_path = std::env::temp_dir().join(format!(
+            "exa-agent-raw-payment-output-{}-{}.bin",
+            std::process::id(),
+            transport::new_request_id()
+        ));
+        let _ = std::fs::remove_file(&output_path);
+        let globals = parse_globals(&["--raw", "--output", output_path.to_str().unwrap()]);
+
+        emit_raw_result(&result, None, "raw", &globals, false, &[]).unwrap();
+
+        let written = std::fs::read(&output_path).unwrap();
+        let _ = std::fs::remove_file(&output_path);
+        assert_eq!(written, result.response.body);
+        let rendered = String::from_utf8_lossy(&written);
+        assert!(rendered.contains(redaction::REDACTED), "{rendered}");
+        assert!(!rendered.contains("Payment-Receipt"), "{rendered}");
+        assert!(!rendered.contains(r#""payment""#), "{rendered}");
+    }
+
     struct FailAfterWrites {
         remaining: usize,
         bytes: Vec<u8>,
@@ -10529,6 +10738,23 @@ mod tests {
         assert_eq!(err.diag().code, "interrupted");
         assert_eq!(seq, 1);
         assert!(String::from_utf8_lossy(&out.bytes).contains("\"eventId\":\"evt-1\""));
+    }
+
+    #[test]
+    fn stream_write_error_caps_oversized_unicode_last_event_id() {
+        let last_event_id = "é".repeat(600);
+        let err = stream_write_error(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout closed"),
+            Some(&last_event_id),
+        );
+
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().code, "interrupted");
+        let details = err.diag().details.as_ref().unwrap();
+        let shown = details["lastEventId"].as_str().unwrap();
+        assert_eq!(shown, "é".repeat(512));
+        assert_eq!(shown.len(), 1024);
+        assert_eq!(details["lastEventIdTruncated"], true);
     }
 
     #[test]

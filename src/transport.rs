@@ -454,6 +454,10 @@ impl FakeTransport {
             .push_back(Ok(Self::ok_json(status, body)));
     }
 
+    pub fn push_response(&self, response: HttpResponse) {
+        self.responses.borrow_mut().push_back(Ok(response));
+    }
+
     pub fn push_err(&self, err: CliError) {
         self.responses.borrow_mut().push_back(Err(err));
     }
@@ -707,32 +711,58 @@ fn validate_base_url(url: &str) -> Result<(), CliError> {
     ))
 }
 
-fn is_loopback_http_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://") else {
-        return false;
-    };
-    if rest
+pub(crate) fn is_safe_suggestion_base_url_origin(url: &str) -> bool {
+    is_origin_only_url(url) && (crate::config::is_valid_https_url(url) || is_loopback_http_url(url))
+}
+
+fn is_origin_only_url(url: &str) -> bool {
+    if url
         .chars()
-        .any(|ch| ch.is_ascii_whitespace() || ch.is_control())
+        .any(|ch| ch.is_ascii_whitespace() || ch.is_control() || matches!(ch, '\\' | '?' | '#'))
     {
         return false;
     }
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if authority.contains('@') {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    if uri.scheme().is_none() || uri.authority().is_none() {
         return false;
     }
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        // `[ipv6]` or `[ipv6]:port`
-        match stripped.split_once(']') {
-            Some((host, _)) => host,
-            None => return false,
-        }
-    } else {
-        authority
-            .rsplit_once(':')
-            .map(|(host, _)| host)
-            .unwrap_or(authority)
+    if !uri_has_valid_port(&uri) {
+        return false;
+    }
+    matches!(
+        uri.path_and_query().map(|path| path.as_str()),
+        None | Some("") | Some("/")
+    )
+}
+
+fn is_loopback_http_url(url: &str) -> bool {
+    if url
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || ch.is_control() || ch == '\\')
+    {
+        return false;
+    }
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
     };
+    if uri.scheme_str() != Some("http") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    if authority.as_str().contains('@') || !uri_has_valid_port(&uri) {
+        return false;
+    }
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
     // Loopback literals only — parse as an IP so `127.0.0.1.evil.com` (a remote
     // host that merely starts with `127.`) is NOT treated as local.
     host == "localhost"
@@ -740,6 +770,20 @@ fn is_loopback_http_url(url: &str) -> bool {
             .parse::<std::net::IpAddr>()
             .map(|ip| ip.is_loopback())
             .unwrap_or(false)
+}
+
+fn uri_has_valid_port(uri: &ureq::http::Uri) -> bool {
+    let Some(authority) = uri.authority().map(|authority| authority.as_str()) else {
+        return false;
+    };
+    let port = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped
+            .split_once(']')
+            .and_then(|(_, tail)| tail.strip_prefix(':'))
+    } else {
+        authority.rsplit_once(':').map(|(_, port)| port)
+    };
+    port.is_none_or(|port| !port.is_empty() && port.parse::<u16>().is_ok())
 }
 
 fn inject_auth_headers(headers: &mut Vec<(String, String)>, secret: &Secret) {
@@ -946,7 +990,7 @@ pub struct SendOptions {
     pub payment_mode: bool,
 }
 
-fn redact_payment_echoes_from_error(err: &mut CliError, request_headers: &[(String, String)]) {
+fn payment_secret_values(request_headers: &[(String, String)]) -> Vec<&str> {
     let mut secrets = Vec::new();
     for (name, value) in request_headers {
         let name = name.trim().to_ascii_lowercase();
@@ -962,8 +1006,13 @@ fn redact_payment_echoes_from_error(err: &mut CliError, request_headers: &[(Stri
             }
         }
     }
-    secrets.sort_unstable();
+    secrets.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     secrets.dedup();
+    secrets
+}
+
+fn redact_payment_echoes_from_error(err: &mut CliError, request_headers: &[(String, String)]) {
+    let secrets = payment_secret_values(request_headers);
     if secrets.is_empty() {
         return;
     }
@@ -977,10 +1026,57 @@ fn redact_payment_echoes_from_error(err: &mut CliError, request_headers: &[(Stri
     }
 }
 
+fn redact_payment_echoes_from_response(
+    response: &mut HttpResponse,
+    request_headers: &[(String, String)],
+) {
+    let secrets = payment_secret_values(request_headers);
+    if secrets.is_empty() {
+        return;
+    }
+    response.body = redact_exact_bytes(&response.body, &secrets);
+    for (_, value) in &mut response.headers {
+        *value = redact_exact_strings(value, &secrets);
+    }
+}
+
 fn redact_exact_strings(raw: &str, secrets: &[&str]) -> String {
     secrets.iter().fold(raw.to_string(), |acc, secret| {
         acc.replace(secret, crate::redaction::REDACTED)
     })
+}
+
+fn redact_exact_bytes(raw: &[u8], secrets: &[&str]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let redacted = crate::redaction::REDACTED.as_bytes();
+    let mut idx = 0;
+    while idx < raw.len() {
+        if let Some(secret) = secrets
+            .iter()
+            .map(|secret| secret.as_bytes())
+            .find(|secret| !secret.is_empty() && raw[idx..].starts_with(secret))
+        {
+            out.extend_from_slice(redacted);
+            idx += secret.len();
+        } else {
+            out.push(raw[idx]);
+            idx += 1;
+        }
+    }
+    out
+}
+
+fn exact_secret_url_redaction_values(secrets: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    for secret in secrets.iter().copied().filter(|secret| !secret.is_empty()) {
+        values.push(secret.to_string());
+        let encoded = encode_component(secret);
+        values.push(encoded.to_ascii_lowercase());
+        values.push(encoded);
+    }
+    values.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    values.dedup();
+    values
 }
 
 fn redact_json_exact_strings(value: &mut Value, secrets: &[&str]) {
@@ -992,12 +1088,78 @@ fn redact_json_exact_strings(value: &mut Value, secrets: &[&str]) {
             }
         }
         Value::Object(fields) => {
-            for value in fields.values_mut() {
-                redact_json_exact_strings(value, secrets);
-            }
+            let old = std::mem::take(fields);
+            *fields = old
+                .into_iter()
+                .map(|(key, mut value)| {
+                    redact_json_exact_strings(&mut value, secrets);
+                    (redact_exact_strings(&key, secrets), value)
+                })
+                .collect();
         }
         _ => {}
     }
+}
+
+fn payment_scheme_has_boundary(trimmed: &str) -> bool {
+    let Some(prefix) = trimmed.get(..7) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case("payment") {
+        return false;
+    }
+    trimmed[7..].chars().next().is_none_or(char::is_whitespace)
+}
+
+fn payment_auth_param_or_scheme(part: &str) -> bool {
+    let part = part.trim_start();
+    if part.is_empty() || payment_scheme_has_boundary(part) {
+        return true;
+    }
+    let first_space = part.find(char::is_whitespace).unwrap_or(part.len());
+    let first_equals = part.find('=').unwrap_or(usize::MAX);
+    first_equals < first_space
+}
+
+fn split_quoted_commas(value: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quote = false;
+    let mut escaped = false;
+    for (idx, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_quote => escaped = true,
+            '"' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                parts.push(&value[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if in_quote || escaped {
+        return None;
+    }
+    parts.push(&value[start..]);
+    Some(parts)
+}
+
+fn is_wholly_payment_www_authenticate(value: &str) -> bool {
+    let trimmed = value.trim();
+    if !payment_scheme_has_boundary(trimmed) {
+        return false;
+    }
+    let Some(parts) = split_quoted_commas(trimmed) else {
+        return false;
+    };
+    parts
+        .iter()
+        .skip(1)
+        .all(|part| payment_auth_param_or_scheme(part))
 }
 
 /// Top-up URL Exa names in its own 402 body; repeated here so the CLI can point at the fix
@@ -1065,22 +1227,6 @@ fn is_safe_payment_metadata_header_for_kind(name: &str, value: &str, kind: &str)
     }
 }
 
-fn is_wholly_payment_www_authenticate(value: &str) -> bool {
-    let trimmed = value.trim();
-    if !trimmed.to_ascii_lowercase().starts_with("payment") {
-        return false;
-    }
-    trimmed.split(',').skip(1).all(|part| {
-        let part = part.trim_start();
-        if part.is_empty() || part.to_ascii_lowercase().starts_with("payment") {
-            return true;
-        }
-        let first_space = part.find(char::is_whitespace).unwrap_or(part.len());
-        let first_equals = part.find('=').unwrap_or(usize::MAX);
-        first_equals < first_space
-    })
-}
-
 pub fn classify_http_status(status: u16, body: &[u8], headers: &[(String, String)]) -> CliError {
     classify_http_status_with_payment_mode(status, body, headers, false)
 }
@@ -1091,15 +1237,15 @@ fn classify_http_status_with_payment_mode(
     headers: &[(String, String)],
     payment_mode: bool,
 ) -> CliError {
-    // Checked before the status arms: credit exhaustion is a billing state, not a bad request,
-    // a bad key, or a rate limit, whichever 4xx Exa happens to wrap it in.
-    if body_signals_credit_exhaustion(body) {
+    if status == 402 && payment_mode && has_payment_challenge(headers) {
+        return payment_required_error(status, headers);
+    }
+    // Credit exhaustion is a billing state, not a bad request, bad key, or rate limit, but only
+    // Exa's 4xx client/account responses are allowed to carry that meaning.
+    if (400..=499).contains(&status) && body_signals_credit_exhaustion(body) {
         return insufficient_credits_error(status, body);
     }
     match status {
-        402 if payment_mode && has_payment_challenge(headers) => {
-            payment_required_error(status, headers)
-        }
         402 => insufficient_credits_error(status, body),
         401 | 403 => {
             let mut diag = upstream_error_diag("reauth_required", status, body);
@@ -1721,50 +1867,62 @@ pub(crate) fn search_terminal_stream_data(frames: &[SseFrame]) -> Result<Value, 
     let mut results = None;
     let mut first_request_id = None;
     let mut done = None;
+    let mut context = SearchStreamContext::default();
 
-    for event in parsed_stream_events(frames) {
-        let event = event
-            .map_err(|_| search_stream_malformed("Search stream contained a non-JSON event"))?;
-        if done.is_some() {
-            return Err(search_stream_malformed(
-                "Search stream contained an event after the terminal `done` event",
-            ));
-        }
-        if first_request_id.is_none() {
-            first_request_id = event
-                .get("requestId")
-                .and_then(Value::as_str)
-                .filter(|request_id| !request_id.trim().is_empty())
-                .map(str::to_string);
-        }
-        match event.get("type").and_then(Value::as_str) {
-            Some("results") => {
-                results = event.get("results").cloned();
+    for frame in frames {
+        for chunk in frame.data.iter().filter(|chunk| chunk.as_str() != "[DONE]") {
+            context.events_seen += 1;
+            if let Some(id) = &frame.id {
+                context.last_event_id = Some(id.clone());
             }
-            Some("done") => {
-                let done_event = event
-                    .as_object()
-                    .expect("an event with a type field is an object");
-                if !done_event.contains_key("output") {
-                    return Err(search_stream_malformed(
-                        "Search stream `done` event omitted required `output`",
-                    ));
-                }
-                if !done_event.get("searchTime").is_some_and(Value::is_number) {
-                    return Err(search_stream_malformed(
-                        "Search stream `done` event omitted numeric `searchTime`",
-                    ));
-                }
-                done = Some(done_event.clone());
+            let event = serde_json::from_str::<Value>(chunk).map_err(|_| {
+                search_stream_malformed("Search stream contained a non-JSON event", &context)
+            })?;
+            if done.is_some() {
+                return Err(search_stream_malformed(
+                    "Search stream contained an event after the terminal `done` event",
+                    &context,
+                ));
             }
-            Some("error") => return Err(search_stream_error(&event)),
-            _ => {}
+            if first_request_id.is_none() {
+                first_request_id = event
+                    .get("requestId")
+                    .and_then(Value::as_str)
+                    .filter(|request_id| !request_id.trim().is_empty())
+                    .map(str::to_string);
+            }
+            match event.get("type").and_then(Value::as_str) {
+                Some("results") => {
+                    results = event.get("results").cloned();
+                }
+                Some("done") => {
+                    let done_event = event
+                        .as_object()
+                        .expect("an event with a type field is an object");
+                    if !done_event.contains_key("output") {
+                        return Err(search_stream_malformed(
+                            "Search stream `done` event omitted required `output`",
+                            &context,
+                        ));
+                    }
+                    if !done_event.get("searchTime").is_some_and(Value::is_number) {
+                        return Err(search_stream_malformed(
+                            "Search stream `done` event omitted numeric `searchTime`",
+                            &context,
+                        ));
+                    }
+                    done = Some(done_event.clone());
+                }
+                Some("error") => return Err(search_stream_error(&event, &context)),
+                _ => {}
+            }
         }
     }
 
     let Some(mut data) = done else {
         return Err(search_stream_malformed(
             "Search stream ended before a final `done` event",
+            &context,
         ));
     };
     data.remove("type");
@@ -1780,11 +1938,21 @@ pub(crate) fn search_terminal_stream_data(frames: &[SseFrame]) -> Result<Value, 
     Ok(Value::Object(data))
 }
 
-fn search_stream_malformed(message: &'static str) -> CliError {
-    CliError::Upstream(Diag::new("upstream_malformed", message))
+#[derive(Default)]
+struct SearchStreamContext {
+    events_seen: u64,
+    last_event_id: Option<String>,
 }
 
-fn search_stream_error(event: &Value) -> CliError {
+fn search_stream_malformed(message: &'static str, context: &SearchStreamContext) -> CliError {
+    CliError::Upstream(
+        Diag::new("upstream_malformed", message)
+            .with_suggestion(search_stream_retry_command())
+            .with_details(search_stream_context_details(context)),
+    )
+}
+
+fn search_stream_error(event: &Value, context: &SearchStreamContext) -> CliError {
     const MESSAGE_CAP_BYTES: usize = 1024;
 
     let upstream_message = event
@@ -1797,13 +1965,48 @@ fn search_stream_error(event: &Value) -> CliError {
         "upstream_error",
         format!("Search stream failed upstream: {safe_message}"),
     )
-    .with_details(serde_json::json!({
+    .with_suggestion(search_stream_retry_command())
+    .with_details(search_stream_context_details_with(
+        context,
+        serde_json::json!({
         "streamEvent": "error",
         "upstreamMessage": safe_message,
         "upstreamTruncated": upstream_message.len() > safe_message.len(),
-    }));
+        }),
+    ));
     diag.retryable = true;
     CliError::Upstream(diag)
+}
+
+fn search_stream_retry_command() -> &'static str {
+    "exa-agent search --help"
+}
+
+const STREAM_EVENT_ID_DETAIL_CAP_BYTES: usize = 1024;
+
+pub fn stream_event_id_details(last_event_id: &str) -> Value {
+    let shown = truncate_at_char_boundary(last_event_id, STREAM_EVENT_ID_DETAIL_CAP_BYTES);
+    let mut details = serde_json::Map::new();
+    details.insert("lastEventId".to_string(), Value::String(shown.to_string()));
+    if shown.len() < last_event_id.len() {
+        details.insert("lastEventIdTruncated".to_string(), Value::Bool(true));
+    }
+    Value::Object(details)
+}
+
+fn search_stream_context_details(context: &SearchStreamContext) -> Value {
+    search_stream_context_details_with(context, serde_json::json!({}))
+}
+
+fn search_stream_context_details_with(context: &SearchStreamContext, extra: Value) -> Value {
+    let mut details = extra.as_object().cloned().unwrap_or_default();
+    details.insert("eventsSeen".to_string(), Value::from(context.events_seen));
+    if let Some(last_event_id) = &context.last_event_id {
+        if let Value::Object(event_id_details) = stream_event_id_details(last_event_id) {
+            details.extend(event_id_details);
+        }
+    }
+    Value::Object(details)
 }
 
 fn parsed_stream_events(frames: &[SseFrame]) -> impl Iterator<Item = Result<Value, String>> + '_ {
@@ -1838,7 +2041,10 @@ pub fn execute_raw_with_request_id<T: Transport>(
         write_trace_record(trace_path, &prepared, duration_ms, &outcome);
     }
 
-    let (response, retries) = outcome?;
+    let (mut response, retries) = outcome?;
+    if prepared.send_opts.payment_mode {
+        redact_payment_echoes_from_response(&mut response, &prepared.req.headers);
+    }
     Ok(RawExecuteResult {
         request_id: prepared.request_id,
         method: prepared.method,
@@ -2060,21 +2266,49 @@ fn write_trace_record(
     duration_ms: u64,
     outcome: &Result<(HttpResponse, u32), CliError>,
 ) {
+    let exact_secrets = payment_secret_values(&prepared.req.headers);
+    let encoded_url_secrets = exact_secret_url_redaction_values(&exact_secrets);
+    let url_secret_refs = encoded_url_secrets
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let record = serde_json::json!({
         "schema": "exa.cli.trace.v1",
         "ts": trace_timestamp(),
         "correlationId": prepared.correlation_id,
         "requestId": prepared.request_id,
         "method": prepared.req.method,
-        "url": prepared.req.url,
-        "requestHeaders": redact_headers_json(&prepared.req.headers),
-        "requestBody": prepared.req.body.as_deref().map(redact_body_bytes),
+        "url": if url_secret_refs.is_empty() {
+            prepared.req.url.clone()
+        } else {
+            redact_exact_strings(&prepared.req.url, &url_secret_refs)
+        },
+        "requestHeaders": if exact_secrets.is_empty() {
+            redact_headers_json(&prepared.req.headers)
+        } else {
+            redact_headers_json_with_exact(&prepared.req.headers, &exact_secrets)
+        },
+        "requestBody": prepared.req.body.as_deref().map(|body| {
+            if exact_secrets.is_empty() {
+                redact_body_bytes(body)
+            } else {
+                redact_body_bytes_with_exact(body, &exact_secrets)
+            }
+        }),
         "durationMs": duration_ms,
         "outcome": match outcome {
             Ok((response, retries)) => serde_json::json!({
                 "status": response.status,
-                "responseHeaders": redact_headers_json(&response.headers),
-                "responseBody": redact_body_bytes(&response.body),
+                "responseHeaders": if exact_secrets.is_empty() {
+                    redact_headers_json(&response.headers)
+                } else {
+                    redact_headers_json_with_exact(&response.headers, &exact_secrets)
+                },
+                "responseBody": if exact_secrets.is_empty() {
+                    redact_body_bytes(&response.body)
+                } else {
+                    redact_body_bytes_with_exact(&response.body, &exact_secrets)
+                },
                 "retries": retries,
             }),
             Err(err) => {
@@ -2101,21 +2335,44 @@ fn append_trace_line(path: &str, record: &Value) -> std::io::Result<()> {
 }
 
 /// `--trace` must never leak a credential. Redact any header whose name matches
-/// [`redaction::is_secret_name`] — this generically covers `Authorization`, `x-api-key`,
-/// `x-exa-service-key`, etc. without enumerating them here.
+/// [`redaction::is_secret_name`] and payment namespaces — this covers `Authorization`,
+/// `x-api-key`, `PAYMENT-SIGNATURE`, x402/MPP receipts, etc. without leaking protocol tokens.
 fn redact_headers_json(headers: &[(String, String)]) -> Value {
-    let map: serde_json::Map<String, Value> = headers
-        .iter()
-        .map(|(name, value)| {
-            let shown = if redaction::is_secret_name(name) {
-                redaction::REDACTED.to_string()
-            } else {
-                value.clone()
-            };
-            (name.clone(), Value::String(shown))
-        })
-        .collect();
+    redact_headers_json_with_exact(headers, &[])
+}
+
+fn redact_headers_json_with_exact(headers: &[(String, String)], exact_secrets: &[&str]) -> Value {
+    let mut map = serde_json::Map::new();
+    for (name, value) in headers {
+        let shown = if redaction::is_secret_name(name)
+            || is_payment_header_namespace(&name.to_ascii_lowercase())
+        {
+            redaction::REDACTED.to_string()
+        } else {
+            redact_exact_strings(value, exact_secrets)
+        };
+        insert_trace_header(
+            &mut map,
+            redact_exact_strings(name, exact_secrets),
+            Value::String(shown),
+        );
+    }
     Value::Object(map)
+}
+
+fn insert_trace_header(map: &mut serde_json::Map<String, Value>, key: String, value: Value) {
+    if !map.contains_key(&key) {
+        map.insert(key, value);
+        return;
+    }
+    let base = key;
+    for index in 2.. {
+        let candidate = format!("{base}#{index}");
+        if !map.contains_key(&candidate) {
+            map.insert(candidate, value);
+            return;
+        }
+    }
 }
 
 /// Parse a request/response body as JSON and recursively redact secret-named fields at any
@@ -2127,8 +2384,16 @@ fn redact_headers_json(headers: &[(String, String)]) -> Value {
 /// needs a sensible name, not a new redaction rule. Non-JSON bodies are recorded as a byte count
 /// rather than raw bytes, so binary/opaque payloads can't smuggle something unredacted into trace.
 fn redact_body_bytes(bytes: &[u8]) -> Value {
+    redact_body_bytes_with_exact(bytes, &[])
+}
+
+fn redact_body_bytes_with_exact(bytes: &[u8], exact_secrets: &[&str]) -> Value {
     match serde_json::from_slice::<Value>(bytes) {
-        Ok(value) => redact_json_recursive(value),
+        Ok(value) => {
+            let mut value = redact_json_recursive(value);
+            redact_json_exact_strings(&mut value, exact_secrets);
+            value
+        }
         Err(_) => serde_json::json!({ "nonJsonBytes": bytes.len() }),
     }
 }
@@ -2218,6 +2483,7 @@ mod tests {
         );
         // A remote host that merely starts with `127.` is not loopback.
         assert!(validate_base_url("http://127.0.0.1.evil.com").is_err());
+        assert!(validate_base_url("http://127.0.0.1:99999").is_err());
         assert!(validate_base_url("ftp://example.com").is_err());
     }
 
@@ -2846,6 +3112,73 @@ mod tests {
         let frames = parse_sse(b"data: {\"answer\":\"hi\"}\n\ndata: [DONE]\n\n");
         let data = accumulate_stream_data(&frames);
         assert_eq!(data["answer"], "hi");
+    }
+
+    #[test]
+    fn search_sse_error_event_reports_recovery_context() {
+        let frames = parse_sse(
+            br#"id: evt-1
+data: {"type":"results","results":[],"requestId":"search_req_error"}
+
+id: evt-2
+data: {"type":"error","error":{"message":"Search provider timed out"},"requestId":"search_req_error"}
+
+data: [DONE]
+
+"#,
+        );
+        let err = search_terminal_stream_data(&frames).unwrap_err();
+        assert_eq!(err.diag().code, "upstream_error");
+        assert!(err.diag().retryable);
+        assert_eq!(
+            err.diag().suggested_command.as_deref(),
+            Some("exa-agent search --help")
+        );
+        let details = err.diag().details.as_ref().unwrap();
+        assert_eq!(details["lastEventId"], "evt-2");
+        assert_eq!(details["eventsSeen"], 2);
+        assert_eq!(details["streamEvent"], "error");
+        assert_eq!(details["upstreamMessage"], "Search provider timed out");
+    }
+
+    #[test]
+    fn search_sse_missing_done_reports_recovery_context() {
+        let frames = parse_sse(
+            br#"id: evt-results
+data: {"type":"results","results":[{"title":"Partial"}],"requestId":"search_req_partial"}
+
+data: [DONE]
+
+"#,
+        );
+        let err = search_terminal_stream_data(&frames).unwrap_err();
+        assert_eq!(err.diag().code, "upstream_malformed");
+        assert!(!err.diag().retryable);
+        assert_eq!(
+            err.diag().suggested_command.as_deref(),
+            Some("exa-agent search --help")
+        );
+        let details = err.diag().details.as_ref().unwrap();
+        assert_eq!(details["lastEventId"], "evt-results");
+        assert_eq!(details["eventsSeen"], 1);
+    }
+
+    #[test]
+    fn search_sse_recovery_caps_oversized_unicode_event_id() {
+        let id = "é".repeat(600);
+        let sse = format!(
+            "id: {id}\ndata: {{\"type\":\"results\",\"results\":[],\"requestId\":\"search_req_partial\"}}\n\ndata: [DONE]\n\n"
+        );
+        let frames = parse_sse(sse.as_bytes());
+        let err = search_terminal_stream_data(&frames).unwrap_err();
+        let details = err.diag().details.as_ref().unwrap();
+        let shown = details["lastEventId"].as_str().unwrap();
+
+        assert_eq!(shown, "é".repeat(512));
+        assert!(shown.is_char_boundary(shown.len()));
+        assert_eq!(shown.len(), 1024);
+        assert_eq!(details["lastEventIdTruncated"], true);
+        assert_eq!(details["eventsSeen"], 1);
     }
 
     #[test]

@@ -4,9 +4,10 @@ use exa_agent_cli::auth::{self, CredentialInput, NoopKeyring, Secret};
 use exa_agent_cli::cli::GlobalArgs;
 use exa_agent_cli::error::{CliError, Diag};
 use exa_agent_cli::transport::{
-    answer_outcome, build_url, classify_http_status, contents_outcome, execute_raw, looks_binary,
-    parse_user_headers, probe_auth, probe_connectivity, row_has_usable_text, send_with_retry,
-    AuthProbe, FakeTransport, HttpRequest, SendOptions,
+    answer_outcome, build_url, classify_http_status, contents_outcome, execute_raw,
+    execute_raw_with_request_id, looks_binary, parse_user_headers, probe_auth, probe_connectivity,
+    row_has_usable_text, send_with_retry, AuthProbe, FakeTransport, HttpRequest, PaymentAuth,
+    RawAuth, RawExecuteParams, SendOptions,
 };
 
 #[test]
@@ -428,6 +429,93 @@ fn credit_exhaustion_body_is_billing_on_any_4xx() {
     assert_eq!(err.category(), 13);
 }
 
+#[test]
+fn payment_challenge_402_wins_over_credit_body_sniff() {
+    let err = send_with_retry(
+        &payment_challenge_transport(br#"{"tag":"NO_MORE_CREDITS"}"#),
+        &payment_request("pay_sig_challenge_wins"),
+        &payment_send_options(),
+    )
+    .unwrap_err();
+    assert_eq!(err.diag().code, "payment_required");
+    assert_eq!(err.category(), 2);
+}
+
+#[test]
+fn credit_body_sniff_ignores_server_errors() {
+    let err = classify_http_status(503, br#"{"tag":"NO_MORE_CREDITS"}"#, &[]);
+    assert_eq!(err.diag().code, "upstream_error");
+    assert_eq!(err.category(), 5);
+    assert!(err.diag().retryable);
+}
+
+#[test]
+fn payment_www_authenticate_parser_handles_quoted_commas() {
+    let fake = FakeTransport::default();
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 402,
+        headers: vec![(
+            "WWW-Authenticate".to_string(),
+            r#"Payment realm="exa \"team, alpha\"", max_amount="0.01""#.to_string(),
+        )],
+        body: br#"{"message":"payment required"}"#.to_vec(),
+    });
+    let err = send_with_retry(
+        &fake,
+        &payment_request("pay_sig_quoted_challenge"),
+        &payment_send_options(),
+    )
+    .unwrap_err();
+    assert_eq!(err.diag().code, "payment_required");
+    assert_eq!(
+        err.diag().details.as_ref().unwrap()["payment"]["headers"][0]["name"],
+        "WWW-Authenticate"
+    );
+}
+
+#[test]
+fn mixed_www_authenticate_schemes_are_not_payment_challenges() {
+    let fake = FakeTransport::default();
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 402,
+        headers: vec![(
+            "WWW-Authenticate".to_string(),
+            r#"Payment realm="exa", Bearer realm="api""#.to_string(),
+        )],
+        body: br#"{"message":"payment required"}"#.to_vec(),
+    });
+    let err = send_with_retry(
+        &fake,
+        &payment_request("pay_sig_mixed_challenge"),
+        &payment_send_options(),
+    )
+    .unwrap_err();
+    assert_eq!(err.diag().code, "insufficient_credits");
+}
+
+#[test]
+fn malformed_www_authenticate_payment_challenges_fail_closed() {
+    for value in [
+        r#"PaymentBearer realm="api""#,
+        r#"Payment realm="unterminated"#,
+        r#"Payment realm="dangling\""#,
+    ] {
+        let fake = FakeTransport::default();
+        fake.push_response(exa_agent_cli::transport::HttpResponse {
+            status: 402,
+            headers: vec![("WWW-Authenticate".to_string(), value.to_string())],
+            body: br#"{"message":"payment required"}"#.to_vec(),
+        });
+        let err = send_with_retry(
+            &fake,
+            &payment_request("pay_sig_bad_challenge"),
+            &payment_send_options(),
+        )
+        .unwrap_err();
+        assert_eq!(err.diag().code, "insufficient_credits", "{value}");
+    }
+}
+
 /// The sniff must stay narrow — an ordinary bad request that happens to mention credit is still
 /// a usage error, and a real auth failure is still an auth failure.
 #[test]
@@ -697,6 +785,282 @@ fn terminal_stream_data_concatenates_openai_delta_chunks() {
         terminal_stream_data(&frames),
         serde_json::json!({"answer":"hello"})
     );
+}
+
+#[test]
+fn successful_payment_trace_scrubs_echoed_payment_secret_values() {
+    let fake = FakeTransport::default();
+    let secret_value = "pay_sig_success_echo";
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 200,
+        headers: vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("x-debug-echo".to_string(), secret_value.to_string()),
+            (format!("x-{secret_value}-echo"), "header-name-secret".to_string()),
+            (
+                format!("x-{}-echo", exa_agent_cli::redaction::REDACTED),
+                "collision-preserved".to_string(),
+            ),
+        ],
+        body: format!(
+            r#"{{"{secret_value}":"key echo","nonce":"{secret_value}","nested":{{"copy":"{secret_value}"}}}}"#
+        )
+        .into_bytes(),
+    });
+    let trace_path = std::env::temp_dir().join(format!(
+        "exa-agent-payment-success-trace-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cli = parse_globals(&["--trace", trace_path.to_str().unwrap()]);
+    let signature = Secret::new(secret_value).unwrap();
+    let query = vec![format!("debug={secret_value}")];
+
+    let result = execute_raw_with_request_id(
+        &fake,
+        RawExecuteParams {
+            method: "POST",
+            path: "/search",
+            query_raw: &query,
+            body: serde_json::json!({"query":"hi"}),
+            globals: &cli,
+            auth: RawAuth::Payment(PaymentAuth::X402 {
+                signature: &signature,
+            }),
+            request_id: "req_payment_success_trace".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.response.status, 200);
+    assert!(
+        !String::from_utf8_lossy(&result.response.body).contains(secret_value),
+        "{:?}",
+        result.response
+    );
+    assert!(
+        result
+            .response
+            .headers
+            .iter()
+            .all(|(_, value)| !value.contains(secret_value)),
+        "{:?}",
+        result.response.headers
+    );
+
+    let trace = std::fs::read_to_string(&trace_path).unwrap();
+    let _ = std::fs::remove_file(trace_path);
+    assert!(!trace.contains(secret_value), "{trace}");
+    assert!(
+        trace.contains(exa_agent_cli::redaction::REDACTED),
+        "{trace}"
+    );
+    let record: serde_json::Value = serde_json::from_str(trace.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        record["url"],
+        format!(
+            "https://api.exa.ai/search?debug={}",
+            exa_agent_cli::redaction::REDACTED
+        )
+    );
+    let headers = record["outcome"]["responseHeaders"].as_object().unwrap();
+    let redacted_name = format!("x-{}-echo", exa_agent_cli::redaction::REDACTED);
+    assert_eq!(headers[&redacted_name], "header-name-secret");
+    assert_eq!(
+        headers[&format!("{redacted_name}#2")],
+        "collision-preserved"
+    );
+}
+
+#[test]
+fn payment_trace_url_redacts_percent_encoded_x402_and_mpp_secrets() {
+    for (auth, secret_value, encoded) in [
+        ("x402", "pay+sig/raw=", "pay%2Bsig%2Fraw%3D"),
+        (
+            "mpp",
+            "Payment pay+mpp/raw=",
+            "Payment%20pay%2Bmpp%2Fraw%3D",
+        ),
+    ] {
+        let fake = FakeTransport::default();
+        fake.push_response(exa_agent_cli::transport::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{"ok":true,"ordinary":"keep"}"#.to_vec(),
+        });
+        let trace_path = std::env::temp_dir().join(format!(
+            "exa-agent-payment-encoded-url-trace-{auth}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cli = parse_globals(&["--trace", trace_path.to_str().unwrap()]);
+        let secret = Secret::new(secret_value).unwrap();
+        let query = vec![format!("debug={secret_value}")];
+        let raw_auth = if auth == "x402" {
+            RawAuth::Payment(PaymentAuth::X402 { signature: &secret })
+        } else {
+            RawAuth::Payment(PaymentAuth::Mpp {
+                authorization: &secret,
+            })
+        };
+
+        let result = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &query,
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli,
+                auth: raw_auth,
+                request_id: format!("req_payment_encoded_url_{auth}"),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.response.body, br#"{"ok":true,"ordinary":"keep"}"#);
+
+        let trace = std::fs::read_to_string(&trace_path).unwrap();
+        let _ = std::fs::remove_file(trace_path);
+        assert!(!trace.contains(secret_value), "{trace}");
+        assert!(!trace.contains(encoded), "{trace}");
+        assert!(
+            trace.contains(exa_agent_cli::redaction::REDACTED),
+            "{trace}"
+        );
+        assert!(trace.contains(r#""ordinary":"keep""#), "{trace}");
+    }
+}
+
+#[test]
+fn payment_error_details_scrub_secret_json_keys() {
+    let fake = FakeTransport::default();
+    let secret_value = "pay_sig_error_key_echo";
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 503,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body: format!(r#"{{"{secret_value}":"top","nested":{{"{secret_value}":"nested"}}}}"#)
+            .into_bytes(),
+    });
+    let cli = parse_globals(&[]);
+    let signature = Secret::new(secret_value).unwrap();
+
+    let err = execute_raw_with_request_id(
+        &fake,
+        RawExecuteParams {
+            method: "POST",
+            path: "/search",
+            query_raw: &[],
+            body: serde_json::json!({"query":"hi"}),
+            globals: &cli,
+            auth: RawAuth::Payment(PaymentAuth::X402 {
+                signature: &signature,
+            }),
+            request_id: "req_payment_error_key".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    let details = serde_json::to_string(err.diag().details.as_ref().unwrap()).unwrap();
+    assert!(!details.contains(secret_value), "{details}");
+    assert!(
+        details.contains(exa_agent_cli::redaction::REDACTED),
+        "{details}"
+    );
+}
+
+#[test]
+fn successful_payment_raw_response_scrubs_secret_and_preserves_other_bytes() {
+    let fake = FakeTransport::default();
+    let secret_value = "pay_sig_raw_echo";
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 200,
+        headers: vec![
+            (
+                "x-debug-echo".to_string(),
+                format!("prefix-{secret_value}-suffix"),
+            ),
+            ("x-safe".to_string(), "keep-me".to_string()),
+        ],
+        body: [
+            b"before ".as_slice(),
+            &[0xff, 0x00],
+            secret_value.as_bytes(),
+            b" after".as_slice(),
+        ]
+        .concat(),
+    });
+    let cli = parse_globals(&[]);
+    let signature = Secret::new(secret_value).unwrap();
+
+    let result = execute_raw_with_request_id(
+        &fake,
+        RawExecuteParams {
+            method: "POST",
+            path: "/search",
+            query_raw: &[],
+            body: serde_json::json!({"query":"hi"}),
+            globals: &cli,
+            auth: RawAuth::Payment(PaymentAuth::X402 {
+                signature: &signature,
+            }),
+            request_id: "req_payment_raw_response".to_string(),
+        },
+    )
+    .unwrap();
+
+    let expected = [
+        b"before ".as_slice(),
+        &[0xff, 0x00],
+        exa_agent_cli::redaction::REDACTED.as_bytes(),
+        b" after".as_slice(),
+    ]
+    .concat();
+    assert_eq!(result.response.body, expected);
+    assert!(result
+        .response
+        .headers
+        .iter()
+        .any(|(name, value)| name == "x-debug-echo"
+            && value == &format!("prefix-{}-suffix", exa_agent_cli::redaction::REDACTED)));
+    assert!(result
+        .response
+        .headers
+        .iter()
+        .any(|(name, value)| name == "x-safe" && value == "keep-me"));
+}
+
+fn payment_challenge_transport(body: &[u8]) -> FakeTransport {
+    let fake = FakeTransport::default();
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 402,
+        headers: vec![("PAYMENT-REQUIRED".to_string(), "price=0.01".to_string())],
+        body: body.to_vec(),
+    });
+    fake
+}
+
+fn payment_request(secret: &str) -> HttpRequest {
+    HttpRequest {
+        method: "POST".into(),
+        url: "https://api.exa.ai/search".into(),
+        headers: vec![("PAYMENT-SIGNATURE".into(), secret.into())],
+        body: Some(br#"{"query":"hi"}"#.to_vec()),
+    }
+}
+
+fn payment_send_options() -> SendOptions {
+    SendOptions {
+        retry: 2,
+        retry_after: false,
+        idempotency_key: None,
+        follow_redirects: false,
+        payment_mode: true,
+    }
 }
 
 fn parse_globals(args: &[&str]) -> GlobalArgs {

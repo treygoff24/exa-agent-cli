@@ -337,10 +337,13 @@ where
     (format!("http://{addr}"), server)
 }
 
-const SEARCH_SSE_FIXTURE: &[u8] = br#"data: {"type":"text-delta","delta":"hello","requestId":"search_req_early"}
+const SEARCH_SSE_FIXTURE: &[u8] = br#"id: evt-search-delta-1
+data: {"type":"text-delta","delta":"hello","requestId":"search_req_early"}
 
+id: evt-search-results-2
 data: {"type":"results","results":[{"title":"Rust Async","url":"https://example.com/rust"}],"requestId":"search_req_results"}
 
+id: evt-search-done-3
 data: {"type":"done","output":{"content":{"summary":"hello"},"grounding":[]},"searchTime":1.25,"costDollars":{"total":0.012,"search":{"neural":0.007}},"requestId":"search_req_1"}
 
 data: [DONE]
@@ -371,6 +374,17 @@ fn local_search_sse_server_with_response(
 
 fn local_search_sse_server() -> (String, thread::JoinHandle<()>) {
     local_search_sse_server_with_response(SEARCH_SSE_FIXTURE)
+}
+
+fn assert_search_sse_recovery(error: &serde_json::Value, last_event_id: &str, events_seen: u64) {
+    let suggested = error["error"]["suggestedCommand"]
+        .as_str()
+        .expect("search SSE errors should carry recovery command");
+    assert!(suggested.starts_with("exa-agent search"), "{suggested}");
+    assert!(!suggested.contains("<query>"), "{suggested}");
+    assert!(!suggested.contains("@schema.json"), "{suggested}");
+    assert_eq!(error["error"]["details"]["lastEventId"], last_event_id);
+    assert_eq!(error["error"]["details"]["eventsSeen"], events_seen);
 }
 
 fn local_sse_stall_server(
@@ -2131,7 +2145,11 @@ fn search_sse_ndjson_maps_text_delta_and_keeps_terminal_shape() {
 
 #[test]
 fn search_sse_error_event_exits_upstream_with_empty_stdout() {
-    let response = br#"data: {"type":"error","error":{"message":"Search provider timed out"},"requestId":"search_req_error"}
+    let response = br#"id: evt-search-partial-1
+data: {"type":"results","results":[{"title":"Partial","url":"https://example.com"}],"requestId":"search_req_partial"}
+
+id: evt-search-error-2
+data: {"type":"error","error":{"message":"Search provider timed out"},"requestId":"search_req_error"}
 
 data: [DONE]
 
@@ -2165,11 +2183,73 @@ data: [DONE]
         .as_str()
         .unwrap()
         .contains("Search provider timed out"));
+    assert_search_sse_recovery(&error, "evt-search-error-2", 2);
+}
+
+#[test]
+fn search_sse_ndjson_error_keeps_partial_events_on_stdout_and_context_on_stderr() {
+    let response = br#"id: evt-search-delta-1
+data: {"type":"text-delta","delta":"hello","requestId":"search_req_early"}
+
+id: evt-search-results-2
+data: {"type":"results","results":[{"title":"Partial","url":"https://example.com"}],"requestId":"search_req_partial"}
+
+id: evt-search-error-3
+data: {"type":"error","error":{"message":"Search provider timed out"},"requestId":"search_req_error"}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_search_sse_server_with_response(response);
+    let output = run(&[
+        "search",
+        "rust async",
+        "--stream",
+        "--output-schema",
+        r#"{"type":"object"}"#,
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--ndjson",
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+
+    assert_eq!(output.status.code(), Some(5));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["schema"], "exa.cli.event.v1");
+    assert_eq!(lines[0]["type"], "delta");
+    assert_eq!(lines[0]["eventId"], "evt-search-delta-1");
+    assert_eq!(lines[0]["event"]["delta"], "hello");
+    assert_eq!(lines[1]["schema"], "exa.cli.event.v1");
+    assert_eq!(lines[1]["type"], "item");
+    assert_eq!(lines[1]["eventId"], "evt-search-results-2");
+    assert_eq!(lines[1]["event"]["results"][0]["title"], "Partial");
+    assert_eq!(lines[2]["schema"], "exa.cli.event.v1");
+    assert_eq!(lines[2]["type"], "error");
+    assert_eq!(lines[2]["eventId"], "evt-search-error-3");
+
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["schema"], "exa.cli.error.v1");
+    assert_eq!(error["ok"], false);
+    assert_eq!(error["error"]["code"], "upstream_error");
+    assert_eq!(
+        error["error"]["details"]["upstreamMessage"],
+        "Search provider timed out"
+    );
+    assert_search_sse_recovery(&error, "evt-search-error-3", 3);
 }
 
 #[test]
 fn search_sse_without_done_exits_upstream_malformed_with_empty_stdout() {
-    let response = br#"data: {"type":"results","results":[{"title":"Partial","url":"https://example.com"}],"requestId":"search_req_partial"}
+    let response = br#"id: evt-search-partial-1
+data: {"type":"results","results":[{"title":"Partial","url":"https://example.com"}],"requestId":"search_req_partial"}
 
 data: [DONE]
 
@@ -2196,11 +2276,13 @@ data: [DONE]
     assert_eq!(error["error"]["code"], "upstream_malformed");
     assert_eq!(error["error"]["retryable"], false);
     assert!(error["error"]["message"].as_str().unwrap().contains("done"));
+    assert_search_sse_recovery(&error, "evt-search-partial-1", 1);
 }
 
 #[test]
 fn search_sse_bare_done_exits_upstream_malformed() {
-    let response = br#"data: {"type":"done"}
+    let response = br#"id: evt-search-done-1
+data: {"type":"done"}
 
 data: [DONE]
 
@@ -2229,11 +2311,13 @@ data: [DONE]
         .as_str()
         .unwrap()
         .contains("output"));
+    assert_search_sse_recovery(&error, "evt-search-done-1", 1);
 }
 
 #[test]
 fn search_sse_done_requires_numeric_search_time() {
-    let response = br#"data: {"type":"done","output":null,"searchTime":"fast"}
+    let response = br#"id: evt-search-done-1
+data: {"type":"done","output":null,"searchTime":"fast"}
 
 data: [DONE]
 
@@ -2262,13 +2346,15 @@ data: [DONE]
         .as_str()
         .unwrap()
         .contains("searchTime"));
+    assert_search_sse_recovery(&error, "evt-search-done-1", 1);
 }
 
 #[test]
 fn search_sse_rejects_json_event_after_done() {
-    let response =
-        br#"data: {"type":"done","output":null,"searchTime":0,"requestId":"search_req_done"}
+    let response = br#"id: evt-search-done-1
+data: {"type":"done","output":null,"searchTime":0,"requestId":"search_req_done"}
 
+id: evt-search-after-done-2
 data: {"type":"grounding","grounding":[],"requestId":"search_req_done"}
 
 data: [DONE]
@@ -2298,6 +2384,7 @@ data: [DONE]
         .as_str()
         .unwrap()
         .contains("after the terminal"));
+    assert_search_sse_recovery(&error, "evt-search-after-done-2", 2);
 }
 
 #[test]
@@ -5700,78 +5787,153 @@ fn agent_runs_create_supports_budgeted_beta_max_effort() {
 
 #[test]
 fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
-    for args in [
-        &[
-            "agent",
-            "runs",
-            "create",
-            "q",
-            "--effort",
-            "max",
-            "--max-cost-dollars",
-            "20",
-            "--dry-run",
-            "--compact",
-        ][..],
-        &[
-            "agent",
-            "runs",
-            "create",
-            "q",
-            "--effort",
-            "max",
-            "--beta",
-            "agent-max-effort-2026-07-27",
-            "--dry-run",
-            "--compact",
-        ],
-        &[
-            "agent",
-            "runs",
-            "create",
-            "q",
-            "--effort",
-            "high",
-            "--max-cost-dollars",
-            "10",
-            "--dry-run",
-            "--compact",
-        ],
-        &[
-            "agent",
-            "runs",
-            "create",
-            "q",
-            "--body",
-            r#"{"effort":"auto","budget":{}}"#,
-            "--dry-run",
-            "--compact",
-        ],
-        &[
-            "agent",
-            "runs",
-            "create",
-            "q",
-            "--body",
-            r#"{"effort":"auto","budget":{"maxCostDollars":"10"}}"#,
-            "--dry-run",
-            "--compact",
-        ],
-        &[
-            "agent",
-            "runs",
-            "create",
-            "q",
-            "--body",
-            r#"{"effort":"auto","budget":{"maxCostDollars":101}}"#,
-            "--dry-run",
-            "--compact",
-        ],
+    for (args, expected_suggestion) in [
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--effort",
+                "max",
+                "--max-cost-dollars",
+                "20",
+                "--dry-run",
+                "--compact",
+            ][..],
+            "exa-agent agent runs create 'expensive research' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27 --dry-run --print-request",
+        ),
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--effort",
+                "max",
+                "--beta",
+                "agent-max-effort-2026-07-27",
+                "--dry-run",
+                "--compact",
+            ],
+            "exa-agent agent runs create 'expensive research' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27 --dry-run --print-request",
+        ),
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--effort",
+                "high",
+                "--max-cost-dollars",
+                "10",
+                "--dry-run",
+                "--compact",
+            ],
+            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 10 --dry-run --print-request",
+        ),
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--body",
+                r#"{"effort":"auto","budget":"bad"}"#,
+                "--dry-run",
+                "--compact",
+            ],
+            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+        ),
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--body",
+                r#"{"effort":"auto","budget":{}}"#,
+                "--dry-run",
+                "--compact",
+            ],
+            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+        ),
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--body",
+                r#"{"effort":"auto","budget":{"maxCostDollars":"10"}}"#,
+                "--dry-run",
+                "--compact",
+            ],
+            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+        ),
+        (
+            &[
+                "agent",
+                "runs",
+                "create",
+                "expensive research",
+                "--body",
+                r#"{"effort":"auto","budget":{"maxCostDollars":101}}"#,
+                "--dry-run",
+                "--compact",
+            ],
+            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+        ),
     ] {
         let output = run(args);
         assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(output.stdout.is_empty());
+        let stderr = stderr_json(&output);
+        assert_eq!(
+            stderr["error"]["suggestedCommand"],
+            expected_suggestion,
+            "{args:?}"
+        );
+        assert!(stderr["error"]["suggestedCommand"]
+            .as_str()
+            .unwrap()
+            .contains("'expensive research'"));
+        assert!(!stderr["error"]["suggestedCommand"]
+            .as_str()
+            .unwrap()
+            .contains("'query'"));
     }
+}
+
+#[test]
+fn agent_data_source_too_many_suggestion_preserves_query() {
+    let output = run(&[
+        "agent",
+        "runs",
+        "create",
+        "provider audit",
+        "--data-source",
+        "fiber",
+        "--data-source",
+        "financial_datasets",
+        "--data-source",
+        "similarweb",
+        "--data-source",
+        "baselayer",
+        "--data-source",
+        "affiliate",
+        "--data-source",
+        "particle",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_json(&output);
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "exa-agent agent runs create 'provider audit' --data-source similarweb"
+    );
 }
 
 #[test]

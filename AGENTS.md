@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 67 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints the upstream bytes as-is, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 67 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `[REDACTED]`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 
@@ -71,7 +71,7 @@ Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's r
 
 Error envelope (`exa.cli.error.v1`, stderr): `error.code` (from the published dictionary below), `error.message`, and often `suggestedCommand`. Stdout stays empty on error.
 
-Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits the exact upstream bytes with no CLI envelope. `-o/--output FILE` writes the complete selected output (exact bytes for `--raw`) to `FILE`; stdout carries only a small confirmation envelope with `dataPath`, and an explicit output path supersedes state-dir auto-spill.
+Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits exact upstream bytes with no CLI envelope except signed-payment output replaces exact submitted payment credential echoes with `[REDACTED]`. `-o/--output FILE` writes the complete selected output to `FILE` (same signed-payment redaction rule for `--raw`); stdout carries only a small confirmation envelope with `dataPath`, and an explicit output path supersedes state-dir auto-spill.
 
 ## Exit codes
 
@@ -94,7 +94,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 
 `error.code` is the finer-grained signal — 34 codes map onto these 14 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
 
-**Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** A 402 without a payment challenge, or any 4xx body carrying `NO_MORE_CREDITS`, means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane. Challenge-evidenced 402 on raw payment discovery is `payment_required` / exit `2`.
+**Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** Challenge-evidenced raw payment 402 is checked first and is `payment_required` / exit `2`; otherwise a bare 402, or any 4xx body carrying `NO_MORE_CREDITS`, means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane.
 
 Dispatch-level body validation runs before credential resolution and network I/O. Body-level mistakes (unknown fields, out-of-range values, missing required fields, or a malformed `--body`/`--set`) exit `1` as a local `usage` error rather than being sent upstream and returning `5`. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
 
@@ -104,7 +104,7 @@ Dispatch-level body validation runs before credential resolution and network I/O
 - Create-POSTs never auto-retry without `--idempotency-key` — retrying a create on a post-send timeout can double-bill. An ambiguous create failure writes a local pending-run record and the error names the exact recovery command.
 - `--dry-run --print-request` works on every mutation: it builds and prints the exact request body without sending it.
 - `--header` cannot override managed auth or payment headers (`Authorization`, payment namespaces, or other secret headers) — refused at exit `1`.
-- Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` are limited to exact nonstreaming `raw POST /search` or `/contents` on the default host; payment values are stdin-only and never combined with API/service credentials.
+- Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` are limited to exact nonstreaming `raw POST /search` or `/contents` on the default host; payment values are stdin-only and never combined with API/service credentials. Successful signed raw payment responses redact exact submitted payment credential echoes before any output. JSON-envelope mode adds top-level `payment: { kind: "receipt", headers: [...] }` receipt metadata after `dataTruncated`; under `--raw`, no envelope or `payment` metadata is added and output is exact except those echoes are replaced with `[REDACTED]`.
 
 ## Machine self-description
 

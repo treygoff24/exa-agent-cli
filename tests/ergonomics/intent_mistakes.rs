@@ -36,7 +36,7 @@ fn search_plural_include_domains_points_to_the_canonical_flag_without_echoing_cr
 
 #[test]
 fn corrected_commands_omit_secret_bearing_raw_inputs() {
-    for (args, canary) in [
+    for (args, canary, omitted_flag) in [
         (
             vec![
                 "--header",
@@ -47,6 +47,7 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
                 "--json",
             ],
             "HEADER_SECRET_CANARY",
+            "--header",
         ),
         (
             vec![
@@ -57,6 +58,7 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
                 "--json",
             ],
             "EQUALS_HEADER_SECRET_CANARY",
+            "--header",
         ),
         (
             vec![
@@ -68,6 +70,7 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
                 "--json",
             ],
             "SET_SECRET_CANARY",
+            "--set",
         ),
         (
             vec![
@@ -79,6 +82,7 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
                 "--json",
             ],
             "BODY_SECRET_CANARY",
+            "--body",
         ),
         (
             vec![
@@ -90,6 +94,7 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
                 "--json",
             ],
             "BASE_URL_SECRET_CANARY",
+            "--base-url",
         ),
         (
             vec![
@@ -100,6 +105,99 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
                 "--json",
             ],
             "EQUALS_BASE_URL_SECRET_CANARY",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url",
+                "https://example.com/not-an-origin",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "not-an-origin",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url=https://example.com?debug=BASE_URL_QUERY_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "BASE_URL_QUERY_CANARY",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url=https://example.com#BASE_URL_FRAGMENT_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "BASE_URL_FRAGMENT_CANARY",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url",
+                "http://example.com",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "http://example.com",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url=https://example.com%2FBASE_URL_PERCENT_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "BASE_URL_PERCENT_CANARY",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url",
+                r"https://example.com\BASE_URL_BACKSLASH_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "BASE_URL_BACKSLASH_CANARY",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url",
+                "https://example.com BASE_URL_SPACE_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "BASE_URL_SPACE_CANARY",
+            "--base-url",
+        ),
+        (
+            vec![
+                "--base-url=https://example.com:99999",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "99999",
+            "--base-url",
         ),
     ] {
         let json = error_json(&args);
@@ -107,8 +205,91 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
             json["error"]["suggestedCommand"],
             "exa-agent search rust --json"
         );
+        assert_eq!(
+            json["error"]["details"]["omittedFlags"],
+            serde_json::json!([omitted_flag])
+        );
         assert!(!json.to_string().contains(canary));
     }
+}
+
+#[test]
+fn corrected_commands_preserve_safe_base_url() {
+    for (args, expected) in [
+        (
+            vec![
+                "--base-url",
+                "http://127.0.0.1:9",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "exa-agent --base-url http://127.0.0.1:9 search rust --json",
+        ),
+        (
+            vec![
+                "--base-url=https://example.com",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "exa-agent --base-url=https://example.com search rust --json",
+        ),
+    ] {
+        let json = error_json(&args);
+        assert_eq!(json["error"]["suggestedCommand"], expected);
+        assert!(json["error"]["details"].get("omittedFlags").is_none());
+    }
+}
+
+#[test]
+fn corrected_commands_report_all_omitted_semantic_flags_without_values() {
+    let json = error_json(&[
+        "--api-key",
+        "API_SECRET_CANARY",
+        "--header",
+        "x-extra: HEADER_SECRET_CANARY",
+        "search",
+        "--query",
+        "rust",
+        "--set",
+        "contents.token=SET_SECRET_CANARY",
+        "--body",
+        r#"{"token":"BODY_SECRET_CANARY"}"#,
+        "--json",
+    ]);
+    assert_eq!(
+        json["error"]["details"]["omittedFlags"],
+        serde_json::json!(["--api-key", "--header", "--set", "--body"])
+    );
+    let rendered = json.to_string();
+    for canary in [
+        "API_SECRET_CANARY",
+        "HEADER_SECRET_CANARY",
+        "SET_SECRET_CANARY",
+        "BODY_SECRET_CANARY",
+    ] {
+        assert!(!rendered.contains(canary));
+    }
+}
+
+#[test]
+fn non_recovery_clap_errors_do_not_report_omitted_flags() {
+    let json = error_json(&[
+        "--api-key",
+        "API_SECRET_CANARY",
+        "search",
+        "rust",
+        "--category",
+        "companys",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(json["error"]["code"], "invalid_value");
+    assert!(json["error"]["details"].get("omittedFlags").is_none());
+    assert!(!json.to_string().contains("API_SECRET_CANARY"));
 }
 
 #[test]

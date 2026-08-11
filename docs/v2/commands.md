@@ -203,9 +203,9 @@ Work on every command unless explicitly irrelevant. Output flags follow D6 / con
 | `--format human\|json\|ndjson` | Canonical format selector. |
 | `--json` | Alias for `--format json`. |
 | `--ndjson` | Alias for `--format ndjson` (one envelope per line; streams/batches/`--all`). |
-| `--raw` | Exact upstream bytes, **no** CLI envelope. `--raw --stream` = raw SSE. Single spelling. |
+| `--raw` | Exact upstream bytes, **no** CLI envelope. Signed payment raw output is exact except exact submitted payment credential echoes are replaced with `[REDACTED]`. `--raw --stream` = raw SSE. Single spelling. |
 | `--pretty` / `--compact` | Whitespace only. Default: pretty in TTY, compact when piped. |
-| `-o, --output FILE` | Write the envelope (or `--raw` bytes) to FILE; stdout carries a small confirmation envelope with `dataPath` (D10, contracts §9). Context-window protection. |
+| `-o, --output FILE` | Write the envelope (or `--raw` bytes, subject to signed-payment echo redaction) to FILE; stdout carries a small confirmation envelope with `dataPath` (D10, contracts §9). Context-window protection. |
 | `--max-output-bytes N` | Default-on ceiling on inline stdout payload (default 48 KiB); over-ceiling spills pretty-printed JSON to a file + handle (contracts §9). `0` disables. |
 | `--correlation-id ID` | Agent-supplied id echoed into `request.correlationId` across stdout/stderr/`--trace` (contracts §4). Env: `EXA_CORRELATION_ID`. |
 
@@ -231,7 +231,7 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 | `--header 'Name: value'` | Extra header; repeatable; managed auth, payment, and secret headers are refused/redacted. |
 | `--beta VALUE` | Sets the Exa beta header where required. |
 | `--payment-discovery` | Raw-only unauthenticated challenge request for exact nonstreaming `POST /search` or `/contents` on the default host. No retries, redirects, API key, or idempotency key. |
-| `--x402-payment-stdin` / `--mpp-payment-stdin` | Raw-only signed payment pass-through for exact nonstreaming `POST /search` or `/contents`. Reads the complete payment header value from stdin; conflicts with API/service credentials and other stdin body/input. |
+| `--x402-payment-stdin` / `--mpp-payment-stdin` | Raw-only signed payment pass-through for exact nonstreaming `POST /search` or `/contents`. Reads the complete payment header value from stdin; conflicts with API/service credentials and other stdin body/input. Raw output has no envelope/payment metadata and replaces exact submitted payment credential echoes with `[REDACTED]`. |
 | `--timeout DURATION` / `--connect-timeout DURATION` | e.g. `30s`. |
 | `--retry N` | Retry count for retryable failures (default 2). Auto-retry applies only to GETs, network (exit-4), 429, 5xx — **never** un-keyed create-POSTs (D7, contracts §7). |
 | `--retry-after` | Honor `Retry-After` on 429 (default on). |

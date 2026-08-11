@@ -44,3 +44,27 @@ fn architecture_doc_rejects_boolean_values_for_optional_text() {
     assert!(!architecture
         .contains("`--text[=N|full]` normalizes to `text.maxCharacters`, `true`, or `false`"));
 }
+
+#[test]
+fn contracts_document_successful_raw_payment_receipt_metadata() {
+    let contracts = include_str!("../docs/v2/contracts.md");
+    assert!(contracts.contains(
+        "`payment` is a top-level field only on successful signed raw payment responses"
+    ));
+    assert!(
+        contracts.contains("It is inserted after `dataTruncated` and is never nested under `data`")
+    );
+    assert!(contracts.contains(
+        "case-insensitively match `payment-response`, `payment-receipt`, `x-payment-response`, or `x-payment-receipt`"
+    ));
+    assert!(contracts.contains("with `name` casing preserved as received"));
+    assert!(contracts.contains(
+        "all non-payment raw bytes remain exact, while signed payment raw output is exact except exact submitted payment credential echoes are replaced with `[REDACTED]`"
+    ));
+    assert!(contracts.contains(
+        "Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `[REDACTED]`"
+    ));
+    assert!(contracts.contains(
+        "Successful signed payment responses redact exact submitted payment credential echoes before any output"
+    ));
+}

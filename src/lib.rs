@@ -7182,14 +7182,14 @@ fn write_stream_terminal(
     last_event_id: Option<&str>,
 ) -> Result<(), CliError> {
     if ndjson {
-        write_ndjson(out, envelope).map_err(|err| stream_write_error(err, last_event_id))
+        write_ndjson(out, envelope)
     } else if human {
-        out.flush()
-            .map_err(|err| stream_write_error(err, last_event_id))
+        Ok(())
     } else {
         write_stdout_value(out, envelope, pretty)
-            .map_err(|err| stream_write_error(err, last_event_id))
     }
+    .and_then(|_| out.flush())
+    .map_err(|err| stream_write_error(err, last_event_id))
 }
 
 fn written_output_bytes(path: &str) -> u64 {
@@ -9760,6 +9760,7 @@ fn dispatch_raw_inner(
     reject_placeholder_value(&args.path, "path")?;
     parse_user_headers(&globals.headers)?;
     validate_raw_payment_stdin_conflicts(globals)?;
+    validate_raw_payment_idempotency(globals)?;
     if payment_flow_requested(globals) {
         let cfg = config::Config::load()?;
         transport::payment_base_url(globals, &cfg, &args.path, method)?;
@@ -10012,6 +10013,26 @@ fn validate_raw_payment_stdin_conflicts(globals: &GlobalArgs) -> Result<(), CliE
         ));
     }
     Ok(())
+}
+
+fn validate_raw_payment_idempotency(globals: &GlobalArgs) -> Result<(), CliError> {
+    if globals.idempotency_key.is_none() || !payment_flow_requested(globals) {
+        return Ok(());
+    }
+    let suggestion = if globals.mpp_payment_stdin {
+        "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json"
+    } else if globals.x402_payment_stdin {
+        "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"
+    } else {
+        "exa-agent --payment-discovery raw POST /search --body @request.json"
+    };
+    Err(CliError::Usage(
+        Diag::new(
+            "invalid_flag_combination",
+            "payment modes do not support --idempotency-key; remove --idempotency-key",
+        )
+        .with_suggestion(suggestion),
+    ))
 }
 
 fn validate_raw_payment_body(
@@ -10730,6 +10751,24 @@ mod tests {
         }
     }
 
+    struct FailOnFlush {
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailOnFlush {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "flush failed",
+            ))
+        }
+    }
+
     #[test]
     fn stream_event_ndjson_write_failure_returns_interrupted() {
         let mut out = FailAfterWrites {
@@ -10757,6 +10796,21 @@ mod tests {
         assert_eq!(err.diag().code, "interrupted");
         assert_eq!(seq, 1);
         assert!(String::from_utf8_lossy(&out.bytes).contains("\"eventId\":\"evt-1\""));
+    }
+
+    #[test]
+    fn stream_terminal_flush_failure_returns_interrupted() {
+        let mut out = FailOnFlush { bytes: Vec::new() };
+        let envelope = serde_json::json!({"schema":"exa.cli.response.v1","ok":true});
+
+        let err =
+            write_stream_terminal(&mut out, &envelope, false, false, false, Some("evt-final"))
+                .unwrap_err();
+
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().code, "interrupted");
+        assert_eq!(err.diag().details.as_ref().unwrap()["lastEventId"], "evt-final");
+        assert!(!out.bytes.is_empty());
     }
 
     #[test]

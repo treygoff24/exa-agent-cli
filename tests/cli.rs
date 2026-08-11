@@ -4123,6 +4123,36 @@ fn raw_payment_dry_run_is_limited_to_exact_search_or_contents_default_host() {
 }
 
 #[test]
+fn raw_payment_dry_run_rejects_idempotency_key_without_echoing_it() {
+    for flag in [
+        "--x402-payment-stdin",
+        "--mpp-payment-stdin",
+        "--payment-discovery",
+    ] {
+        let output = run(&[
+            flag,
+            "--idempotency-key",
+            "IDEMPOTENCY_SECRET_CANARY",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{flag}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("IDEMPOTENCY_SECRET_CANARY"), "{flag}");
+        assert_eq!(
+            stderr_json(&output)["error"]["code"],
+            "invalid_flag_combination",
+            "{flag}"
+        );
+    }
+}
+
+#[test]
 fn payment_modes_are_raw_only_and_conflict_with_explicit_api_credentials() {
     let non_raw = run(&[
         "--payment-discovery",

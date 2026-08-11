@@ -455,7 +455,10 @@ impl std::fmt::Debug for GlobalArgs {
             .field("connect_timeout", &self.connect_timeout)
             .field("retry", &self.retry)
             .field("retry_after", &self.retry_after)
-            .field("idempotency_key", &self.idempotency_key)
+            .field(
+                "idempotency_key",
+                &self.idempotency_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("input", &self.input)
             .field("input_format", &self.input_format)
             .field(

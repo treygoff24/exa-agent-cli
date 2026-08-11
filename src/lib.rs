@@ -897,6 +897,29 @@ fn process_arg_omission(args: &[String], index: usize) -> Option<ProcessArgOmiss
             flag: "--set",
             width: 1,
         }),
+        "--query"
+            if args.get(index + 1).is_some_and(|value| {
+                value
+                    .split_once('=')
+                    .is_some_and(|(name, _)| redaction::is_secret_name(name))
+            }) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--query",
+                width: 2,
+            })
+        }
+        arg if arg.strip_prefix("--query=").is_some_and(|value| {
+            value
+                .split_once('=')
+                .is_some_and(|(name, _)| redaction::is_secret_name(name))
+        }) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--query",
+                width: 1,
+            })
+        }
         arg if arg
             .strip_prefix("--body=")
             .is_some_and(|value| !value.starts_with('@')) =>
@@ -10020,18 +10043,14 @@ fn validate_raw_payment_idempotency(globals: &GlobalArgs) -> Result<(), CliError
         return Ok(());
     }
     let suggestion = if globals.mpp_payment_stdin {
-        "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json"
+        transport::MPP_PAYMENT_RETRY_SUGGESTION
     } else if globals.x402_payment_stdin {
-        "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"
+        transport::X402_PAYMENT_RETRY_SUGGESTION
     } else {
-        "exa-agent --payment-discovery raw POST /search --body @request.json"
+        transport::PAYMENT_DISCOVERY_RETRY_SUGGESTION
     };
-    Err(CliError::Usage(
-        Diag::new(
-            "invalid_flag_combination",
-            "payment modes do not support --idempotency-key; remove --idempotency-key",
-        )
-        .with_suggestion(suggestion),
+    Err(transport::payment_idempotency_usage_for_suggestion(
+        suggestion,
     ))
 }
 

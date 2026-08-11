@@ -214,6 +214,47 @@ fn corrected_commands_omit_secret_bearing_raw_inputs() {
 }
 
 #[test]
+fn corrected_raw_commands_omit_secret_named_query_values() {
+    for (args, canary) in [
+        (
+            vec![
+                "raw",
+                "GET",
+                "/search",
+                "--query",
+                "token=QUERY_SECRET_CANARY",
+                "--format",
+                "jsonn",
+            ],
+            "QUERY_SECRET_CANARY",
+        ),
+        (
+            vec![
+                "raw",
+                "GET",
+                "/search",
+                "--query=apiKey=EQUALS_QUERY_SECRET_CANARY",
+                "--format",
+                "jsonn",
+            ],
+            "EQUALS_QUERY_SECRET_CANARY",
+        ),
+    ] {
+        let json = error_json(&args);
+        assert_eq!(json["error"]["code"], "invalid_value");
+        assert_eq!(
+            json["error"]["suggestedCommand"],
+            "exa-agent raw GET /search --format json"
+        );
+        assert_eq!(
+            json["error"]["details"]["omittedFlags"],
+            serde_json::json!(["--query"])
+        );
+        assert!(!json.to_string().contains(canary));
+    }
+}
+
+#[test]
 fn corrected_commands_preserve_safe_base_url() {
     for (args, expected) in [
         (

@@ -10327,6 +10327,8 @@ fn debug_redacts_global_secret_values() {
         "Authorization: Bearer header-secret",
         "--header",
         "x-exa-service-key: service-key-secret",
+        "--idempotency-key",
+        "idempotency-secret",
         "--set",
         "webhookSecret=set-secret",
         "--body",
@@ -10342,6 +10344,7 @@ fn debug_redacts_global_secret_values() {
     assert!(!dbg.contains("service-secret-key"));
     assert!(!dbg.contains("header-secret"));
     assert!(!dbg.contains("service-key-secret"));
+    assert!(!dbg.contains("idempotency-secret"));
     assert!(!dbg.contains("set-secret"));
     assert!(!dbg.contains("body-secret"));
     assert!(dbg.contains("<redacted>"));

@@ -532,16 +532,16 @@ fn forbidden_header_suggestion(name: &str, value: &str) -> &'static str {
             | "x-payment-receipt"
             | "www-authenticate"
     ) {
-        return "exa-agent --payment-discovery raw POST /search --body @request.json";
+        return PAYMENT_DISCOVERY_RETRY_SUGGESTION;
     }
     if n == "payment-signature" || n.starts_with("x-payment") {
-        return "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json";
+        return X402_PAYMENT_RETRY_SUGGESTION;
     }
     if n == "authorization" && value.to_ascii_lowercase().starts_with("payment ") {
-        return "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json";
+        return MPP_PAYMENT_RETRY_SUGGESTION;
     }
     if is_payment_header_namespace(&n) {
-        return "exa-agent --payment-discovery raw POST /search --body @request.json";
+        return PAYMENT_DISCOVERY_RETRY_SUGGESTION;
     }
     "use --api-key / EXA_API_KEY; auth headers are injected by the CLI"
 }
@@ -950,7 +950,10 @@ pub fn send_with_retry<T: Transport>(
                 }
                 return Err(err);
             }
-            Err(err) => {
+            Err(mut err) => {
+                if options.payment_mode {
+                    redact_payment_echoes_from_error(&mut err, &req.headers);
+                }
                 if should_retry(
                     &req.method,
                     options.idempotency_key.as_deref(),
@@ -2274,31 +2277,36 @@ pub(crate) fn payment_base_url(
 fn payment_usage(message: &str) -> CliError {
     CliError::Usage(
         Diag::new("invalid_flag_combination", message)
-            .with_suggestion("printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"),
+            .with_suggestion(X402_PAYMENT_RETRY_SUGGESTION),
     )
 }
 
-fn payment_idempotency_usage(auth: RawAuth<'_>) -> CliError {
+pub const X402_PAYMENT_RETRY_SUGGESTION: &str =
+    "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json";
+pub const MPP_PAYMENT_RETRY_SUGGESTION: &str =
+    "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json";
+pub const PAYMENT_DISCOVERY_RETRY_SUGGESTION: &str =
+    "exa-agent --payment-discovery raw POST /search --body @request.json";
+
+pub fn payment_idempotency_usage_for_suggestion(suggestion: &'static str) -> CliError {
     CliError::Usage(
         Diag::new(
             "invalid_flag_combination",
             "payment modes do not support --idempotency-key; remove --idempotency-key",
         )
-        .with_suggestion(payment_mode_retry_suggestion(auth)),
+        .with_suggestion(suggestion),
     )
+}
+
+fn payment_idempotency_usage(auth: RawAuth<'_>) -> CliError {
+    payment_idempotency_usage_for_suggestion(payment_mode_retry_suggestion(auth))
 }
 
 fn payment_mode_retry_suggestion(auth: RawAuth<'_>) -> &'static str {
     match auth {
-        RawAuth::Payment(PaymentAuth::Mpp { .. }) => {
-            "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json"
-        }
-        RawAuth::Payment(PaymentAuth::X402 { .. }) => {
-            "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"
-        }
-        RawAuth::PaymentDiscovery => {
-            "exa-agent --payment-discovery raw POST /search --body @request.json"
-        }
+        RawAuth::Payment(PaymentAuth::Mpp { .. }) => MPP_PAYMENT_RETRY_SUGGESTION,
+        RawAuth::Payment(PaymentAuth::X402 { .. }) => X402_PAYMENT_RETRY_SUGGESTION,
+        RawAuth::PaymentDiscovery => PAYMENT_DISCOVERY_RETRY_SUGGESTION,
         RawAuth::Api(_) => "exa-agent raw POST /search --body @request.json",
     }
 }
@@ -2359,7 +2367,12 @@ fn write_trace_record(
             }),
             Err(err) => {
                 let diag = err.diag();
-                serde_json::json!({ "error": { "code": diag.code.clone(), "message": diag.message.clone() } })
+                let message = if exact_secrets.is_empty() {
+                    diag.message.clone()
+                } else {
+                    redact_exact_strings(&diag.message, &exact_secrets)
+                };
+                serde_json::json!({ "error": { "code": diag.code.clone(), "message": message } })
             }
         },
     });
@@ -2790,6 +2803,44 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_trace".to_string(),
+            },
+        )
+        .unwrap_err();
+        let diag = format!("{:?}", err.diag());
+        assert!(!diag.contains(secret_value), "{diag}");
+        assert!(diag.contains(crate::redaction::REDACTED));
+        let trace = std::fs::read_to_string(&trace_path).unwrap();
+        assert!(!trace.contains(secret_value), "{trace}");
+        assert!(trace.contains(crate::redaction::REDACTED));
+        let _ = std::fs::remove_file(trace_path);
+
+        let fake = FakeTransport::default();
+        fake.push_err(CliError::Network(Diag::new(
+            "network_error",
+            format!("transport echoed {secret_value}"),
+        )));
+        let trace_path = std::env::temp_dir().join(format!(
+            "exa-agent-payment-transport-trace-{}-{}.jsonl",
+            std::process::id(),
+            trace_timestamp()
+        ));
+        let trace_arg = trace_path.to_string_lossy().into_owned();
+        let cli =
+            crate::cli::Cli::try_parse_from(["exa-agent", "--trace", &trace_arg, "capabilities"])
+                .unwrap();
+        let signature = Secret::new(secret_value).unwrap();
+        let err = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &[],
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli.globals,
+                auth: RawAuth::Payment(PaymentAuth::X402 {
+                    signature: &signature,
+                }),
+                request_id: "req_transport_trace".to_string(),
             },
         )
         .unwrap_err();

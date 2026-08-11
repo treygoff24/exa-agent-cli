@@ -10809,7 +10809,10 @@ mod tests {
 
         assert_eq!(err.category(), 12);
         assert_eq!(err.diag().code, "interrupted");
-        assert_eq!(err.diag().details.as_ref().unwrap()["lastEventId"], "evt-final");
+        assert_eq!(
+            err.diag().details.as_ref().unwrap()["lastEventId"],
+            "evt-final"
+        );
         assert!(!out.bytes.is_empty());
     }
 

@@ -245,6 +245,37 @@ fn corrected_commands_preserve_safe_base_url() {
 }
 
 #[test]
+fn corrected_commands_preserve_at_file_body_without_omitted_flags() {
+    let unknown_flag = error_json(&["search", "--query", "rust", "--body", "@request.json"]);
+    assert_eq!(
+        unknown_flag["error"]["suggestedCommand"],
+        "exa-agent search rust --body @request.json"
+    );
+    assert!(unknown_flag["error"]["details"]
+        .get("omittedFlags")
+        .is_none());
+
+    let rejected_value = error_json(&[
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "jsonn",
+        "--body",
+        "@request.json",
+        "--compact",
+    ]);
+    assert_eq!(
+        rejected_value["error"]["suggestedCommand"],
+        "exa-agent websets exports create ws_1 --format json --body @request.json --compact"
+    );
+    assert!(rejected_value["error"]["details"]
+        .get("omittedFlags")
+        .is_none());
+}
+
+#[test]
 fn corrected_commands_report_all_omitted_semantic_flags_without_values() {
     let json = error_json(&[
         "--api-key",
@@ -290,6 +321,45 @@ fn non_recovery_clap_errors_do_not_report_omitted_flags() {
     assert_eq!(json["error"]["code"], "invalid_value");
     assert!(json["error"]["details"].get("omittedFlags").is_none());
     assert!(!json.to_string().contains("API_SECRET_CANARY"));
+}
+
+#[test]
+fn rejected_value_recovery_reports_sanitized_omitted_flags_without_leaks() {
+    let json = error_json(&[
+        "--api-key",
+        "API_SECRET_CANARY",
+        "--header",
+        "x-extra: HEADER_SECRET_CANARY",
+        "websets",
+        "exports",
+        "create",
+        "ws_1",
+        "--format",
+        "jsonn",
+        "--set",
+        "token=SET_SECRET_CANARY",
+        "--body",
+        r#"{"token":"BODY_SECRET_CANARY"}"#,
+        "--compact",
+    ]);
+    assert_eq!(json["error"]["code"], "invalid_value");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent websets exports create ws_1 --format json --compact"
+    );
+    assert_eq!(
+        json["error"]["details"]["omittedFlags"],
+        serde_json::json!(["--api-key", "--header", "--set", "--body"])
+    );
+    let rendered = json.to_string();
+    for canary in [
+        "API_SECRET_CANARY",
+        "HEADER_SECRET_CANARY",
+        "SET_SECRET_CANARY",
+        "BODY_SECRET_CANARY",
+    ] {
+        assert!(!rendered.contains(canary));
+    }
 }
 
 #[test]

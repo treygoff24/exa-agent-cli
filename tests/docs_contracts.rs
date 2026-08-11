@@ -58,12 +58,13 @@ fn contracts_document_successful_raw_payment_receipt_metadata() {
         "case-insensitively match `payment-response`, `payment-receipt`, `x-payment-response`, or `x-payment-receipt`"
     ));
     assert!(contracts.contains("with `name` casing preserved as received"));
-    assert!(contracts.contains(
-        "all non-payment raw bytes remain exact, while signed payment raw output is exact except exact submitted payment credential echoes are replaced with `[REDACTED]`"
-    ));
-    assert!(contracts.contains(
-        "Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `[REDACTED]`"
-    ));
+    let redacted = exa_agent_cli::redaction::REDACTED;
+    assert!(contracts.contains(&format!(
+        "all non-payment raw bytes remain exact, while signed payment raw output is exact except exact submitted payment credential echoes are replaced with `{redacted}`"
+    )));
+    assert!(contracts.contains(&format!(
+        "Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `{redacted}`"
+    )));
     assert!(contracts.contains(
         "Successful signed payment responses redact exact submitted payment credential echoes before any output"
     ));

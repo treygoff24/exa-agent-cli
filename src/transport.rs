@@ -2152,6 +2152,9 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     let cfg = Config::load()?;
     let method = params.method.to_ascii_uppercase();
     let query = parse_raw_query(params.query_raw)?;
+    if params.globals.idempotency_key.is_some() && !matches!(params.auth, RawAuth::Api(_)) {
+        return Err(payment_idempotency_usage(params.auth));
+    }
     let base_url = match params.auth {
         RawAuth::Api(credential) => {
             resolve_base_url_for_namespace(params.globals, &cfg, credential.namespace)?
@@ -2215,12 +2218,17 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
         body: body_bytes,
     };
 
+    let payment_mode = !matches!(params.auth, RawAuth::Api(_));
     let send_opts = SendOptions {
-        retry: params.globals.retry,
+        retry: if payment_mode {
+            0
+        } else {
+            params.globals.retry
+        },
         retry_after: params.globals.retry_after,
         idempotency_key,
         follow_redirects: matches!(params.auth, RawAuth::Api(_)),
-        payment_mode: !matches!(params.auth, RawAuth::Api(_)),
+        payment_mode,
     };
     Ok(PreparedRawRequest {
         req,
@@ -2268,6 +2276,31 @@ fn payment_usage(message: &str) -> CliError {
         Diag::new("invalid_flag_combination", message)
             .with_suggestion("printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"),
     )
+}
+
+fn payment_idempotency_usage(auth: RawAuth<'_>) -> CliError {
+    CliError::Usage(
+        Diag::new(
+            "invalid_flag_combination",
+            "payment modes do not support --idempotency-key; remove --idempotency-key",
+        )
+        .with_suggestion(payment_mode_retry_suggestion(auth)),
+    )
+}
+
+fn payment_mode_retry_suggestion(auth: RawAuth<'_>) -> &'static str {
+    match auth {
+        RawAuth::Payment(PaymentAuth::Mpp { .. }) => {
+            "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json"
+        }
+        RawAuth::Payment(PaymentAuth::X402 { .. }) => {
+            "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"
+        }
+        RawAuth::PaymentDiscovery => {
+            "exa-agent --payment-discovery raw POST /search --body @request.json"
+        }
+        RawAuth::Api(_) => "exa-agent raw POST /search --body @request.json",
+    }
 }
 
 /// Redacted, best-effort JSONL trace record for `--trace FILE` (commands.md "--trace FILE",
@@ -2958,21 +2991,19 @@ mod tests {
     }
 
     #[test]
-    fn execute_raw_payment_auth_does_not_retry_with_global_idempotency_key() {
+    fn execute_raw_x402_payment_rejects_global_idempotency_key_before_send() {
         let fake = FakeTransport::default();
-        fake.push_ok_json(503, r#"{"error":"down"}"#);
-        fake.push_ok_json(200, r#"{"results":[]}"#);
         let cli = crate::cli::Cli::try_parse_from([
             "exa-agent",
             "--x402-payment-stdin",
             "--idempotency-key",
-            "idem-paid",
+            "IDEMPOTENCY_SECRET_CANARY",
             "raw",
             "POST",
             "/search",
         ])
         .unwrap();
-        let signature = Secret::new("x402-signed-payload").unwrap();
+        let signature = Secret::new("X402_PAYMENT_SECRET_CANARY").unwrap();
         let err = execute_raw_with_request_id(
             &fake,
             RawExecuteParams {
@@ -2988,13 +3019,140 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(err.diag().code, "upstream_error");
+        assert_payment_idempotency_refusal(
+            &err,
+            "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json",
+            &["IDEMPOTENCY_SECRET_CANARY", "X402_PAYMENT_SECRET_CANARY"],
+        );
         assert!(fake.recorded_requests().is_empty());
-        assert_eq!(fake.recorded_no_redirect_requests().len(), 1);
-        assert!(!fake.recorded_no_redirect_requests()[0]
-            .headers
-            .iter()
-            .any(|(k, _)| k == "Idempotency-Key"));
+        assert!(fake.recorded_no_redirect_requests().is_empty());
+    }
+
+    #[test]
+    fn execute_raw_mpp_payment_rejects_global_idempotency_key_before_send() {
+        let fake = FakeTransport::default();
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--mpp-payment-stdin",
+            "--idempotency-key",
+            "IDEMPOTENCY_SECRET_CANARY",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+        let authorization = Secret::new("Payment MPP_PAYMENT_SECRET_CANARY").unwrap();
+        let err = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &[],
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli.globals,
+                auth: RawAuth::Payment(PaymentAuth::Mpp {
+                    authorization: &authorization,
+                }),
+                request_id: "req_mpp_idempotency_refusal".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_payment_idempotency_refusal(
+            &err,
+            "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json",
+            &["IDEMPOTENCY_SECRET_CANARY", "MPP_PAYMENT_SECRET_CANARY"],
+        );
+        assert!(fake.recorded_requests().is_empty());
+        assert!(fake.recorded_no_redirect_requests().is_empty());
+    }
+
+    #[test]
+    fn execute_raw_payment_discovery_rejects_global_idempotency_key_before_send() {
+        let fake = FakeTransport::default();
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--payment-discovery",
+            "--idempotency-key",
+            "IDEMPOTENCY_SECRET_CANARY",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+        let err = execute_raw_with_request_id(
+            &fake,
+            RawExecuteParams {
+                method: "POST",
+                path: "/search",
+                query_raw: &[],
+                body: serde_json::json!({"query":"hi"}),
+                globals: &cli.globals,
+                auth: RawAuth::PaymentDiscovery,
+                request_id: "req_discovery_idempotency_refusal".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_payment_idempotency_refusal(
+            &err,
+            "exa-agent --payment-discovery raw POST /search --body @request.json",
+            &["IDEMPOTENCY_SECRET_CANARY"],
+        );
+        assert!(fake.recorded_requests().is_empty());
+        assert!(fake.recorded_no_redirect_requests().is_empty());
+    }
+
+    #[test]
+    fn prepare_payment_raw_forces_retry_zero_even_when_global_retry_is_positive() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--x402-payment-stdin",
+            "--retry",
+            "9",
+            "raw",
+            "POST",
+            "/search",
+        ])
+        .unwrap();
+        let signature = Secret::new("x402-signed-payload").unwrap();
+        let prepared = prepare_raw_request(&RawExecuteParams {
+            method: "POST",
+            path: "/search",
+            query_raw: &[],
+            body: serde_json::json!({"query":"hi"}),
+            globals: &cli.globals,
+            auth: RawAuth::Payment(PaymentAuth::X402 {
+                signature: &signature,
+            }),
+            request_id: "req_payment_retry_zero".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(prepared.send_opts.retry, 0);
+        assert_eq!(prepared.send_opts.idempotency_key, None);
+        assert!(!prepared.send_opts.follow_redirects);
+        assert!(prepared.send_opts.payment_mode);
+    }
+
+    fn assert_payment_idempotency_refusal(
+        err: &CliError,
+        expected_suggestion: &str,
+        canaries: &[&str],
+    ) {
+        assert_eq!(err.category(), 1);
+        assert_eq!(err.diag().code, "invalid_flag_combination");
+        assert_eq!(
+            err.diag().suggested_command.as_deref(),
+            Some(expected_suggestion)
+        );
+        let rendered = format!(
+            "{} {:?} {:?}",
+            err.diag().message,
+            err.diag().suggested_command,
+            err.diag().details
+        );
+        for canary in canaries {
+            assert!(!rendered.contains(canary), "{canary} leaked in {rendered}");
+        }
     }
 
     #[test]

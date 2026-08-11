@@ -395,8 +395,9 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
                     value["range"] = serde_json::json!({ "min": min, "max": max });
                 }
             }
-            if !field.enum_values.is_empty() {
-                value["enumValues"] = serde_json::json!(field.enum_values);
+            let enum_values = registry::field_enum_values(op, field);
+            if !enum_values.is_empty() {
+                value["enumValues"] = serde_json::json!(enum_values);
             }
             value
         })

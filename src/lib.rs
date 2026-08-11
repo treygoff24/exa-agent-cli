@@ -334,6 +334,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             }
             if replaceable && matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
                 if let Some(rewritten) = rejected_value_suggestion(&e) {
+                    suggestion_omits_process_flags = true;
                     suggestion = Some(rewritten);
                 }
             }
@@ -806,51 +807,11 @@ fn render_validated_process_argv(args: &[String]) -> Option<String> {
 fn sanitize_process_argv(args: &mut Vec<String>) {
     let mut index = 1;
     while index < args.len() {
-        if matches!(
-            args[index].as_str(),
-            "--api-key" | "--service-key" | "--header" | "--set"
-        ) {
-            args.remove(index);
-            if index < args.len() {
-                args.remove(index);
-            }
-        } else if args[index] == "--base-url" {
-            if args
-                .get(index + 1)
-                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value))
-            {
-                args.remove(index);
-                if index < args.len() {
-                    args.remove(index);
+        if let Some(omission) = process_arg_omission(args, index) {
+            for _ in 0..omission.width {
+                if index >= args.len() {
+                    break;
                 }
-            } else {
-                index += 2;
-            }
-        } else if args[index].starts_with("--api-key=")
-            || args[index].starts_with("--service-key=")
-            || args[index].starts_with("--header=")
-            || args[index].starts_with("--set=")
-            || args[index]
-                .strip_prefix("--base-url=")
-                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value))
-        {
-            args.remove(index);
-        } else if args[index] == "--body" {
-            if args
-                .get(index + 1)
-                .is_some_and(|value| value.starts_with('@'))
-            {
-                index += 2;
-            } else {
-                args.remove(index);
-                if index < args.len() {
-                    args.remove(index);
-                }
-            }
-        } else if let Some(value) = args[index].strip_prefix("--body=") {
-            if value.starts_with('@') {
-                index += 1;
-            } else {
                 args.remove(index);
             }
         } else {
@@ -863,53 +824,99 @@ fn omitted_process_flags(args: &[String]) -> Vec<&'static str> {
     let mut omitted = Vec::new();
     let mut index = 1;
     while index < args.len() {
-        let flag = match args[index].as_str() {
-            "--api-key" => Some(("--api-key", 2)),
-            "--service-key" => Some(("--service-key", 2)),
-            "--header" => Some(("--header", 2)),
-            "--set" => Some(("--set", 2)),
-            "--body"
-                if args
-                    .get(index + 1)
-                    .is_none_or(|value| !value.starts_with('@')) =>
-            {
-                Some(("--body", 2))
+        if let Some(omission) = process_arg_omission(args, index) {
+            if !omitted.contains(&omission.flag) {
+                omitted.push(omission.flag);
             }
-            "--base-url"
-                if args
-                    .get(index + 1)
-                    .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
-            {
-                Some(("--base-url", 2))
-            }
-            arg if arg.starts_with("--api-key=") => Some(("--api-key", 1)),
-            arg if arg.starts_with("--service-key=") => Some(("--service-key", 1)),
-            arg if arg.starts_with("--header=") => Some(("--header", 1)),
-            arg if arg.starts_with("--set=") => Some(("--set", 1)),
-            arg if arg
-                .strip_prefix("--body=")
-                .is_some_and(|value| !value.starts_with('@')) =>
-            {
-                Some(("--body", 1))
-            }
-            arg if arg
-                .strip_prefix("--base-url=")
-                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
-            {
-                Some(("--base-url", 1))
-            }
-            _ => None,
-        };
-        if let Some((flag, step)) = flag {
-            if !omitted.contains(&flag) {
-                omitted.push(flag);
-            }
-            index += step;
+            index += omission.width;
         } else {
             index += 1;
         }
     }
     omitted
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessArgOmission {
+    flag: &'static str,
+    width: usize,
+}
+
+fn process_arg_omission(args: &[String], index: usize) -> Option<ProcessArgOmission> {
+    let arg = args.get(index)?.as_str();
+    match arg {
+        "--api-key" => Some(ProcessArgOmission {
+            flag: "--api-key",
+            width: 2,
+        }),
+        "--service-key" => Some(ProcessArgOmission {
+            flag: "--service-key",
+            width: 2,
+        }),
+        "--header" => Some(ProcessArgOmission {
+            flag: "--header",
+            width: 2,
+        }),
+        "--set" => Some(ProcessArgOmission {
+            flag: "--set",
+            width: 2,
+        }),
+        "--body"
+            if args
+                .get(index + 1)
+                .is_none_or(|value| !value.starts_with('@')) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--body",
+                width: 2,
+            })
+        }
+        "--base-url"
+            if args
+                .get(index + 1)
+                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--base-url",
+                width: 2,
+            })
+        }
+        arg if arg.starts_with("--api-key=") => Some(ProcessArgOmission {
+            flag: "--api-key",
+            width: 1,
+        }),
+        arg if arg.starts_with("--service-key=") => Some(ProcessArgOmission {
+            flag: "--service-key",
+            width: 1,
+        }),
+        arg if arg.starts_with("--header=") => Some(ProcessArgOmission {
+            flag: "--header",
+            width: 1,
+        }),
+        arg if arg.starts_with("--set=") => Some(ProcessArgOmission {
+            flag: "--set",
+            width: 1,
+        }),
+        arg if arg
+            .strip_prefix("--body=")
+            .is_some_and(|value| !value.starts_with('@')) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--body",
+                width: 1,
+            })
+        }
+        arg if arg
+            .strip_prefix("--base-url=")
+            .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--base-url",
+                width: 1,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {
@@ -2748,16 +2755,6 @@ fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError
     Ok(Some(serde_json::Value::Array(rows).to_string()))
 }
 
-const AGENT_DATA_SOURCE_PROVIDERS: &[&str] = &[
-    "fiber",
-    "financial_datasets",
-    "similarweb",
-    "baselayer",
-    "affiliate",
-    "particle",
-    "jinko",
-];
-
 fn agent_data_sources_json(providers: &[String], query: &str) -> Result<Option<String>, CliError> {
     if providers.is_empty() {
         return Ok(None);
@@ -2789,13 +2786,13 @@ fn agent_data_sources_json(providers: &[String], query: &str) -> Result<Option<S
                     "invalid_value",
                     format!(
                         "invalid `--data-source` provider `{provider}`; accepted providers are {}",
-                        AGENT_DATA_SOURCE_PROVIDERS.join(", ")
+                        registry::AGENT_DATA_SOURCE_PROVIDERS.join(", ")
                     ),
                 )
                 .with_details(serde_json::json!({
                     "field": "dataSources.provider",
                     "given": provider,
-                    "accepted": AGENT_DATA_SOURCE_PROVIDERS,
+                    "accepted": registry::AGENT_DATA_SOURCE_PROVIDERS,
                 }))
                 .with_suggestion(format!(
                     "exa-agent agent runs create {} --data-source fiber",
@@ -2815,7 +2812,7 @@ fn canonical_agent_data_source_provider(provider: &str) -> Option<&'static str> 
         "particle_news" => "particle",
         other => other,
     };
-    AGENT_DATA_SOURCE_PROVIDERS
+    registry::AGENT_DATA_SOURCE_PROVIDERS
         .iter()
         .copied()
         .find(|candidate| *candidate == normalized)

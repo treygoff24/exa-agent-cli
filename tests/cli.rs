@@ -594,6 +594,10 @@ fn capabilities_publish_named_flag_body_paths() {
         serde_json::json!(["auto", "minimal", "low", "medium", "high", "xhigh", "max"])
     );
     assert_eq!(
+        field("agent runs create", "data-source")["enumValues"],
+        serde_json::to_value(registry::AGENT_DATA_SOURCE_PROVIDERS).unwrap()
+    );
+    assert_eq!(
         field("agent runs create", "max-cost-dollars")["range"],
         serde_json::json!({"min":1.0,"max":100.0})
     );
@@ -6248,15 +6252,7 @@ fn agent_provider_aliases_coerce_and_set_passes_through() {
 
 #[test]
 fn agent_data_source_accepts_current_enum_case_insensitively() {
-    for canonical in [
-        "fiber",
-        "financial_datasets",
-        "similarweb",
-        "baselayer",
-        "affiliate",
-        "particle",
-        "jinko",
-    ] {
+    for canonical in registry::AGENT_DATA_SOURCE_PROVIDERS {
         for given in [canonical.to_string(), canonical.to_ascii_uppercase()] {
             let json = run_ok_json(&[
                 "agent",
@@ -6296,15 +6292,7 @@ fn agent_data_source_rejects_unknown_typed_provider_with_accepted_set() {
     assert_eq!(error["error"]["details"]["given"], "custom_provider");
     assert_eq!(
         error["error"]["details"]["accepted"],
-        serde_json::json!([
-            "fiber",
-            "financial_datasets",
-            "similarweb",
-            "baselayer",
-            "affiliate",
-            "particle",
-            "jinko"
-        ])
+        serde_json::to_value(registry::AGENT_DATA_SOURCE_PROVIDERS).unwrap()
     );
     assert_eq!(
         error["error"]["suggestedCommand"],

@@ -145,6 +145,11 @@ fn agent_data_source_runtime_accepts_current_openapi_provider_enum() {
         .and_then(Value::as_object)
         .expect("schemas");
     let expected: Value = schemas["AgentDataSourceProvider"]["enum"].clone();
+    assert_eq!(
+        serde_json::to_value(registry::AGENT_DATA_SOURCE_PROVIDERS).unwrap(),
+        expected,
+        "registry provider source must track AgentDataSourceProvider enum"
+    );
     for provider in expected.as_array().expect("provider enum array") {
         let provider = provider.as_str().expect("provider enum string");
         for given in [provider.to_string(), provider.to_ascii_uppercase()] {

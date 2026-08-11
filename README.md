@@ -4,7 +4,7 @@ An agent-first command-line interface over the full [Exa](https://exa.ai) API.
 
 Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
-`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `[REDACTED]`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
+`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
 The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.5.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
@@ -174,7 +174,7 @@ The contract is what makes this usable from code. Highlights:
 
 - **One JSON envelope per call.** Success is `exa.cli.response.v1`; errors are `exa.cli.error.v1` carrying a stable `error.code` and a category.
 - **stdout is data, stderr is diagnostics.** Errors and trace output go to stderr; the parseable result goes to stdout.
-- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass upstream JSON through untouched except signed payment responses replace exact submitted payment credential echoes with `[REDACTED]`.
+- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass upstream JSON through untouched except signed payment responses replace exact submitted payment credential echoes with `<redacted>`.
 - **Contents coverage is explicit.** Live `contents` and `fetch` result envelopes carry `outcome: "full"`, `"partial"`, or `"no_content"`, independent of the exit code.
 - **Exit codes are stable and meaningful** — `0` ok, `1` usage (bad invocation or local body validation failure), `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
 - **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it, but invalid bodies still exit `1` before any request is printed.

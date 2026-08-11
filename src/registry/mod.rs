@@ -9,6 +9,16 @@ pub use generated::{
     SPEC_TITLE, SPEC_URL, SPEC_VERSION, TARGET,
 };
 
+pub const AGENT_DATA_SOURCE_PROVIDERS: &[&str] = &[
+    "fiber",
+    "financial_datasets",
+    "similarweb",
+    "baselayer",
+    "affiliate",
+    "particle",
+    "jinko",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
@@ -192,6 +202,16 @@ pub fn field_range(field: &FieldDef) -> Option<(u64, u64)> {
                 .then_some((min as u64, max as u64))
         })
     })
+}
+
+pub fn field_enum_values(op: &OperationDef, field: &FieldDef) -> &'static [&'static str] {
+    if !field.enum_values.is_empty() {
+        field.enum_values
+    } else if op.cli_path == ["agent", "runs", "create"] && field.flag == "data-source" {
+        AGENT_DATA_SOURCE_PROVIDERS
+    } else {
+        &[]
+    }
 }
 
 fn required_field_range(command: &str, flag: &str) -> (u64, u64) {

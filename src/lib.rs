@@ -48,7 +48,7 @@ use request::RequestOverrides;
 use transport::{
     body_wants_stream, execute_raw_stream_with_request_id, execute_raw_with_request_id,
     infer_stream_event_type, parse_user_headers, search_terminal_stream_data, terminal_stream_data,
-    RawExecuteParams, StreamItem, Transport, UreqTransport,
+    RawAuth, RawExecuteParams, StreamItem, Transport, UreqTransport,
 };
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
@@ -761,6 +761,15 @@ fn first_line(s: &str) -> String {
 
 fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
+    if payment_flow_requested(&cli.globals) && !matches!(cli.command, Command::Raw(_)) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment modes are only supported by raw POST /search and raw POST /contents",
+            )
+            .with_suggestion("exa-agent --payment-discovery raw POST /search --body @request.json"),
+        ));
+    }
     match &cli.command {
         Command::Capabilities(args) => {
             emit_document(
@@ -2185,10 +2194,95 @@ fn build_agent_run_spec(
             "effort",
             args.effort.map(|effort| effort.as_str().to_string()),
         ),
+        (
+            "max-cost-dollars",
+            args.max_cost_dollars.map(|value| value.to_string()),
+        ),
         ("data-source", data_sources),
         ("metadata", metadata),
     ];
-    build_typed_spec(op, &flag_values, globals)
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_agent_run_budget(&spec.body, globals)?;
+    Ok(spec)
+}
+
+fn validate_agent_run_budget(
+    body: &serde_json::Value,
+    globals: &GlobalArgs,
+) -> Result<(), CliError> {
+    let effort = body.get("effort").and_then(serde_json::Value::as_str);
+    let budget = body.get("budget");
+
+    if effort == Some("max") {
+        let capped = budget
+            .and_then(|value| value.get("maxCostDollars"))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|value| value.is_finite() && (1.0..=100.0).contains(&value));
+        if !capped {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`effort:max` requires an explicit budget.maxCostDollars cap from 1 to 100",
+                )
+                .with_suggestion(
+                    "exa-agent agent runs create 'query' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27",
+                ),
+            ));
+        }
+        if !beta_has_token(globals.beta.as_deref(), "agent-max-effort-2026-07-27") {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`effort:max` requires --beta agent-max-effort-2026-07-27",
+                )
+                .with_suggestion(
+                    "exa-agent agent runs create 'query' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27",
+                ),
+            ));
+        }
+    }
+
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let Some(object) = budget.as_object() else {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            "`budget` must be a JSON object with maxCostDollars",
+        )));
+    };
+    let Some(value) = object.get("maxCostDollars") else {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            "`budget.maxCostDollars` is required when budget is present",
+        )));
+    };
+    let Some(max_cost) = value.as_f64().filter(|value| value.is_finite()) else {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            "`budget.maxCostDollars` must be a finite number",
+        )));
+    };
+    if !(1.0..=100.0).contains(&max_cost) {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            "`budget.maxCostDollars` must be between 1 and 100",
+        )));
+    }
+    match effort {
+        None | Some("auto") | Some("max") => Ok(()),
+        Some(other) => Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                format!("budget is only valid with omitted, auto, or max effort; got `{other}`"),
+            )
+            .with_suggestion("remove budget or use --effort auto"),
+        )),
+    }
+}
+
+fn beta_has_token(raw: Option<&str>, token: &str) -> bool {
+    raw.is_some_and(|raw| raw.split(',').any(|part| part.trim() == token))
 }
 
 fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError> {
@@ -5897,7 +5991,7 @@ fn execute_paginated_live<T: Transport>(
                 query_raw: &query_raw,
                 body: typed_wire_body(spec),
                 globals,
-                credential,
+                auth: RawAuth::Api(credential),
                 request_id,
             },
         )?;
@@ -6308,7 +6402,7 @@ fn execute_typed_live<T: Transport>(
             query_raw: &query_raw,
             body: body.clone(),
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
         };
         return match execute_streaming_live(
@@ -6341,7 +6435,7 @@ fn execute_typed_live<T: Transport>(
             query_raw: &query_raw,
             body: body.clone(),
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
         },
     ) {
@@ -7059,6 +7153,10 @@ fn append_response_warnings(
         append_answer_warning(request_body, data, warnings);
         return;
     }
+    if op.command().starts_with("agent runs ") {
+        append_agent_budget_warning(data, warnings);
+        return;
+    }
     if op.command() != "search" {
         return;
     }
@@ -7087,6 +7185,37 @@ fn append_response_warnings(
         ),
         "suggestedCommand": format!("exa-agent search {} --text 1500", shell_quote(query)),
     }));
+}
+
+fn append_agent_budget_warning(data: &serde_json::Value, warnings: &mut Vec<serde_json::Value>) {
+    let count = count_budget_reached(data);
+    if count == 0 {
+        return;
+    }
+    warnings.push(serde_json::json!({
+        "code": "budget_reached",
+        "message": if count == 1 {
+            "agent run stopped because its budget cap was reached".to_string()
+        } else {
+            format!("{count} agent run records stopped because their budget cap was reached")
+        },
+        "details": {"stopReason": "budget_reached", "count": count},
+    }));
+}
+
+fn count_budget_reached(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let here = fields
+                .get("stopReason")
+                .or_else(|| fields.get("stop_reason"))
+                .and_then(serde_json::Value::as_str)
+                == Some("budget_reached");
+            u64::from(here) + fields.values().map(count_budget_reached).sum::<u64>()
+        }
+        serde_json::Value::Array(items) => items.iter().map(count_budget_reached).sum(),
+        _ => 0,
+    }
 }
 
 fn append_answer_warning(
@@ -7753,6 +7882,8 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     retry: globals.retry,
                     retry_after: globals.retry_after,
                     idempotency_key: None,
+                    follow_redirects: true,
+                    payment_mode: false,
                 },
             )?;
             let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
@@ -7796,6 +7927,7 @@ fn dispatch_robot_docs(
                     "Named output controls include search --output-schema JSON|@file and --system-prompt TEXT|@file, contents --highlights [QUERY|JSON], and agent runs create --system-prompt TEXT|@file.",
                     "Search --stream requests SSE for synthesized output. Without a final non-null outputSchema, upstream returns normal JSON and the envelope warns with stream_ignored; --body/--set overrides determine the final request.",
                     "Agent --data-source accepts fiber, financial_datasets, similarweb, baselayer, affiliate, particle, and jinko case-insensitively (max 5) and sends canonical spellings. Legacy fiber_ai and particle_news remain accepted with legacy_value_coerced; --body/--set values pass through unchanged.",
+                    "Agent --max-cost-dollars maps budget.maxCostDollars and is valid only with omitted/auto/max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; stopReason budget_reached emits a warning.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
                     "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
@@ -7809,12 +7941,13 @@ fn dispatch_robot_docs(
                     "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
                     "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
-                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (HTTP 402). The key is valid and the command was correct, so do not retry and do not re-guess flags: top up at https://dashboard.exa.ai or switch lanes to `parallel-cli` for the rest of the task.",
+                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (bare HTTP 402 or NO_MORE_CREDITS). A challenge-evidenced raw payment 402 is payment_required / exit 2.",
                     "`exa-agent auth test --json` and `exa-agent doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
                     "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
                     "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
-                    "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
+                    "Do not pass managed auth or payment headers; use EXA_API_KEY/auth login, or raw payment flags.",
+                    "Raw payment modes are pass-through only: --payment-discovery, --x402-payment-stdin, and --mpp-payment-stdin are limited to exact nonstreaming raw POST /search or /contents on the default host.",
                     "Errors are JSON on stderr with stable error.code values; run exa-agent robot-docs errors for the full dictionary."
                 ],
             }),
@@ -9156,16 +9289,27 @@ fn dispatch_raw_inner(
 ) -> Result<i32, CliError> {
     reject_placeholder_value(&args.path, "path")?;
     parse_user_headers(&globals.headers)?;
+    validate_raw_payment_stdin_conflicts(globals)?;
+    if payment_flow_requested(globals) {
+        let cfg = config::Config::load()?;
+        transport::payment_base_url(globals, &cfg, &args.path, method)?;
+    }
     if globals.print_request || globals.dry_run {
         let body = raw_body(globals)?;
+        validate_raw_payment_body(globals, &body)?;
         let query = raw_query_preview(&args.query)?;
+        let mut request = serde_json::json!({
+            "method": method,
+            "path": args.path,
+            "query": query,
+            "body": body,
+        });
+        let headers = raw_payment_preview_headers(globals);
+        if !headers.is_empty() {
+            request["headers"] = serde_json::Value::Array(header_preview(&headers));
+        }
         let data = serde_json::json!({
-            "request": {
-                "method": method,
-                "path": args.path,
-                "query": query,
-                "body": body,
-            },
+            "request": request,
             "dryRun": true,
         });
         let hash = transport::data_hash(&data);
@@ -9175,7 +9319,7 @@ fn dispatch_raw_inner(
             path: &args.path,
             operation: None,
             request_id,
-            profile: "default",
+            profile: raw_preview_profile(globals),
             correlation_id: globals.correlation_id.as_deref(),
             data,
             count: None,
@@ -9189,14 +9333,22 @@ fn dispatch_raw_inner(
     }
 
     transport::ensure_network_allowed()?;
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
-    reject_mismatched_credential_scope(&credential)?;
     let body = raw_body(globals)?;
+    validate_raw_payment_body(globals, &body)?;
+    let payment_secret = raw_payment_secret(globals)?;
+    let credential = if payment_secret.is_none() && !globals.payment_discovery {
+        let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+        let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+            .map_err(|missing| auth::not_authenticated_error(&missing))?;
+        reject_mismatched_credential_scope(&credential)?;
+        Some(credential)
+    } else {
+        None
+    };
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
+    let raw_auth = raw_auth(credential.as_ref(), payment_secret.as_ref(), globals);
     if body_wants_stream(&body) {
         return execute_streaming_live(
             &transport,
@@ -9206,7 +9358,7 @@ fn dispatch_raw_inner(
                 query_raw: &args.query,
                 body,
                 globals,
-                credential: &credential,
+                auth: raw_auth,
                 request_id: request_id.to_string(),
             },
             "raw",
@@ -9224,7 +9376,7 @@ fn dispatch_raw_inner(
             query_raw: &args.query,
             body,
             globals,
-            credential: &credential,
+            auth: raw_auth,
             request_id: request_id.to_string(),
         },
     )?;
@@ -9237,6 +9389,8 @@ fn dispatch_raw_inner(
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
+    let payment = payment_requested(globals)
+        .then(|| transport::payment_headers_metadata(&result.response.headers, "receipt"));
     let mut envelope = response_envelope(ResponseEnvelopeArgs {
         command: "raw",
         method: &result.method,
@@ -9252,6 +9406,9 @@ fn dispatch_raw_inner(
         duration_ms: result.duration_ms,
         warnings: &[],
     });
+    if let Some(payment) = payment {
+        envelope["payment"] = payment;
+    }
     emit_completed_response(&mut envelope, globals, pretty)?;
     Ok(0)
 }
@@ -9272,6 +9429,128 @@ fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
         request::set_at_path(&mut body, &path, value)?;
     }
     Ok(body)
+}
+
+enum RawPaymentSecret {
+    X402(auth::Secret),
+    Mpp(auth::Secret),
+}
+
+fn payment_requested(globals: &GlobalArgs) -> bool {
+    globals.x402_payment_stdin || globals.mpp_payment_stdin
+}
+
+fn payment_flow_requested(globals: &GlobalArgs) -> bool {
+    payment_requested(globals) || globals.payment_discovery
+}
+
+fn raw_auth<'a>(
+    credential: Option<&'a auth::ResolvedCredential>,
+    payment: Option<&'a RawPaymentSecret>,
+    globals: &GlobalArgs,
+) -> RawAuth<'a> {
+    match payment {
+        Some(RawPaymentSecret::X402(signature)) => {
+            RawAuth::Payment(transport::PaymentAuth::X402 { signature })
+        }
+        Some(RawPaymentSecret::Mpp(authorization)) => {
+            RawAuth::Payment(transport::PaymentAuth::Mpp { authorization })
+        }
+        None if globals.payment_discovery => RawAuth::PaymentDiscovery,
+        None => RawAuth::Api(credential.expect("non-payment raw requires API credential")),
+    }
+}
+
+fn raw_preview_profile(globals: &GlobalArgs) -> &'static str {
+    if globals.payment_discovery {
+        "payment-discovery"
+    } else if payment_requested(globals) {
+        "payment"
+    } else {
+        "default"
+    }
+}
+
+fn raw_payment_preview_headers(globals: &GlobalArgs) -> Vec<(String, String)> {
+    if globals.x402_payment_stdin {
+        vec![(
+            "PAYMENT-SIGNATURE".to_string(),
+            redaction::REDACTED.to_string(),
+        )]
+    } else if globals.mpp_payment_stdin {
+        vec![("Authorization".to_string(), redaction::REDACTED.to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn raw_payment_secret(globals: &GlobalArgs) -> Result<Option<RawPaymentSecret>, CliError> {
+    if globals.x402_payment_stdin {
+        let secret = read_secret_stdin("--x402-payment-stdin", "PAYMENT_SIGNATURE")?;
+        validate_payment_secret("--x402-payment-stdin", &secret)?;
+        return Ok(Some(RawPaymentSecret::X402(secret)));
+    }
+    if globals.mpp_payment_stdin {
+        let secret = read_secret_stdin("--mpp-payment-stdin", "MPP_AUTHORIZATION")?;
+        validate_payment_secret("--mpp-payment-stdin", &secret)?;
+        if !secret.expose().starts_with("Payment ") {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    "--mpp-payment-stdin expects the complete `Payment ...` Authorization header value",
+                )
+                .with_suggestion(
+                    "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json",
+                ),
+            ));
+        }
+        return Ok(Some(RawPaymentSecret::Mpp(secret)));
+    }
+    Ok(None)
+}
+
+fn validate_payment_secret(flag: &str, secret: &auth::Secret) -> Result<(), CliError> {
+    if secret.expose().chars().any(char::is_control) {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("{flag} value must be a single header value without control characters"),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_raw_payment_stdin_conflicts(globals: &GlobalArgs) -> Result<(), CliError> {
+    if !payment_requested(globals) {
+        return Ok(());
+    }
+    if globals.body.as_deref() == Some("-") || globals.input.as_deref() == Some("-") {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment stdin modes cannot be combined with another stdin consumer",
+            )
+            .with_suggestion(
+                "use --body @request.json with --x402-payment-stdin or --mpp-payment-stdin",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_payment_body(
+    globals: &GlobalArgs,
+    body: &serde_json::Value,
+) -> Result<(), CliError> {
+    if payment_flow_requested(globals) && body_wants_stream(body) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment modes do not support streaming requests; omit `stream:true`",
+            )
+            .with_suggestion("remove `stream:true` and send a nonstreaming raw payment request"),
+        ));
+    }
+    Ok(())
 }
 
 fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError> {

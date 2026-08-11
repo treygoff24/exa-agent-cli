@@ -5,9 +5,9 @@ real Exa surfaces are *not* in any OpenAPI (so they are overlay-defined or raw-o
 
 ## Vendored inputs
 
-| File | Source URL | Format upstream | Identity (verified 2026-08-03) |
+| File | Source URL | Format upstream | Identity (verified 2026-08-11) |
 |---|---|---|---|
-| `exa-openapi.json` | `https://exa.ai/docs/exa-spec.json` | JSON | `Exa Public API` **2.0.0**, OpenAPI 3.1.0, 58 operations; source SHA-256 `982a352e3781cd55207b714cba1938a5331abdfbb3f74437ead9f91d2caa9711`; vendored SHA-256 `74c156bcf944bd1d35df8a879d845587aeba716fae4073c2b37d4c818964862d` |
+| `exa-openapi.json` | `https://exa.ai/docs/exa-spec.json` | JSON | `Exa Public API` **2.0.0**, OpenAPI 3.1.0, 58 operations; source SHA-256 `5c7114e0ef43eed0c3aabafdc387438dd5dc1a95dd4a74468fbcf81d5396335c`; vendored SHA-256 `b6ba8eadc56ae209bdf87812ec5bbb6eb31cb659f3c267e48fc1dc4ab4463064` |
 | `team-management.json` | `https://exa.ai/docs/team-management-spec.yaml` | YAML → normalized to JSON | `Team Management API` **1.0.0**, OpenAPI 3.1.0, 6 operations; source SHA-256 `ac1778eaaf11f99ac547727130b53475a63802da1d53fe8f4f98635f0456bd0b`; vendored SHA-256 `bd93463c7c6154accd3ca8eaa99b77ac875cce09a0f66291f2307ba3a822dc28` |
 | `overlay.toml` | hand-curated from `docs/v2/commands.md` and the Websets API guide | TOML | 64 spec ops mapped + 3 overlay-defined (`context` and `websets exports`) |
 
@@ -28,6 +28,13 @@ the research copy and is identical — there is no newer published version; "sta
 | `POST /context` (Exa Code) | **overlay-defined** typed command (`exa-agent context`) | `overlay.toml` → `[operations."context"]` |
 | `websets exports` | **overlay-defined** typed commands (`exa-agent websets exports create/get`) | Websets API guide: https://exa.ai/docs/websets/api-guide; `overlay.toml` → `[operations."websets-exports-create"]` / `[operations."websets-exports-get"]` |
 | `POST /chat/completions`, `POST /responses` (OpenAI-compat) | **raw-only** in v1 (D16) | `exa-agent raw POST /chat/completions --body @…` |
+
+## Payment access modes
+
+The public spec annotates `POST /search` and `POST /contents` with x402/MPP payment metadata.
+The CLI does **not** implement wallet custody or signing. It supports only signed stdin
+pass-through (`--x402-payment-stdin` / `--mpp-payment-stdin`) and unauthenticated discovery
+(`--payment-discovery`) through `raw POST /search|/contents` on the default Exa host.
 
 ## Carry-over runtime validations (not blockers)
 

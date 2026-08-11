@@ -156,6 +156,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `broadcast_scope_refused` | usage (1) | false | a broad/destructive scope was refused without an explicit `--all`/opt-in. |
 | `not_authenticated` | auth (2) | false | no credential resolved locally; `details.checked` lists the ladder rungs tried. |
 | `reauth_required` | auth (2) | false | a credential was sent but upstream rejected it (401/403 — revoked/expired/wrong scope). |
+| `payment_required` | auth (2) | false | a raw payment discovery/pass-through request received a challenge-evidenced 402. Safe challenge metadata may be surfaced; payment secrets are never echoed. |
 | `key_scope_mismatch` | auth (2) | false | an api key was presented where a service key is required, or vice versa (D4). |
 | `config_parse_error` | config (3) | false | config TOML failed to parse. |
 | `unknown_profile` | config (3) | false | `--profile`/`EXA_PROFILE` names a profile that doesn't exist. |
@@ -172,7 +173,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `partial_batch` | partial (10) | false | a batch had mixed success/failure (§11). |
 | `no_input` | no_input (11) | false | required stdin/input was empty or a TTY (§1). |
 | `interrupted` | interrupted (12) | false | SIGINT or a stream broke after partial output (§8). |
-| `insufficient_credits` | billing (13) | false | HTTP 402 (or any 4xx carrying `NO_MORE_CREDITS`): the account is out of credits. Valid key, valid request, no balance — never classify as `usage`. |
+| `insufficient_credits` | billing (13) | false | Bare HTTP 402, or any 4xx carrying `NO_MORE_CREDITS`: the account is out of credits. Valid key, valid request, no balance — never classify as `usage`. A 402 with a safe payment challenge is `payment_required`. |
 | `probe_inconclusive` | upstream (5) | true | the credential probe got a response that neither confirms nor denies the key. |
 | `invalid_field_type` | usage (1) | false | a body field was the wrong JSON type for its schema. |
 | `research_retired` | usage (1) | false | the upstream Research API is retired (HTTP 410 upstream, 2026-08); the local `research` stub emits this without a network call. `details.replacement` names `search --type deep-reasoning`; `suggestedCommand` is per-verb: `create` interpolates the supplied query, `get`/`list` point at `exa-agent search --help`, and any supplied id is preserved in `details.researchId`. |
@@ -216,6 +217,7 @@ This is a deliberate small-integer scheme, **not** sysexits — it is the publis
 - Ambiguous create failure (request sent, no confirmed response): exit non-zero, write a **pending-run record** (append-only JSONL under the state dir), and set `suggestedCommand` to the exact recovery (`exa-agent agent runs list --limit 10` for Agent runs, or re-issue with `--idempotency-key` where listing is not the right recovery).
 - The pending-run record is an **agent-facing recovery contract** — agents parse it, so its shape is frozen. Schema `exa.cli.pending_run.v1`, one JSON object per line: `{ "schema": "exa.cli.pending_run.v1", "requestId": "...", "command": "agent runs create", "operationId": "createAgentRun", "apiPath": "/agent/runs", "idempotencyKey": null, "attemptedAt": "<SOURCE_DATE_EPOCH-aware epoch seconds>", "recoveryCommand": "exa-agent agent runs list --limit 10" }`. Golden-pinned (§14).
 - `retryable: true` in the error envelope means "a retry of *this exact request* is safe and may succeed." It is `false` for every un-keyed create failure.
+- Raw payment discovery/pass-through is never retried, never redirected, never given an API key or idempotency key, and never writes pending-run recovery records.
 
 ## 8. Streaming contract
 
@@ -268,82 +270,91 @@ One uniform model over endpoint-specific cursors.
 ## 12. Redaction & determinism
 
 - Known secrets are never emitted, by prevention at the source rather than a value-shape scrub of output: managed auth headers are injected only at send time and refused if user-supplied (below); secret-*named* headers and query params are redacted in request previews; and the one-time secrets returned by create ops (`apiKey`, `webhookSecret`, `secret`) are redacted from the default response envelope after `--secret-output` capture. `request.redacted` is `true` on these governed paths and `false` on the ungoverned `raw` escape hatch, which emits the upstream response as-is.
-- `--header 'Name: value'` may *add* request headers but MUST NOT override the managed `Authorization` / auth headers (or any known secret header). An attempt is refused with exit 1, so credentials can't be shadowed, leaked via an injected header, or prompt-injected.
+- `--header 'Name: value'` may *add* request headers but MUST NOT override managed `Authorization` / auth headers, payment namespaces, or any known secret header. An attempt is refused with exit 1, so credentials/payment material can't be shadowed, leaked via an injected header, or prompt-injected.
 - Determinism applies to the **CLI's own output** — stable field/key ordering (the envelope's own fields serialize in fixed declaration order; the upstream `data` payload preserves insertion order — "stable" means *deterministic given identical input*, not alphabetized), no wall-clock timestamps in free text (timestamps live in JSON fields), `SOURCE_DATE_EPOCH` honored for any CLI-generated time. It does **not** apply to upstream search results (Exa is a live index; identical queries may return different results — that is expected and not a determinism violation).
 - **Documented volatile fields** (the only fields exempt from byte-identical determinism, normalized/scrubbed before golden snapshots and excluded from any two-invocation determinism assertion): `request.requestId`, `request.upstreamRequestId`, `request.correlationId`, `diagnostics.durationMs`, `diagnostics.retries`, `event.timestamp`, and the pending-run `attemptedAt` (§7). `embeddedSpecSha256` and `dataHash` are **not** volatile — a change in either is a real signal. With `SOURCE_DATE_EPOCH` set and these fields held aside, two consecutive structured invocations of the same command on the same input are byte-identical.
 
 ## 13. `capabilities --json` — `exa.cli.capabilities.v1`
 
-Offline, no network. Describes the CLI contract, not account state. `describe` is a documented alias of `capabilities` (the verb an agent is likely to guess first). All maps below are **fully populated**, not placeholders — an agent self-orients entirely from this surface.
+Offline, no network. Describes the CLI contract, not account state. `describe` is a documented alias of `capabilities` (the verb an agent is likely to guess first). The abbreviated example below shows the runtime shape; the real command fully populates every command and dictionary entry.
 
 ```json
 {
   "schema": "exa.cli.capabilities.v1",
-  "tool": "exa-agent",
-  "version": "0.1.0",
+  "ok": true,
+  "binary": "exa-agent",
   "build": {
-    "commit": "abc1234",
-    "buildDate": "2026-06-29",
+    "version": "0.5.0",
+    "gitSha": "abc1234",
+    "buildDate": "2026-08-11",
     "target": "aarch64-apple-darwin"
   },
-  "api": {
-    "specUrl": "https://exa.ai/docs/exa-spec.json",
-    "specTitle": "Exa Public API",
-    "specVersion": "2.0.0",
-    "embeddedSpecSha256": "..."
+  "spec": {
+    "title": "Exa Public API",
+    "version": "2.0.0",
+    "url": "https://exa.ai/docs/exa-spec.json",
+    "embeddedSpecSha256": "...",
+    "adminTitle": "Team Management API",
+    "adminVersion": "1.0.0"
   },
+  "supportsRawBody": true,
+  "supportsPrintRequest": true,
+  "defaults": { "maxOutputBytes": 49152 },
+  "commandCount": 67,
   "commands": [
     {
-      "path": ["search"],
-      "operationId": "search",
+      "path": "agent runs create",
+      "operationId": "createAgentRun",
       "method": "POST",
-      "apiPath": "/search",
-      "readOnly": true,
+      "apiPath": "/agent/runs",
+      "namespace": "api",
+      "readOnly": false,
       "destructive": false,
-      "idempotencySensitive": false,
-      "streaming": true,
-      "pagination": "none",
-      "supportsRawBody": true,
-      "supportsPrintRequest": true,
+      "idempotencySensitive": true,
       "requiresConfirm": false,
-      "dangerous": false
+      "streaming": true,
+      "deprecated": false,
+      "pagination": null,
+      "fields": [
+        {
+          "flag": "effort",
+          "bodyPath": "effort",
+          "kind": "string",
+          "required": false,
+          "inputKind": "flag",
+          "name": "--effort",
+          "enumValues": ["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
+        }
+      ]
     }
   ],
-  "universalFlags": [
-    { "flag": "--format", "values": ["human", "json", "ndjson"], "default": "auto" },
-    { "flag": "--json" }, { "flag": "--ndjson" }, { "flag": "--raw" },
-    { "flag": "--max-output-bytes", "default": 49152 },
-    { "flag": "--correlation-id" }, { "flag": "--output" },
-    { "flag": "--idempotency-key" }, { "flag": "--retry", "default": 2 },
-    { "flag": "--timeout" }, { "flag": "--yes" }, { "flag": "--confirm" },
-    { "flag": "--dry-run" }, { "flag": "--print-request" },
-    { "flag": "--api-key" }, { "flag": "--api-key-stdin" }, { "flag": "--profile" }
-  ],
-  "outputFormats": ["human", "json", "ndjson", "raw"],
-  "configPrecedence": ["--api-key", "EXA_API_KEY", "keyring", "config-metadata"],
+  "rawPaymentModes": {
+    "flags": ["--payment-discovery", "--x402-payment-stdin", "--mpp-payment-stdin"],
+    "endpoints": [
+      { "method": "POST", "path": "/search" },
+      { "method": "POST", "path": "/contents" }
+    ],
+    "defaultHostOnly": true,
+    "nonStreaming": true,
+    "stdinOnlySecrets": true,
+    "noApiKey": true,
+    "noRedirect": true,
+    "noRetry": true,
+    "noIdempotencyKey": true
+  },
   "exitCodes": {
-    "0": "success", "1": "usage", "2": "auth", "3": "config", "4": "network",
-    "5": "upstream", "6": "rate_limit", "7": "not_found", "8": "conflict",
-    "9": "safety", "10": "partial", "11": "no_input", "12": "interrupted",
-    "13": "billing"
+    "0": { "name": "ok", "description": "success" },
+    "13": { "name": "billing", "description": "account credits exhausted" }
   },
   "errorCodes": {
     "not_authenticated": { "category": "auth", "exit": 2, "retryable": false },
     "rate_limited": { "category": "rate_limit", "exit": 6, "retryable": true },
+    "payment_required": { "category": "auth", "exit": 2, "retryable": false },
     "insufficient_credits": { "category": "billing", "exit": 13, "retryable": false }
   },
-  "doctor": {
-    "exitCodes": { "0": "healthy", "1": "findings", "4": "refused-unsafe" },
-    "detectors": ["config.parse", "key.present", "service-key.scope", "base-url", "spec.hash", "binary.version", "tty.discipline", "auth.online", "connectivity"]
-  },
-  "schemas": {
-    "response": "exa.cli.response.v1",
-    "error": "exa.cli.error.v1",
-    "event": "exa.cli.event.v1",
-    "capabilities": "exa.cli.capabilities.v1",
-    "doctor": "exa.cli.doctor.v1",
-    "pendingRun": "exa.cli.pending_run.v1"
-  }
+  "doctor": { "exitCodes": { "0": "healthy", "1": "findings", "4": "refused-unsafe" } },
+  "presets": { "commands": ["preset list", "preset show", "search --preset"] },
+  "macros": { "commands": ["macro list", "macro show", "ask", "fetch"] }
 }
 ```
 
@@ -351,7 +362,7 @@ The presence of `EXA_AGENT_NO_NETWORK` is an execution guard, not a `capabilitie
 networked paths before credential resolution or transport creation while preserving dry-run and
 self-description commands.
 
-`errorCodes` is shown abbreviated above; the binary emits the **full** §5.1 dictionary. Each command entry carries the blast-radius triad an agent reasons about before calling: `readOnly` / `destructive` / `idempotencySensitive` (plus `requiresConfirm`, `dangerous`), all derived from the registry + overlay (D17). `build.commit`/`buildDate`/`target` are baked at compile time so an agent (or `doctor`) can detect a stale binary.
+`commands`, `exitCodes`, and `errorCodes` are shown abbreviated above; the binary emits the full registry and §5.1 dictionary. Each command entry carries the blast-radius triad an agent reasons about before calling: `readOnly` / `destructive` / `idempotencySensitive` (plus `requiresConfirm`), all derived from the registry + overlay (D17). `build.gitSha`/`buildDate`/`target` are baked at compile time so an agent (or `doctor`) can detect a stale binary.
 
 ## 14. Golden-pinned surfaces
 

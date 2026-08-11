@@ -258,6 +258,7 @@ fn ranged_field_parses(command: &str, flag: &str, value: u64) -> bool {
         "search" => vec!["exa-agent", "search", "registry parity"],
         "similar" => vec!["exa-agent", "similar", "https://example.test"],
         "contents" => vec!["exa-agent", "contents", "https://example.test"],
+        "agent runs create" => vec!["exa-agent", "agent", "runs", "create", "registry parity"],
         _ => panic!("add boundary argv coverage for {command} --{flag}"),
     };
     let flag_value = format!("--{flag}={value}");

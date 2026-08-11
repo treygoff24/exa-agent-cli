@@ -570,7 +570,37 @@ fn capabilities_publish_named_flag_body_paths() {
         field("agent runs create", "system-prompt")["bodyPath"],
         "systemPrompt"
     );
+    assert_eq!(
+        field("agent runs create", "effort")["enumValues"],
+        serde_json::json!(["auto", "minimal", "low", "medium", "high", "xhigh", "max"])
+    );
+    assert_eq!(
+        field("agent runs create", "max-cost-dollars")["range"],
+        serde_json::json!({"min":1.0,"max":100.0})
+    );
     assert_eq!(field("contents", "highlights")["bodyPath"], "highlights");
+    assert_eq!(
+        json["rawPaymentModes"]["flags"],
+        serde_json::json!([
+            "--payment-discovery",
+            "--x402-payment-stdin",
+            "--mpp-payment-stdin"
+        ])
+    );
+    assert_eq!(
+        json["rawPaymentModes"]["endpoints"],
+        serde_json::json!([
+            {"method":"POST","path":"/search"},
+            {"method":"POST","path":"/contents"}
+        ])
+    );
+    assert_eq!(json["rawPaymentModes"]["defaultHostOnly"], true);
+    assert_eq!(json["rawPaymentModes"]["nonStreaming"], true);
+    assert_eq!(json["rawPaymentModes"]["stdinOnlySecrets"], true);
+    assert_eq!(json["rawPaymentModes"]["noApiKey"], true);
+    assert_eq!(json["rawPaymentModes"]["noRedirect"], true);
+    assert_eq!(json["rawPaymentModes"]["noRetry"], true);
+    assert_eq!(json["rawPaymentModes"]["noIdempotencyKey"], true);
 }
 
 #[test]
@@ -860,6 +890,23 @@ fn named_flag_help_covers_contents_highlights_and_agent_system_prompt() {
         "help: {agent_help}"
     );
     assert!(agent_help.contains("--system-prompt"), "help: {agent_help}");
+    assert!(
+        agent_help.contains("--max-cost-dollars"),
+        "help: {agent_help}"
+    );
+    assert!(
+        agent_help.contains("budget.maxCostDollars"),
+        "help: {agent_help}"
+    );
+    assert!(agent_help.contains("1..=100"), "help: {agent_help}");
+    assert!(
+        agent_help.contains("omitted, auto, or max effort"),
+        "help: {agent_help}"
+    );
+    assert!(
+        agent_help.contains("agent-max-effort-2026-07-27"),
+        "help: {agent_help}"
+    );
 }
 
 #[test]
@@ -3831,6 +3878,278 @@ fn raw_dry_run_refuses_user_authorization_header() {
 }
 
 #[test]
+fn raw_dry_run_refuses_payment_headers_from_generic_header() {
+    for header in [
+        "PAYMENT-SIGNATURE: user-supplied-secret",
+        "PAYMENT-REQUIRED: user-supplied-secret",
+        "PAYMENT-RESPONSE: user-supplied-secret",
+        "PAYMENT-RECEIPT: user-supplied-secret",
+        "x-payment-anything: user-supplied-secret",
+    ] {
+        let output = run(&[
+            "--header",
+            header,
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{header}");
+        let stderr = stderr_json(&output);
+        assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+        let expected_suggestion = if header.starts_with("PAYMENT-SIGNATURE")
+            || header.starts_with("x-payment")
+        {
+            "printf '%s' \"$PAYMENT_SIGNATURE\" | exa-agent --x402-payment-stdin raw POST /search --body @request.json"
+        } else {
+            "exa-agent --payment-discovery raw POST /search --body @request.json"
+        };
+        assert_eq!(stderr["error"]["suggestedCommand"], expected_suggestion);
+        let rendered = String::from_utf8_lossy(&output.stderr);
+        assert!(!rendered.contains("user-supplied-secret"));
+    }
+
+    let mpp = run(&[
+        "--header",
+        "Authorization: Payment user-supplied-secret",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(mpp.status.code(), Some(1));
+    let stderr = stderr_json(&mpp);
+    assert_eq!(
+        stderr["error"]["suggestedCommand"],
+        "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json"
+    );
+    assert!(!String::from_utf8_lossy(&mpp.stderr).contains("user-supplied-secret"));
+}
+
+#[test]
+fn raw_payment_dry_run_is_limited_to_exact_search_or_contents_default_host() {
+    let ok = run_ok_json(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(ok["request"]["profile"], "payment");
+    assert_eq!(
+        ok["data"]["request"]["headers"],
+        serde_json::json!([{"name":"PAYMENT-SIGNATURE","value":"<redacted>"}])
+    );
+
+    let discovery = run_ok_json(&[
+        "--payment-discovery",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(discovery["request"]["profile"], "payment-discovery");
+    assert!(discovery["data"]["request"].get("headers").is_none());
+
+    let mpp = run_ok_json(&[
+        "--mpp-payment-stdin",
+        "raw",
+        "POST",
+        "/contents",
+        "--body",
+        r#"{"urls":["https://example.com"]}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(mpp["request"]["profile"], "payment");
+    assert_eq!(
+        mpp["data"]["request"]["headers"],
+        serde_json::json!([{"name":"Authorization","value":"<redacted>"}])
+    );
+
+    for args in [
+        &[
+            "--x402-payment-stdin",
+            "raw",
+            "POST",
+            "/search/",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ][..],
+        &[
+            "--payment-discovery",
+            "raw",
+            "GET",
+            "/search",
+            "--dry-run",
+            "--compact",
+        ],
+        &[
+            "--x402-payment-stdin",
+            "--base-url",
+            "https://proxy.example.test",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            stderr_json(&output)["error"]["code"],
+            "invalid_flag_combination"
+        );
+    }
+}
+
+#[test]
+fn payment_modes_are_raw_only_and_conflict_with_explicit_api_credentials() {
+    let non_raw = run(&[
+        "--payment-discovery",
+        "search",
+        "rust",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(non_raw.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&non_raw)["error"]["code"],
+        "invalid_flag_combination"
+    );
+
+    let explicit_api = run(&[
+        "--payment-discovery",
+        "--api-key",
+        "test-key-abcdef12",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x"}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(explicit_api.status.code(), Some(1));
+}
+
+#[test]
+fn raw_payment_stdin_modes_require_exclusive_nonempty_stdin() {
+    let conflict = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        "-",
+        "--compact",
+    ]);
+    assert_eq!(conflict.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&conflict)["error"]["code"],
+        "invalid_flag_combination"
+    );
+
+    let invalid_mpp = run_with_env_stdin(
+        &[
+            "--mpp-payment-stdin",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--compact",
+        ],
+        &[],
+        "Bearer not-payment",
+    );
+    assert_eq!(invalid_mpp.status.code(), Some(1));
+    assert_eq!(stderr_json(&invalid_mpp)["error"]["code"], "invalid_value");
+
+    let control_char = run_with_env_stdin(
+        &[
+            "--x402-payment-stdin",
+            "raw",
+            "POST",
+            "/search",
+            "--body",
+            r#"{"query":"x"}"#,
+            "--compact",
+        ],
+        &[],
+        "first\nsecond",
+    );
+    assert_eq!(control_char.status.code(), Some(1));
+    let rendered = String::from_utf8_lossy(&control_char.stderr);
+    assert!(!rendered.contains("first"));
+    assert!(!rendered.contains("second"));
+}
+
+#[test]
+fn raw_payment_modes_reject_streaming_before_network() {
+    let output = run(&[
+        "--payment-discovery",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x","stream":true}"#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&output)["error"]["code"],
+        "invalid_flag_combination"
+    );
+
+    let live_stream_without_stdin = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"x","stream":true}"#,
+        "--compact",
+    ]);
+    assert_eq!(live_stream_without_stdin.status.code(), Some(1));
+    let stderr = stderr_json(&live_stream_without_stdin);
+    assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
+    assert_ne!(stderr["error"]["code"], "no_input");
+
+    let malformed_without_stdin = run(&[
+        "--x402-payment-stdin",
+        "raw",
+        "POST",
+        "/search",
+        "--body",
+        r#"{"query":"#,
+        "--compact",
+    ]);
+    assert_eq!(malformed_without_stdin.status.code(), Some(1));
+    let stderr = stderr_json(&malformed_without_stdin);
+    assert_eq!(stderr["error"]["code"], "invalid_value");
+    assert_ne!(stderr["error"]["code"], "no_input");
+}
+
+#[test]
 fn raw_live_without_credential_is_not_authenticated() {
     let dir = temp_path("raw-no-credential");
     let missing_credentials = dir.join("missing-credentials.json");
@@ -5332,6 +5651,257 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
         body["metadata"],
         serde_json::json!({"ticket":"T1","owner":"ops"})
     );
+}
+
+#[test]
+fn agent_runs_create_supports_budgeted_beta_max_effort() {
+    let create = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "deep list build",
+        "--effort",
+        "max",
+        "--max-cost-dollars",
+        "20",
+        "--beta",
+        "other,agent-max-effort-2026-07-27",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &create["data"]["request"]["body"];
+    assert_eq!(body["effort"], "max");
+    assert_eq!(body["budget"]["maxCostDollars"], 20.0);
+    assert_eq!(
+        create["data"]["request"]["headers"],
+        serde_json::json!([{"name":"x-exa-beta","value":"other,agent-max-effort-2026-07-27"}])
+    );
+
+    let body_set_precedence = run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "deep list build",
+        "--effort",
+        "low",
+        "--max-cost-dollars",
+        "5",
+        "--body",
+        r#"{"effort":"auto"}"#,
+        "--set",
+        "budget.maxCostDollars=12",
+        "--dry-run",
+        "--compact",
+    ]);
+    let body = &body_set_precedence["data"]["request"]["body"];
+    assert_eq!(body["effort"], "auto");
+    assert_eq!(body["budget"]["maxCostDollars"], 12);
+}
+
+#[test]
+fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
+    for args in [
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--effort",
+            "max",
+            "--max-cost-dollars",
+            "20",
+            "--dry-run",
+            "--compact",
+        ][..],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--effort",
+            "max",
+            "--beta",
+            "agent-max-effort-2026-07-27",
+            "--dry-run",
+            "--compact",
+        ],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--effort",
+            "high",
+            "--max-cost-dollars",
+            "10",
+            "--dry-run",
+            "--compact",
+        ],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--body",
+            r#"{"effort":"auto","budget":{}}"#,
+            "--dry-run",
+            "--compact",
+        ],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--body",
+            r#"{"effort":"auto","budget":{"maxCostDollars":"10"}}"#,
+            "--dry-run",
+            "--compact",
+        ],
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--body",
+            r#"{"effort":"auto","budget":{"maxCostDollars":101}}"#,
+            "--dry-run",
+            "--compact",
+        ],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn agent_runs_create_warns_when_live_response_reaches_budget() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("POST /agent/runs "));
+        },
+        br#"{"id":"agent_run_budget","stopReason":"budget_reached"}"#,
+    );
+    let output = run(&[
+        "agent",
+        "runs",
+        "create",
+        "q",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local test server panicked");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(stdout["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "budget_reached"));
+}
+
+#[test]
+fn agent_runs_get_and_list_warn_recursively_when_budget_reached() {
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("GET /agent/runs/agent_run_budget "));
+        },
+        br#"{"id":"agent_run_budget","result":{"stop_reason":"budget_reached"}}"#,
+    );
+    let get = run(&[
+        "agent",
+        "runs",
+        "get",
+        "agent_run_budget",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local get test server panicked");
+    assert_eq!(get.status.code(), Some(0));
+    let get_json: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
+    let warning = get_json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "budget_reached")
+        .expect("budget warning on get");
+    assert_eq!(warning["details"]["count"], 1);
+
+    let (base_url, server) = local_json_server(
+        |request| {
+            assert!(request.starts_with("GET /agent/runs "));
+        },
+        br#"{"data":[{"id":"one","stopReason":"budget_reached"},{"id":"two","events":[{"stop_reason":"budget_reached"}]}]}"#,
+    );
+    let list = run(&[
+        "agent",
+        "runs",
+        "list",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--compact",
+    ]);
+    server.join().expect("local list test server panicked");
+    assert_eq!(list.status.code(), Some(0));
+    let list_json: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let warning = list_json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "budget_reached")
+        .expect("budget warning on list");
+    assert_eq!(warning["details"]["count"], 2);
+}
+
+#[test]
+fn agent_runs_events_stream_terminal_warns_when_budget_reached() {
+    let response = br#"data: {"event":"run.completed","data":{"stopReason":"budget_reached"}}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_sse_server(
+        |request| {
+            assert!(request.starts_with("GET /agent/runs/agent_run_budget/events "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("accept: text/event-stream"));
+        },
+        response,
+    );
+    let events = run(&[
+        "agent",
+        "runs",
+        "events",
+        "agent_run_budget",
+        "--stream",
+        "--api-key",
+        "test-key-abcdef12",
+        "--base-url",
+        base_url.as_str(),
+        "--json",
+        "--compact",
+    ]);
+    server
+        .join()
+        .expect("local events SSE test server panicked");
+    assert_eq!(events.status.code(), Some(0));
+    let stdout: serde_json::Value = serde_json::from_slice(&events.stdout).unwrap();
+    let warning = stdout["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["code"] == "budget_reached")
+        .expect("budget warning on events stream terminal");
+    assert_eq!(warning["details"]["count"], 1);
 }
 
 #[test]

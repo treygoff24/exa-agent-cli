@@ -6,6 +6,13 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Raw Search/Contents payment pass-through: `--payment-discovery`, `--x402-payment-stdin`, and
+  `--mpp-payment-stdin` work only with exact nonstreaming `raw POST /search` or `/contents` on
+  the default Exa host. Payment values are stdin-only, generic payment headers are refused, dry-run
+  previews redact placeholders, and wallet/signing/custody remain out of scope.
+- `agent runs create --max-cost-dollars DOLLARS` maps to `budget.maxCostDollars`; `effort max`
+  is exposed behind explicit `--beta agent-max-effort-2026-07-27` and requires an explicit budget
+  cap. `stopReason: budget_reached` now emits a machine-visible `budget_reached` warning.
 - `search --stream` now maps to the upstream Search SSE field, is advertised by help and
   capabilities, and emits `stream_ignored` when upstream will fall back to normal JSON because
   the final request has no non-null `outputSchema`. Canonical Search SSE events expose
@@ -16,6 +23,9 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- HTTP 402 classification now distinguishes billing exhaustion from payment challenges:
+  `NO_MORE_CREDITS` / bare 402 stays `insufficient_credits` (exit 13), while a 402 with safe
+  payment challenge metadata is `payment_required` (exit 2).
 - Typed `agent runs create --data-source` values are validated case-insensitively against the
   current provider enum (`fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`,
   `particle`, `jinko`) and sent canonically. Legacy aliases and explicit `--body`/`--set`

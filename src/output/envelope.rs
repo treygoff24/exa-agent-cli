@@ -150,6 +150,20 @@ pub fn capabilities() -> serde_json::Value {
         "defaults": {
             "maxOutputBytes": crate::DEFAULT_MAX_OUTPUT_BYTES,
         },
+        "rawPaymentModes": {
+            "flags": ["--payment-discovery", "--x402-payment-stdin", "--mpp-payment-stdin"],
+            "endpoints": [
+                { "method": "POST", "path": "/search" },
+                { "method": "POST", "path": "/contents" },
+            ],
+            "defaultHostOnly": true,
+            "nonStreaming": true,
+            "stdinOnlySecrets": true,
+            "noApiKey": true,
+            "noRedirect": true,
+            "noRetry": true,
+            "noIdempotencyKey": true,
+        },
         "commandCount": commands.len(),
         "commands": commands,
         "exitCodes": exit_codes,
@@ -380,6 +394,9 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
                 } else if let Some((min, max)) = field.range {
                     value["range"] = serde_json::json!({ "min": min, "max": max });
                 }
+            }
+            if !field.enum_values.is_empty() {
+                value["enumValues"] = serde_json::json!(field.enum_values);
             }
             value
         })

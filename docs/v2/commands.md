@@ -160,7 +160,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `POST /monitors/{id}/trigger` | `exa-agent monitor trigger ID` | Mutating but cheap; supports `--dry-run --print-request`. |
 | `POST /monitors/batch` | `exa-agent monitor batch` | Defaults to upstream `dry_run: true`; mutating ops (delete/pause/unpause) require `--yes`. |
 | `GET /monitors/{id}/runs[/runId]` | `exa-agent monitor runs list/get` | Cursor on list. |
-| `POST /agent/runs` | `exa-agent agent run QUERY` or `agent runs create QUERY` | `[create-POST]`. JSON or SSE (`--stream`). `--effort`, `--output-schema`, `--input`, `--data-source`. |
+| `POST /agent/runs` | `exa-agent agent run QUERY` or `agent runs create QUERY` | `[create-POST]`. JSON or SSE (`--stream`). `--effort`, `--max-cost-dollars`, `--output-schema`, `--input`, `--data-source`. |
 | `GET /agent/runs` | `exa-agent agent runs list` | Cursor. |
 | `GET /agent/runs/{id}` | `exa-agent agent runs get ID` | Status read; surface `stopReason`. |
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
@@ -188,7 +188,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `PUT /api-keys/{id}` | `exa-agent admin keys update ID` | **PUT**, not PATCH. `--name`, `--rate-limit`, `--budget-cents` (null clears budget). |
 | `DELETE /api-keys/{id}` | `exa-agent admin keys delete ID --confirm ID` | Irreversible, team-wide. Confirm-by-id (D4). |
 | `GET /api-keys/{id}/usage` | `exa-agent admin keys usage ID` | `--start-date`, `--end-date` (≤180d lookback), `--group-by hour|day|month`. |
-| (any new/uncovered op) | `exa-agent raw METHOD PATH` | Escape hatch with full auth/output/error contracts. |
+| (any new/uncovered op) | `exa-agent raw METHOD PATH` | Escape hatch with full auth/output/error contracts. Payment pass-through/discovery is raw-only for exact nonstreaming `POST /search` and `/contents`. |
 
 ---
 
@@ -228,8 +228,10 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 | `--api-key KEY` | One-shot key; **never persisted** (D11). ⚠️ Leaks into `ps`/shell history/agent transcript — prefer `--api-key-stdin` in untrusted shells. |
 | `--api-key-stdin` | Read the one-shot key from stdin instead of argv (no process-table leak). |
 | `--base-url URL` | Override API host (default `https://api.exa.ai`). |
-| `--header 'Name: value'` | Extra header; repeatable; secret headers redacted in traces. |
+| `--header 'Name: value'` | Extra header; repeatable; managed auth, payment, and secret headers are refused/redacted. |
 | `--beta VALUE` | Sets the Exa beta header where required. |
+| `--payment-discovery` | Raw-only unauthenticated challenge request for exact nonstreaming `POST /search` or `/contents` on the default host. No retries, redirects, API key, or idempotency key. |
+| `--x402-payment-stdin` / `--mpp-payment-stdin` | Raw-only signed payment pass-through for exact nonstreaming `POST /search` or `/contents`. Reads the complete payment header value from stdin; conflicts with API/service credentials and other stdin body/input. |
 | `--timeout DURATION` / `--connect-timeout DURATION` | e.g. `30s`. |
 | `--retry N` | Retry count for retryable failures (default 2). Auto-retry applies only to GETs, network (exit-4), 429, 5xx — **never** un-keyed create-POSTs (D7, contracts §7). |
 | `--retry-after` | Honor `Retry-After` on 429 (default on). |
@@ -423,7 +425,8 @@ exa-agent agent runs create QUERY
   --input-row JSON             # repeatable convenience → input.data[]
   --exclusion JSON|@file       # input.exclusion
   --previous-run-id ID         # continue a completed run (same team)
-  --effort auto|minimal|low|medium|high|xhigh   # default auto; `medium` good single-entity default
+  --effort auto|minimal|low|medium|high|xhigh|max   # default auto; `medium` good single-entity default
+  --max-cost-dollars 1..100    # budget.maxCostDollars for omitted/auto/max effort
   --data-source PROVIDER       # repeatable; max 5; fiber|financial_datasets|similarweb|baselayer|affiliate|particle|jinko
   --metadata JSON
   --stream                     # SSE via Accept: text/event-stream
@@ -445,7 +448,8 @@ Guards / notes:
 - Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --since ...` (D7, contracts §7).
 - `--data-source` count > 5 → exit 1.
 - Typed `--data-source` values are case-insensitive and sent with canonical spelling; invalid values exit 1 with the accepted set. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; explicit `--body`/`--set` values pass through unchanged.
-- Surface `stopReason` in output; treat `budget_reached` as not-fully-complete (do not silently report success).
+- `--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. `effort max` requires both an explicit budget cap and `--beta agent-max-effort-2026-07-27` (comma-separated beta tokens are accepted; the CLI never invents the beta header).
+- Surface `stopReason` in output; `budget_reached` emits a `budget_reached` warning so agents do not silently treat the run as fully complete.
 
 ### `research` — `/research/v1` (retired upstream)
 
@@ -598,6 +602,8 @@ exa-agent config list [--effective]   get PATH   set PATH VALUE   unset PATH
 exa-agent config path
 exa-agent config profiles list | show NAME | use NAME | create NAME | delete NAME
 exa-agent raw METHOD PATH [--body @file] [--query k=v]
+printf '%s' "$PAYMENT_SIGNATURE" | exa-agent --x402-payment-stdin raw POST /search --body @request.json
+exa-agent --payment-discovery raw POST /search --body @request.json
 ```
 
 Notes:

@@ -34,6 +34,29 @@
       }
     },
     "schemas": {
+      "AgentBudget": {
+        "description": "Optional per-run spending limit for the metered `auto` and `max` efforts. Runs that finish early may cost less than the limit.",
+        "properties": {
+          "maxCostDollars": {
+            "description": "Maximum amount this run can spend in US dollars. Accepts $1–$100 and applies only to `auto` and `max`; when omitted, the default cap is $5 for `auto` and $20 for `max`.",
+            "example": 10,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "AgentBudgetOutput": {
+        "additionalProperties": false,
+        "description": "Optional per-run spending limit for the metered `auto` and `max` efforts. Runs that finish early may cost less than the limit.",
+        "properties": {
+          "maxCostDollars": {
+            "description": "Maximum amount this run can spend in US dollars. Accepts $1–$100 and applies only to `auto` and `max`; when omitted, the default cap is $5 for `auto` and $20 for `max`.",
+            "example": 10,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
       "AgentCitation": {
         "additionalProperties": false,
         "properties": {
@@ -152,14 +175,15 @@
       },
       "AgentEffort": {
         "default": "auto",
-        "description": "Cost and reasoning effort preference for the run. `auto` lets Exa choose the appropriate effort.",
+        "description": "Cost and reasoning effort preference for the run. `auto` lets Exa choose the appropriate effort. `max` is the highest-effort public beta tier for work where completeness and thoroughness matter more than latency or cost, including large list building, deep multi-source research, and criteria that are hard to verify.",
         "enum": [
           "minimal",
           "low",
           "medium",
           "high",
           "xhigh",
-          "auto"
+          "auto",
+          "max"
         ],
         "type": "string"
       },
@@ -481,6 +505,9 @@
         },
         "description": "Canonicalized request fields stored with the run.",
         "properties": {
+          "budget": {
+            "$ref": "#/components/schemas/AgentBudgetOutput"
+          },
           "dataSources": {
             "description": "Exa Connect data providers configured for the run.",
             "items": {
@@ -1806,16 +1833,7 @@
       "CreateAgentRunRequest": {
         "properties": {
           "budget": {
-            "deprecated": true,
-            "description": "Accepted for compatibility and currently ignored.",
-            "properties": {
-              "maxCostDollars": {
-                "description": "Accepted for compatibility and currently ignored.",
-                "minimum": 0,
-                "type": "number"
-              }
-            },
-            "type": "object"
+            "$ref": "#/components/schemas/AgentBudget"
           },
           "dataSources": {
             "description": "Exa Connect data providers to enable for the run. Each entry enables all of that provider's tools.",
@@ -11797,7 +11815,7 @@
           {
             "label": "Stream a run",
             "lang": "bash",
-            "source": "curl -N -X POST \"https://api.exa.ai/agent/runs\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Accept: text/event-stream\" \\\n  -H \"x-api-key: $EXA_API_KEY\" \\\n  -d '{\n    \"query\": \"Find five recently launched developer tools for evaluating AI agents.\"\n  }'"
+            "source": "curl -N -X POST \"https://api.exa.ai/agent/runs\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Accept: text/event-stream\" \\\n  -H \"x-api-key: $EXA_API_KEY\" \\\n  -d '{\n    \"query\": \"Find five recently launched developer tools for evaluating AI agents.\"\n}'"
           }
         ]
       }

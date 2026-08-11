@@ -113,12 +113,12 @@ commands still work.
 ### Command surface
 
 - **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream).
-- **Agent runs** — `agent runs create|get|list|events|cancel|delete`; `create` streams.
+- **Agent runs** — `agent runs create|get|list|events|cancel|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/beta `max` effort.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
 - **Websets** — the full tree: websets, searches, items, enrichments, exports, monitors and their runs, imports, webhooks and their delivery attempts, and events.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
-- **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling.
+- **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.
 
 ### Presets and macros
@@ -180,6 +180,7 @@ The contract is what makes this usable from code. Highlights:
 - **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it, but invalid bodies still exit `1` before any request is printed.
 - **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).
 - **No surprise double-billing.** `--idempotency-key` is forwarded upstream, and the CLI never auto-retries a non-idempotent create-POST.
+- **Billing vs payment is explicit.** `insufficient_credits` remains exit `13`; only a challenge-evidenced raw payment 402 is `payment_required` / exit `2`.
 
 ## Authentication
 

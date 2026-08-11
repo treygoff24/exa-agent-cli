@@ -9,7 +9,13 @@ pub fn is_secret_name(name: &str) -> bool {
     if matches!(n.as_str(), "tokensnum" | "tokens_num" | "tokens-num") {
         return false;
     }
+    if n == "www-authenticate" || n.starts_with("payment-") || n.starts_with("x-payment") {
+        return true;
+    }
     n.contains("authorization")
+        || n.contains("payment-signature")
+        || n.contains("payment_signature")
+        || n.contains("paymentsignature")
         || n.contains("api-key")
         || n.contains("api_key")
         || n.contains("apikey")
@@ -43,6 +49,12 @@ mod tests {
     fn detects_secret_names() {
         for name in [
             "authorization",
+            "payment-signature",
+            "payment_signature",
+            "paymentsignature",
+            "payment-required",
+            "x-payment-response",
+            "www-authenticate",
             "api-key",
             "api_key",
             "apikey",

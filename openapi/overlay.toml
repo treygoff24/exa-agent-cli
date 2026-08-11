@@ -805,7 +805,17 @@ kind = "str"
 flag = "effort"
 body_path = "effort"
 kind = "str"
-enum_values = ["auto", "minimal", "low", "medium", "high", "xhigh"]
+enum_values = ["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+[[operations."createAgentRun".fields]]
+flag = "max-cost-dollars"
+body_path = "budget.maxCostDollars"
+kind = "num"
+range = [1, 100]
+input_kind = "flag"
+input_name = "--max-cost-dollars"
+value_name = "DOLLARS"
+arity = { min = 1, max = 1 }
 
 [[operations."createAgentRun".fields]]
 flag = "data-source"

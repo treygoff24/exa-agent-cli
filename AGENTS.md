@@ -92,9 +92,9 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 12 | interrupted | SIGINT / stream interrupted |
 | 13 | billing | 402; the Exa account is out of credits (key is valid, command was fine) |
 
-`error.code` is the finer-grained signal — 33 codes map onto these 14 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+`error.code` is the finer-grained signal — 34 codes map onto these 14 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
 
-**Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** A 402 means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane. `exa-agent auth test` and `doctor --online` report this state without spending anything, and are the only credit preflight available: the Exa API publishes no balance endpoint, so exhaustion is observable only as a 402 on the billing-free probe.
+**Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** A 402 without a payment challenge, or any 4xx body carrying `NO_MORE_CREDITS`, means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane. Challenge-evidenced 402 on raw payment discovery is `payment_required` / exit `2`.
 
 Dispatch-level body validation runs before credential resolution and network I/O. Body-level mistakes (unknown fields, out-of-range values, missing required fields, or a malformed `--body`/`--set`) exit `1` as a local `usage` error rather than being sent upstream and returning `5`. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
 
@@ -103,7 +103,8 @@ Dispatch-level body validation runs before credential resolution and network I/O
 - Destructive operations (deletes, cancels) refuse to run without `--yes` and exit `9` otherwise.
 - Create-POSTs never auto-retry without `--idempotency-key` — retrying a create on a post-send timeout can double-bill. An ambiguous create failure writes a local pending-run record and the error names the exact recovery command.
 - `--dry-run --print-request` works on every mutation: it builds and prints the exact request body without sending it.
-- `--header` cannot override managed auth headers (`Authorization` or other secret headers) — refused at exit `1`.
+- `--header` cannot override managed auth or payment headers (`Authorization`, payment namespaces, or other secret headers) — refused at exit `1`.
+- Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` are limited to exact nonstreaming `raw POST /search` or `/contents` on the default host; payment values are stdin-only and never combined with API/service credentials.
 
 ## Machine self-description
 

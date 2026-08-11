@@ -344,6 +344,8 @@ fn post_with_idempotency_key_is_retried_on_503() {
         retry: 2,
         retry_after: false,
         idempotency_key: Some("idem-123".into()),
+        follow_redirects: true,
+        payment_mode: false,
     };
     let (resp, retries) = send_with_retry(&fake, &req, &opts).unwrap();
     assert_eq!(resp.status, 200);
@@ -366,6 +368,8 @@ fn options_is_supported_by_retry_model() {
         retry: 2,
         retry_after: false,
         idempotency_key: None,
+        follow_redirects: true,
+        payment_mode: false,
     };
     let (resp, retries) = send_with_retry(&fake, &req, &opts).unwrap();
     assert_eq!(resp.status, 200);
@@ -458,6 +462,8 @@ fn billing_error_is_not_retried() {
         retry: 3,
         retry_after: false,
         idempotency_key: None,
+        follow_redirects: true,
+        payment_mode: false,
     };
     let err = send_with_retry(&fake, &req, &opts).unwrap_err();
     assert_eq!(err.diag().code, "insufficient_credits");
@@ -582,6 +588,8 @@ fn create_post_is_not_retried_without_idempotency_key() {
         retry: 2,
         retry_after: false,
         idempotency_key: None,
+        follow_redirects: true,
+        payment_mode: false,
     };
     let err = send_with_retry(&fake, &req, &opts).unwrap_err();
     assert!(matches!(err, CliError::Upstream(_)));
@@ -603,6 +611,8 @@ fn get_is_retried_on_upstream_503() {
         retry: 2,
         retry_after: false,
         idempotency_key: None,
+        follow_redirects: true,
+        payment_mode: false,
     };
     let (resp, retries) = send_with_retry(&fake, &req, &opts).unwrap();
     assert_eq!(resp.status, 200);

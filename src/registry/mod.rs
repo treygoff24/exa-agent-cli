@@ -156,6 +156,12 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
                 .to_string(),
         );
     }
+    if command == "agent runs create" && flag == "max-cost-dollars" {
+        return Some(
+            "Set `budget.maxCostDollars` (1..=100); valid only with omitted, auto, or max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`."
+                .to_string(),
+        );
+    }
     if flag == "output-schema" {
         return Some(format!(
             "Set the `{}` request field; accepts inline JSON or @file.",
@@ -241,6 +247,19 @@ pub fn ranged_u32_value_parser(
         raw.parse::<u32>()
             .ok()
             .filter(|value| (min..=max).contains(&u64::from(*value)))
+            .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
+    }
+}
+
+pub fn ranged_f64_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = f64> {
+    move |raw: &str| {
+        let (min, max) = required_field_range(command, flag);
+        raw.parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && (*value >= min as f64) && (*value <= max as f64))
             .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
     }
 }

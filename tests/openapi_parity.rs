@@ -96,6 +96,42 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
     );
 }
 
+#[test]
+fn agent_effort_and_budget_match_current_openapi() {
+    let spec = load_specs()
+        .into_iter()
+        .find(|spec| spec.name == "exa-openapi")
+        .expect("exa openapi spec");
+    let schemas = spec
+        .value
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("schemas");
+    let effort: BTreeSet<_> = schemas["AgentEffort"]["enum"]
+        .as_array()
+        .expect("AgentEffort enum")
+        .iter()
+        .map(|value| value.as_str().expect("enum string").to_string())
+        .collect();
+    assert_eq!(
+        effort,
+        BTreeSet::from([
+            "auto".to_string(),
+            "high".to_string(),
+            "low".to_string(),
+            "max".to_string(),
+            "medium".to_string(),
+            "minimal".to_string(),
+            "xhigh".to_string(),
+        ])
+    );
+    let create_props = schemas["CreateAgentRunRequest"]["properties"]
+        .as_object()
+        .expect("CreateAgentRunRequest properties");
+    assert!(create_props.contains_key("budget"));
+    assert!(create_props.contains_key("effort"));
+}
+
 fn load_specs() -> Vec<SpecDoc> {
     [
         ("openapi/exa-openapi.json", "exa-openapi"),

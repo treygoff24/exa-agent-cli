@@ -23,6 +23,12 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- Error envelopes now expose `error.details.omittedFlags` when argv-derived recovery commands
+  drop unsafe or conflicting flags, and argv-derived `suggestedCommand` values are sanitized so
+  recovery hints do not echo secrets or invalid combinations.
+- Successful signed raw payment responses in JSON-envelope mode now add top-level `payment`
+  receipt metadata. Signed payment `--raw` remains envelope-free; all non-payment raw bytes stay
+  exact, while exact submitted payment credential echoes are redacted as `[REDACTED]`.
 - HTTP 402 classification now distinguishes billing exhaustion from payment challenges:
   `NO_MORE_CREDITS` / bare 402 stays `insufficient_credits` (exit 13), while a 402 with safe
   payment challenge metadata is `payment_required` (exit 2).

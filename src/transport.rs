@@ -312,25 +312,10 @@ fn stream_callback_error(err: CliError, last_event_id: Option<&str>) -> CliError
     };
     match err {
         CliError::Interrupted(mut diag) => {
-            let mut details = diag
-                .details
-                .take()
-                .map(|value| *value)
-                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-            match &mut details {
-                serde_json::Value::Object(map) => {
-                    map.entry("lastEventId".to_string())
-                        .or_insert_with(|| serde_json::Value::String(last_event_id.to_string()));
-                }
-                other => {
-                    let cause = std::mem::take(other);
-                    *other = serde_json::json!({
-                        "lastEventId": last_event_id,
-                        "cause": cause,
-                    });
-                }
-            }
-            diag.details = Some(Box::new(details));
+            diag.details = Some(stream_event_id_details_with_existing(
+                diag.details.take(),
+                last_event_id,
+            ));
             CliError::Interrupted(diag)
         }
         other => other,
@@ -936,8 +921,11 @@ pub fn send_with_retry<T: Transport>(
             Ok(resp) if (200..300).contains(&resp.status) => {
                 return Ok((resp, attempt));
             }
-            Ok(resp) => {
+            Ok(mut resp) => {
                 let delay = retry_delay_ms(Some(&resp), options.retry_after);
+                if options.payment_mode {
+                    redact_payment_echoes_from_response(&mut resp, &req.headers);
+                }
                 let mut err = classify_http_status_with_payment_mode(
                     resp.status,
                     &resp.body,
@@ -1992,6 +1980,31 @@ pub fn stream_event_id_details(last_event_id: &str) -> Value {
         details.insert("lastEventIdTruncated".to_string(), Value::Bool(true));
     }
     Value::Object(details)
+}
+
+pub(crate) fn stream_event_id_details_with_existing(
+    existing: Option<Box<Value>>,
+    last_event_id: &str,
+) -> Box<Value> {
+    let mut event_details = match stream_event_id_details(last_event_id) {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    match existing.map(|value| *value) {
+        Some(Value::Object(mut map)) => {
+            if !map.contains_key("lastEventId") {
+                for (key, value) in event_details {
+                    map.entry(key).or_insert(value);
+                }
+            }
+            Box::new(Value::Object(map))
+        }
+        Some(cause) => {
+            event_details.insert("cause".to_string(), cause);
+            Box::new(Value::Object(event_details))
+        }
+        None => Box::new(Value::Object(event_details)),
+    }
 }
 
 fn search_stream_context_details(context: &SearchStreamContext) -> Value {
@@ -3260,6 +3273,58 @@ data: [DONE]
         let err = fake.send_sse(&req, &opts, &mut callback).unwrap_err();
         assert_eq!(err.category(), 12);
         assert_eq!(err.diag().details.as_ref().unwrap()["lastEventId"], "evt-1");
+    }
+
+    #[test]
+    fn send_sse_callback_error_caps_oversized_previous_event_id() {
+        let id = "é".repeat(600);
+        let fake = FakeTransport::default();
+        fake.push_ok_json(
+            200,
+            &format!("id: {id}\ndata: {{\"seq\":1}}\n\nid: evt-2\ndata: {{\"seq\":2}}\n\n"),
+        );
+        let req = HttpRequest {
+            method: "GET".into(),
+            url: "https://example.test/events".into(),
+            headers: vec![],
+            body: None,
+        };
+        let opts = SendOptions {
+            retry: 0,
+            retry_after: false,
+            idempotency_key: None,
+            follow_redirects: true,
+            payment_mode: false,
+        };
+        let mut callback = |item: StreamItem<'_>| -> Result<(), CliError> {
+            if let StreamItem::Frame(frame) = item {
+                if frame.id.as_deref() == Some("evt-2") {
+                    return Err(CliError::Interrupted(Diag::new(
+                        "interrupted",
+                        "stdout closed",
+                    )));
+                }
+            }
+            Ok(())
+        };
+
+        let err = fake.send_sse(&req, &opts, &mut callback).unwrap_err();
+        let details = err.diag().details.as_ref().unwrap();
+        let shown = details["lastEventId"].as_str().unwrap();
+        assert_eq!(shown, "é".repeat(512));
+        assert_eq!(shown.len(), 1024);
+        assert_eq!(details["lastEventIdTruncated"], true);
+    }
+
+    #[test]
+    fn stream_callback_error_preserves_existing_bounded_event_id() {
+        let existing = Diag::new("interrupted", "stdout closed")
+            .with_details(serde_json::json!({"lastEventId":"writer-id","note":"keep"}));
+        let err = stream_callback_error(CliError::Interrupted(existing), Some(&"é".repeat(600)));
+        let details = err.diag().details.as_ref().unwrap();
+        assert_eq!(details["lastEventId"], "writer-id");
+        assert_eq!(details["note"], "keep");
+        assert!(details.get("lastEventIdTruncated").is_none());
     }
 
     /// Delegates to an inner [`FakeTransport`] after a fixed sleep, so tests can prove

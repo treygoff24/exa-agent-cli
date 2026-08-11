@@ -1034,6 +1034,76 @@ fn successful_payment_raw_response_scrubs_secret_and_preserves_other_bytes() {
         .any(|(name, value)| name == "x-safe" && value == "keep-me"));
 }
 
+#[test]
+fn payment_json_error_preview_redacts_secret_across_truncation_boundary() {
+    let secret_value = "JSON_LEFT_SECRET_MID_RIGHT_CANARY";
+    let prefix_chars = 4096 - 1 - "JSON_LEFT_SECRET".len();
+    let upstream_string = format!("{}{secret_value} after", "J".repeat(prefix_chars));
+    let body = serde_json::to_vec(&upstream_string).unwrap();
+    let fake = FakeTransport::default();
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 400,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body,
+    });
+
+    let err = send_with_retry(
+        &fake,
+        &payment_request(secret_value),
+        &payment_no_retry_options(),
+    )
+    .unwrap_err();
+
+    let details = err.diag().details.as_ref().unwrap();
+    assert_eq!(details["upstreamTruncated"], true);
+    let preview = details["upstreamPreview"].as_str().unwrap();
+    assert!(preview.starts_with('"'));
+    assert!(
+        preview.contains(exa_agent_cli::redaction::REDACTED),
+        "{preview}"
+    );
+    assert!(preview.len() <= 4096);
+    assert_no_secret_fragments(
+        &serde_json::to_string(details).unwrap(),
+        secret_value,
+        &["JSON_LEFT_SECRET", "SECRET_MID_RIGHT", "RIGHT_CANARY"],
+    );
+}
+
+#[test]
+fn payment_non_json_error_preview_redacts_secret_across_truncation_boundary() {
+    let secret_value = "NONJSON_LEFT_SECRET_MID_RIGHT_CANARY";
+    let prefix_chars = 200 - "NONJSON_LEFT".len();
+    let body = format!("{}{secret_value} after", "N".repeat(prefix_chars)).into_bytes();
+    let fake = FakeTransport::default();
+    fake.push_response(exa_agent_cli::transport::HttpResponse {
+        status: 404,
+        headers: vec![("content-type".to_string(), "text/html".to_string())],
+        body,
+    });
+
+    let err = send_with_retry(
+        &fake,
+        &payment_request(secret_value),
+        &payment_no_retry_options(),
+    )
+    .unwrap_err();
+
+    let details = err.diag().details.as_ref().unwrap();
+    let preview = details["bodyPreview"].as_str().unwrap();
+    assert!(preview.starts_with("NNNN"));
+    assert!(
+        preview.contains(exa_agent_cli::redaction::REDACTED),
+        "{preview}"
+    );
+    assert!(preview.chars().count() <= 200);
+    assert_no_secret_fragments(
+        &serde_json::to_string(details).unwrap(),
+        secret_value,
+        &["NONJSON_LEFT", "SECRET_MID_RIGHT", "RIGHT_CANARY"],
+    );
+}
+
 fn payment_challenge_transport(body: &[u8]) -> FakeTransport {
     let fake = FakeTransport::default();
     fake.push_response(exa_agent_cli::transport::HttpResponse {
@@ -1060,6 +1130,26 @@ fn payment_send_options() -> SendOptions {
         idempotency_key: None,
         follow_redirects: false,
         payment_mode: true,
+    }
+}
+
+fn payment_no_retry_options() -> SendOptions {
+    SendOptions {
+        retry: 0,
+        retry_after: false,
+        idempotency_key: None,
+        follow_redirects: false,
+        payment_mode: true,
+    }
+}
+
+fn assert_no_secret_fragments(rendered: &str, secret: &str, fragments: &[&str]) {
+    assert!(!rendered.contains(secret), "{rendered}");
+    for fragment in fragments {
+        assert!(
+            !rendered.contains(fragment),
+            "{fragment} leaked in {rendered}"
+        );
     }
 }
 

@@ -376,7 +376,11 @@ fn local_search_sse_server() -> (String, thread::JoinHandle<()>) {
     local_search_sse_server_with_response(SEARCH_SSE_FIXTURE)
 }
 
-fn assert_search_sse_recovery(error: &serde_json::Value, last_event_id: &str, events_seen: u64) {
+fn assert_search_sse_recovery<'a>(
+    error: &'a serde_json::Value,
+    last_event_id: &str,
+    events_seen: u64,
+) -> &'a str {
     let suggested = error["error"]["suggestedCommand"]
         .as_str()
         .expect("search SSE errors should carry recovery command");
@@ -385,6 +389,7 @@ fn assert_search_sse_recovery(error: &serde_json::Value, last_event_id: &str, ev
     assert!(!suggested.contains("@schema.json"), "{suggested}");
     assert_eq!(error["error"]["details"]["lastEventId"], last_event_id);
     assert_eq!(error["error"]["details"]["eventsSeen"], events_seen);
+    suggested
 }
 
 fn local_sse_stall_server(
@@ -2157,7 +2162,7 @@ data: [DONE]
     let (base_url, server) = local_search_sse_server_with_response(response);
     let output = run(&[
         "search",
-        "rust async",
+        "rust's async",
         "--stream",
         "--output-schema",
         r#"{"type":"object"}"#,
@@ -2183,7 +2188,10 @@ data: [DONE]
         .as_str()
         .unwrap()
         .contains("Search provider timed out"));
-    assert_search_sse_recovery(&error, "evt-search-error-2", 2);
+    assert_eq!(
+        assert_search_sse_recovery(&error, "evt-search-error-2", 2),
+        r#"exa-agent search 'rust'\''s async' --stream --output-schema '{"type":"object"}'"#
+    );
 }
 
 #[test]
@@ -2203,7 +2211,7 @@ data: [DONE]
     let (base_url, server) = local_search_sse_server_with_response(response);
     let output = run(&[
         "search",
-        "rust async",
+        "rust's async",
         "--stream",
         "--output-schema",
         r#"{"type":"object"}"#,
@@ -2243,7 +2251,10 @@ data: [DONE]
         error["error"]["details"]["upstreamMessage"],
         "Search provider timed out"
     );
-    assert_search_sse_recovery(&error, "evt-search-error-3", 3);
+    assert_eq!(
+        assert_search_sse_recovery(&error, "evt-search-error-3", 3),
+        r#"exa-agent search 'rust'\''s async' --stream --output-schema '{"type":"object"}'"#
+    );
 }
 
 #[test]

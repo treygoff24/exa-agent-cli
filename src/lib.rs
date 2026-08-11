@@ -2783,38 +2783,42 @@ fn agent_data_sources_json(providers: &[String], query: &str) -> Result<Option<S
                 "`--data-source` provider must not be empty",
             )));
         }
-        let canonical = match provider.to_ascii_lowercase().as_str() {
-            "fiber" | "fiber_ai" => "fiber",
-            "financial_datasets" => "financial_datasets",
-            "similarweb" => "similarweb",
-            "baselayer" => "baselayer",
-            "affiliate" => "affiliate",
-            "particle" | "particle_news" => "particle",
-            "jinko" => "jinko",
-            _ => {
-                return Err(CliError::Usage(
-                    Diag::new(
-                        "invalid_value",
-                        format!(
-                            "invalid `--data-source` provider `{provider}`; accepted providers are {}",
-                            AGENT_DATA_SOURCE_PROVIDERS.join(", ")
-                        ),
-                    )
-                    .with_details(serde_json::json!({
-                        "field": "dataSources.provider",
-                        "given": provider,
-                        "accepted": AGENT_DATA_SOURCE_PROVIDERS,
-                    }))
-                    .with_suggestion(format!(
-                        "exa-agent agent runs create {} --data-source fiber",
-                        shell_quote(query)
-                    )),
-                ));
-            }
+        let Some(canonical) = canonical_agent_data_source_provider(provider) else {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    format!(
+                        "invalid `--data-source` provider `{provider}`; accepted providers are {}",
+                        AGENT_DATA_SOURCE_PROVIDERS.join(", ")
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "field": "dataSources.provider",
+                    "given": provider,
+                    "accepted": AGENT_DATA_SOURCE_PROVIDERS,
+                }))
+                .with_suggestion(format!(
+                    "exa-agent agent runs create {} --data-source fiber",
+                    shell_quote(query)
+                )),
+            ));
         };
         sources.push(serde_json::json!({ "provider": canonical }));
     }
     Ok(Some(serde_json::Value::Array(sources).to_string()))
+}
+
+fn canonical_agent_data_source_provider(provider: &str) -> Option<&'static str> {
+    let lower = provider.to_ascii_lowercase();
+    let normalized = match lower.as_str() {
+        "fiber_ai" => "fiber",
+        "particle_news" => "particle",
+        other => other,
+    };
+    AGENT_DATA_SOURCE_PROVIDERS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
 }
 
 fn typed_provider_alias_warnings(
@@ -7109,7 +7113,8 @@ fn execute_streaming_live<T: Transport>(
     }
 
     let mut terminal_data = if operation.is_some_and(|op| op.operation_id == "search") {
-        search_terminal_stream_data(&frames)?
+        search_terminal_stream_data(&frames)
+            .map_err(|err| search_sse_recovery_error(err, &request_body))?
     } else {
         terminal_stream_data(&frames)
     };
@@ -7151,6 +7156,24 @@ fn execute_streaming_live<T: Transport>(
         write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
     }
     Ok(0)
+}
+
+fn search_sse_recovery_error(err: CliError, request_body: &serde_json::Value) -> CliError {
+    let suggestion = request_body
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .filter(|query| !query.trim().is_empty())
+        .map(|query| {
+            format!(
+                "exa-agent search {} --stream --output-schema '{{\"type\":\"object\"}}'",
+                shell_quote(query)
+            )
+        })
+        .unwrap_or_else(|| "exa-agent search --help".to_string());
+
+    let mut err = err;
+    err.diag_mut().suggested_command = Some(suggestion);
+    err
 }
 
 fn write_stream_terminal(
@@ -9836,7 +9859,7 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
-    let mut envelope = raw_response_envelope(&result, payment_requested(globals), &[]);
+    let mut envelope = raw_response_envelope(&result, payment_requested(globals));
     emit_completed_response(&mut envelope, globals, pretty)?;
     Ok(0)
 }
@@ -9844,7 +9867,6 @@ fn dispatch_raw_inner(
 fn raw_response_envelope(
     result: &transport::RawExecuteResult,
     signed_payment: bool,
-    warnings: &[serde_json::Value],
 ) -> serde_json::Value {
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
@@ -9862,7 +9884,7 @@ fn raw_response_envelope(
         data_hash: hash,
         retries: result.retries,
         duration_ms: result.duration_ms,
-        warnings,
+        warnings: &[],
     });
     if signed_payment {
         envelope["payment"] =
@@ -10647,7 +10669,7 @@ mod tests {
     #[test]
     fn signed_payment_json_envelope_puts_receipt_metadata_after_data_truncated() {
         let result = signed_payment_raw_result();
-        let envelope = raw_response_envelope(&result, true, &[]);
+        let envelope = raw_response_envelope(&result, true);
 
         assert_eq!(envelope["data"]["results"][0]["title"], "paid");
         assert_eq!(envelope["payment"]["kind"], "receipt");

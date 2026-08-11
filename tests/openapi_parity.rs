@@ -145,6 +145,40 @@ fn agent_data_source_runtime_accepts_current_openapi_provider_enum() {
         .and_then(Value::as_object)
         .expect("schemas");
     let expected: Value = schemas["AgentDataSourceProvider"]["enum"].clone();
+    for provider in expected.as_array().expect("provider enum array") {
+        let provider = provider.as_str().expect("provider enum string");
+        for given in [provider.to_string(), provider.to_ascii_uppercase()] {
+            let output = Command::new(env!("CARGO_BIN_EXE_exa-agent"))
+                .args([
+                    "agent",
+                    "runs",
+                    "create",
+                    "q",
+                    "--data-source",
+                    &given,
+                    "--dry-run",
+                    "--compact",
+                ])
+                .env("EXA_AGENT_NO_NETWORK", "1")
+                .env_remove("EXA_API_KEY")
+                .env_remove("EXA_SERVICE_KEY")
+                .output()
+                .unwrap_or_else(|err| panic!("run exa-agent with provider {given}: {err}"));
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "provider {given} should be accepted\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let ok: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
+            assert_eq!(
+                ok["data"]["request"]["body"]["dataSources"],
+                serde_json::json!([{ "provider": provider }]),
+                "provider {given} should canonicalize to {provider}"
+            );
+        }
+    }
 
     let output = Command::new(env!("CARGO_BIN_EXE_exa-agent"))
         .args([

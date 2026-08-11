@@ -203,6 +203,14 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             let mut details = serde_json::Map::new();
             let mut message = public_clap_text(first_line(&e.to_string()));
             let mut suggestion = None;
+            let invalid_flag = (kind == ErrorKind::UnknownArgument)
+                .then(|| {
+                    clap_ctx_strings(&e, ContextKind::InvalidArg)
+                        .into_iter()
+                        .next()
+                        .map(public_clap_text)
+                })
+                .flatten();
 
             if kind == ErrorKind::UnknownArgument
                 && message.contains("--urls")
@@ -226,6 +234,15 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             {
                 message = "websets imports create no longer accepts --csv or --url; use the documented upload flow".to_string();
                 suggestion = Some(IMPORTS_CREATE_BODY_EXAMPLE.to_string());
+            }
+
+            if kind == ErrorKind::UnknownArgument {
+                if let Some((targeted_message, targeted_suggestion)) =
+                    known_cli_trap_suggestion(&e, invalid_flag.as_deref())
+                {
+                    message = targeted_message.to_string();
+                    suggestion = Some(targeted_suggestion);
+                }
             }
 
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
@@ -292,13 +309,17 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     .into_iter()
                     .last()
                     .map(public_clap_text);
+                let command = command_path_from_error(&e);
                 suggestion = flag
                     .as_deref()
                     .zip(corrected.as_deref())
-                    .and_then(|(flag, corrected)| rewrite_argv_value(flag, corrected))
+                    .and_then(|(flag, corrected)| {
+                        rewrite_argv_value(flag, corrected, command.as_deref())
+                    })
                     .or_else(|| {
-                        command_path_from_error(&e)
-                            .map(|command| unknown_flag_suggestion(&command, flag.as_deref()))
+                        command
+                            .as_deref()
+                            .map(|command| unknown_flag_suggestion(command, flag.as_deref()))
                     })
                     // Total fallback: a flag placed before any subcommand has no usage line
                     // to recover a command path from, but the agent still needs a move.
@@ -502,6 +523,295 @@ fn unknown_flag_suggestion(command: &str, flag: Option<&str>) -> String {
     }
 }
 
+fn known_cli_trap_suggestion(
+    error: &clap::Error,
+    flag: Option<&str>,
+) -> Option<(&'static str, String)> {
+    let command = command_path_from_error(error)?;
+    let clap_token = flag?.split_whitespace().next()?;
+    let trap_flag = if clap_token.starts_with('-') {
+        clap_token
+    } else {
+        known_process_trap_flag(&command)?
+    };
+    match (command.as_str(), trap_flag) {
+        ("search", "--query") => Some((
+            "search QUERY is positional; remove --query",
+            positionalize_search_query_flag()
+                .unwrap_or_else(|| "exa-agent search --help".to_string()),
+        )),
+        ("search", "--contents") => Some((
+            "search has no --contents flag; use --text [N|full] or --highlights [N] for inline content",
+            rewrite_search_contents_process_flag()
+                .unwrap_or_else(|| "exa-agent search --help".to_string()),
+        )),
+        ("search", "--content-size") => Some((
+            "search has no --content-size preset; use --text [N|full] or --highlights [N], or run contents for known URLs",
+            "exa-agent search --help".to_string(),
+        )),
+        ("search", "--include-domains") => Some((
+            "search uses repeatable --include-domain flags, not --include-domains",
+            rewrite_search_process_flag("--include-domains", "--include-domain")
+                .unwrap_or_else(|| "exa-agent search --help".to_string()),
+        )),
+        ("search", "--exclude-domains") => Some((
+            "search uses repeatable --exclude-domain flags, not --exclude-domains",
+            rewrite_search_process_flag("--exclude-domains", "--exclude-domain")
+                .unwrap_or_else(|| "exa-agent search --help".to_string()),
+        )),
+        ("contents", "--no-highlights") => Some((
+            "contents highlights are opt-in; omit --highlights instead of passing --no-highlights",
+            remove_process_flag_with_optional_bool("--no-highlights")
+                .unwrap_or_else(|| "exa-agent contents --help".to_string()),
+        )),
+        _ => None,
+    }
+}
+
+fn known_process_trap_flag(command: &str) -> Option<&'static str> {
+    let candidates: &[&str] = match command {
+        "search" => &[
+            "--query",
+            "--contents",
+            "--content-size",
+            "--include-domains",
+            "--exclude-domains",
+        ],
+        "contents" => &["--no-highlights"],
+        _ => return None,
+    };
+    let args: Vec<String> = std::env::args().collect();
+    candidates.iter().copied().find(|candidate| {
+        let equals_prefix = format!("{candidate}=");
+        args.iter()
+            .any(|arg| arg == candidate || arg.starts_with(&equals_prefix))
+    })
+}
+
+fn positionalize_search_query_flag() -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    for index in 1..args.len() {
+        if args[index] == "--query" {
+            let end = args[index + 1..]
+                .iter()
+                .position(|value| value.starts_with('-'))
+                .map_or(args.len(), |offset| index + 1 + offset);
+            if end == index + 1 {
+                return None;
+            }
+            let query = args[index + 1..end].join(" ");
+            args.splice(index..end, [query]);
+            return render_process_argv(args);
+        }
+        if let Some(value) = args[index].strip_prefix("--query=") {
+            if value.is_empty() {
+                return None;
+            }
+            args[index] = value.to_string();
+            return render_process_argv(args);
+        }
+    }
+    None
+}
+
+fn rewrite_search_process_flag(flag: &str, replacement: &str) -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    let equals_prefix = format!("{flag}=");
+    let index = (1..args.len())
+        .find(|index| args[*index] == flag || args[*index].starts_with(&equals_prefix))?;
+    if args[index] == flag {
+        args[index] = replacement.to_string();
+    } else {
+        let value = args[index].strip_prefix(&equals_prefix)?;
+        args[index] = format!("{replacement}={value}");
+    }
+    render_search_process_argv(args)
+}
+
+fn remove_process_flag_with_optional_bool(flag: &str) -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    let equals_prefix = format!("{flag}=");
+    let index = (1..args.len())
+        .find(|index| args[*index] == flag || args[*index].starts_with(&equals_prefix))?;
+    args.remove(index);
+    if args.get(index).is_some_and(|value| {
+        value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
+    }) {
+        args.remove(index);
+    }
+    render_process_argv(args)
+}
+
+fn rewrite_search_contents_process_flag() -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    for index in 1..args.len() {
+        if args[index] == "--contents" {
+            let next = args.get(index + 1);
+            let negative_number = next.is_some_and(|value| {
+                value.strip_prefix('-').is_some_and(|digits| {
+                    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+                })
+            });
+            if negative_number {
+                return None;
+            }
+            let value = next.filter(|value| !value.starts_with('-')).cloned();
+            match value.as_deref() {
+                Some(value) if value.eq_ignore_ascii_case("highlights") => {
+                    args[index] = "--highlights".to_string();
+                    args.remove(index + 1);
+                }
+                Some(value) if value.eq_ignore_ascii_case("text") => {
+                    args[index] = "--text".to_string();
+                    args.remove(index + 1);
+                }
+                Some(value) if valid_search_text_value(value) => {
+                    args[index] = "--text".to_string();
+                }
+                Some(_) => return None,
+                None => args[index] = "--text".to_string(),
+            }
+            return render_search_process_argv(args);
+        }
+
+        if let Some(value) = args[index].strip_prefix("--contents=") {
+            if value.eq_ignore_ascii_case("highlights") {
+                args[index] = "--highlights".to_string();
+            } else if value.eq_ignore_ascii_case("text") || value.is_empty() {
+                args[index] = "--text".to_string();
+            } else if valid_search_text_value(value) {
+                args[index] = format!("--text={value}");
+            } else {
+                return None;
+            }
+            return render_search_process_argv(args);
+        }
+    }
+    None
+}
+
+fn valid_search_text_value(value: &str) -> bool {
+    if value.eq_ignore_ascii_case("full") {
+        return true;
+    }
+    let range = registry::lookup_by_command("search")
+        .and_then(|operation| operation.fields.iter().find(|field| field.flag == "text"))
+        .and_then(registry::field_range);
+    range.is_some_and(|(min, max)| {
+        value
+            .parse::<u64>()
+            .is_ok_and(|value| (min..=max).contains(&value))
+    })
+}
+
+fn render_process_argv(mut args: Vec<String>) -> Option<String> {
+    *args.first_mut()? = "exa-agent".to_string();
+    sanitize_process_argv(&mut args);
+    render_validated_process_argv(&args)
+}
+
+fn render_search_process_argv(mut args: Vec<String>) -> Option<String> {
+    *args.first_mut()? = "exa-agent".to_string();
+    sanitize_process_argv(&mut args);
+    if let Some(rendered) = render_validated_process_argv(&args) {
+        return Some(rendered);
+    }
+    coalesce_split_search_query(&mut args)?;
+    render_validated_process_argv(&args)
+}
+
+fn coalesce_split_search_query(args: &mut Vec<String>) -> Option<()> {
+    let command = Cli::command().mut_subcommand("search", |search| {
+        search.mut_arg("query", |query| query.num_args(1..))
+    });
+    let matches = command.try_get_matches_from(args.iter()).ok()?;
+    let search = matches.subcommand_matches("search")?;
+    let indices: Vec<usize> = search.indices_of("query")?.collect();
+    let values: Vec<&str> = search
+        .get_many::<String>("query")?
+        .map(String::as_str)
+        .collect();
+    let local_start = *indices.first()?;
+    if indices.len() < 2
+        || indices
+            .iter()
+            .enumerate()
+            .any(|(offset, index)| *index != local_start + offset)
+    {
+        return None;
+    }
+    let command_index = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.as_str() == "search")
+        .find_map(|(command_index, _)| {
+            indices
+                .iter()
+                .zip(&values)
+                .all(|(index, value)| {
+                    args.get(command_index + index).map(String::as_str) == Some(*value)
+                })
+                .then_some(command_index)
+        })?;
+    let start = command_index.checked_add(local_start)?;
+    let end = start.checked_add(indices.len())?;
+    let query = args.get(start..end)?.join(" ");
+    args.splice(start..end, [query]);
+    Some(())
+}
+
+fn render_validated_process_argv(args: &[String]) -> Option<String> {
+    Cli::try_parse_from(args).ok()?;
+    Some(
+        args.iter()
+            .map(|arg| display_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn sanitize_process_argv(args: &mut Vec<String>) {
+    let mut index = 1;
+    while index < args.len() {
+        if matches!(
+            args[index].as_str(),
+            "--api-key" | "--service-key" | "--header" | "--set" | "--base-url"
+        ) {
+            args.remove(index);
+            if index < args.len() {
+                args.remove(index);
+            }
+        } else if args[index].starts_with("--api-key=")
+            || args[index].starts_with("--service-key=")
+            || args[index].starts_with("--header=")
+            || args[index].starts_with("--set=")
+            || args[index].starts_with("--base-url=")
+        {
+            args.remove(index);
+        } else if args[index] == "--body" {
+            if args
+                .get(index + 1)
+                .is_some_and(|value| value.starts_with('@'))
+            {
+                index += 2;
+            } else {
+                args.remove(index);
+                if index < args.len() {
+                    args.remove(index);
+                }
+            }
+        } else if let Some(value) = args[index].strip_prefix("--body=") {
+            if value.starts_with('@') {
+                index += 1;
+            } else {
+                args.remove(index);
+            }
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {
     let token = flag
         .trim()
@@ -553,11 +863,12 @@ fn rejected_value_suggestion(e: &clap::Error) -> Option<String> {
     let owner = clap_ctx_strings(e, ContextKind::InvalidArg)
         .into_iter()
         .next();
-    rewrite_argv_value_for(&invalid, &replacement, owner.as_deref())
+    let command = command_path_from_error(e);
+    rewrite_argv_value_for(&invalid, &replacement, owner.as_deref(), command.as_deref())
 }
 
-fn rewrite_argv_value(invalid: &str, replacement: &str) -> Option<String> {
-    rewrite_argv_value_for(invalid, replacement, None)
+fn rewrite_argv_value(invalid: &str, replacement: &str, command: Option<&str>) -> Option<String> {
+    rewrite_argv_value_for(invalid, replacement, None, command)
 }
 
 /// Rewrite the argv occurrence of `invalid` that belongs to `owner_flag` (clap's InvalidArg,
@@ -567,6 +878,7 @@ fn rewrite_argv_value_for(
     invalid: &str,
     replacement: &str,
     owner_flag: Option<&str>,
+    command: Option<&str>,
 ) -> Option<String> {
     let mut args: Vec<String> = std::env::args().collect();
     if args.is_empty() {
@@ -604,12 +916,15 @@ fn rewrite_argv_value_for(
         }
         previous = Some(arg.clone());
     }
-    replaced.then(|| {
-        args.iter()
-            .map(|arg| display_arg(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
+    replaced
+        .then(|| {
+            if command == Some("search") {
+                render_search_process_argv(args)
+            } else {
+                render_process_argv(args)
+            }
+        })
+        .flatten()
 }
 
 fn display_arg(arg: &str) -> String {
@@ -7932,10 +8247,12 @@ fn dispatch_robot_docs(
                     "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
                     "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
-                    "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
+                    "Inline search and contents results are under `.data.results[]`; use the null-safe iterator `(.data.results // [])[]`, and inspect `ok`, `warnings`, and `dataPath` before treating an empty iterator as zero results. Verify with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '(.data.results // [])[] | {title,url}'`.",
+                    "Global output control is `--max-output-bytes N`; use `--max-output-bytes 0` to keep the full data payload on stdout, or `-o FILE` to write complete output when the default spill cap is too small.",
                     "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
+                    "`--include-domain` accepts hostnames, hostname paths, or wildcard subdomains, not bare TLDs such as `gov`; for broad government discovery put `site:.gov` in the query and inspect the returned domains.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
-                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[.data.results[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
+                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
                     "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",

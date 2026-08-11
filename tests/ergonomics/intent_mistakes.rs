@@ -16,6 +16,282 @@ fn search_text_maps_to_nested_contents_text() {
 }
 
 #[test]
+fn search_plural_include_domains_points_to_the_canonical_flag_without_echoing_credentials() {
+    let json = error_json(&[
+        "--api-key",
+        "user-secret-value",
+        "search",
+        "rust async",
+        "--include-domains",
+        "example.com",
+        "--json",
+    ]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --include-domain example.com --json"
+    );
+    assert!(!json.to_string().contains("user-secret-value"));
+}
+
+#[test]
+fn corrected_commands_omit_secret_bearing_raw_inputs() {
+    for (args, canary) in [
+        (
+            vec![
+                "--header",
+                "Authorization: Bearer HEADER_SECRET_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "HEADER_SECRET_CANARY",
+        ),
+        (
+            vec![
+                "--header=x-api-key: EQUALS_HEADER_SECRET_CANARY",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "EQUALS_HEADER_SECRET_CANARY",
+        ),
+        (
+            vec![
+                "search",
+                "--query",
+                "rust",
+                "--set",
+                "contents.apiKey=SET_SECRET_CANARY",
+                "--json",
+            ],
+            "SET_SECRET_CANARY",
+        ),
+        (
+            vec![
+                "search",
+                "--query",
+                "rust",
+                "--body",
+                r#"{"apiKey":"BODY_SECRET_CANARY"}"#,
+                "--json",
+            ],
+            "BODY_SECRET_CANARY",
+        ),
+        (
+            vec![
+                "--base-url",
+                "https://user:BASE_URL_SECRET_CANARY@example.com",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "BASE_URL_SECRET_CANARY",
+        ),
+        (
+            vec![
+                "--base-url=https://user:EQUALS_BASE_URL_SECRET_CANARY@example.com",
+                "search",
+                "--query",
+                "rust",
+                "--json",
+            ],
+            "EQUALS_BASE_URL_SECRET_CANARY",
+        ),
+    ] {
+        let json = error_json(&args);
+        assert_eq!(
+            json["error"]["suggestedCommand"],
+            "exa-agent search rust --json"
+        );
+        assert!(!json.to_string().contains(canary));
+    }
+}
+
+#[test]
+fn search_query_flag_points_to_the_positional_query() {
+    let json = error_json(&["search", "--query", "rust async", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --json"
+    );
+    assert!(json["error"]["details"].get("didYouMean").is_none());
+}
+
+#[test]
+fn search_query_flag_joins_shell_split_words() {
+    let json = error_json(&["search", "--query", "rust", "async", "--json"]);
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --json"
+    );
+}
+
+#[test]
+fn search_query_with_an_existing_positional_falls_back_to_help() {
+    let json = error_json(&["search", "existing", "--query", "rust", "async", "--json"]);
+    assert_eq!(json["error"]["suggestedCommand"], "exa-agent search --help");
+}
+
+#[test]
+fn search_query_without_a_value_falls_back_to_help() {
+    let json = error_json(&["search", "--query", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(json["error"]["suggestedCommand"], "exa-agent search --help");
+}
+
+#[test]
+fn search_contents_numeric_points_to_text() {
+    let json = error_json(&["search", "rust async", "--contents", "1200", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --text 1200 --json"
+    );
+    assert!(json["error"]["details"].get("didYouMean").is_none());
+}
+
+#[test]
+fn search_contents_numeric_joins_a_shell_split_query() {
+    let json = error_json(&["search", "rust", "async", "--contents", "1200", "--json"]);
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --text 1200 --json"
+    );
+}
+
+#[test]
+fn search_contents_split_query_preserves_global_option_ordering() {
+    for args in [
+        vec!["--json", "search", "rust", "async", "--contents", "1200"],
+        vec!["search", "--json", "rust", "async", "--contents", "1200"],
+    ] {
+        let json = error_json(&args);
+        assert_eq!(
+            json["error"]["suggestedCommand"],
+            if args[0] == "--json" {
+                "exa-agent --json search 'rust async' --text 1200"
+            } else {
+                "exa-agent search --json 'rust async' --text 1200"
+            }
+        );
+    }
+}
+
+#[test]
+fn search_contents_split_query_preserves_preceding_typed_flag_values() {
+    let json = error_json(&[
+        "search",
+        "--include-domain",
+        "exa.ai",
+        "rust",
+        "async",
+        "--contents",
+        "1200",
+        "--json",
+    ]);
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search --include-domain exa.ai 'rust async' --text 1200 --json"
+    );
+}
+
+#[test]
+fn search_plural_domains_joins_a_shell_split_query() {
+    let json = error_json(&[
+        "search",
+        "rust",
+        "async",
+        "--include-domains",
+        "example.com",
+        "--json",
+    ]);
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --include-domain example.com --json"
+    );
+}
+
+#[test]
+fn search_plural_domains_keeps_filter_values_out_of_the_query() {
+    let json = error_json(&[
+        "search",
+        "--include-domains",
+        "exa.ai",
+        "rust",
+        "async",
+        "--json",
+    ]);
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search --include-domain exa.ai 'rust async' --json"
+    );
+}
+
+#[test]
+fn search_contents_highlights_points_to_highlights() {
+    let json = error_json(&["search", "rust async", "--contents", "highlights", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'rust async' --highlights --json"
+    );
+    assert!(json["error"]["details"].get("didYouMean").is_none());
+}
+
+#[test]
+fn search_contents_negative_value_falls_back_to_help() {
+    let json = error_json(&["search", "rust async", "--contents", "-1", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(json["error"]["suggestedCommand"], "exa-agent search --help");
+}
+
+#[test]
+fn search_content_size_points_to_current_content_controls() {
+    let json = error_json(&["search", "rust async", "--content-size", "medium", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(json["error"]["suggestedCommand"], "exa-agent search --help");
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(message.contains("--text"), "message: {message}");
+    assert!(message.contains("--highlights"), "message: {message}");
+    assert!(json["error"]["details"].get("didYouMean").is_none());
+}
+
+#[test]
+fn contents_no_highlights_points_to_omitting_the_opt_in_flag() {
+    let json = error_json(&["contents", "https://exa.ai", "--no-highlights", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent contents https://exa.ai --json"
+    );
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("opt-in"));
+    assert!(json["error"]["details"].get("didYouMean").is_none());
+}
+
+#[test]
+fn contents_no_highlights_discards_a_stale_boolean_value() {
+    let json = error_json(&[
+        "contents",
+        "https://exa.ai",
+        "--no-highlights",
+        "true",
+        "--json",
+    ]);
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent contents https://exa.ai --json"
+    );
+}
+
+#[test]
 fn search_rejects_limit_with_num_results_suggestion() {
     let json = error_json(&[
         "search",

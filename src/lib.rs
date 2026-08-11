@@ -898,22 +898,24 @@ fn process_arg_omission(args: &[String], index: usize) -> Option<ProcessArgOmiss
             width: 1,
         }),
         "--query"
-            if args.get(index + 1).is_some_and(|value| {
-                value
-                    .split_once('=')
-                    .is_some_and(|(name, _)| redaction::is_secret_name(name))
-            }) =>
+            if is_raw_command_context(args, index)
+                && args.get(index + 1).is_some_and(|value| {
+                    value
+                        .split_once('=')
+                        .is_some_and(|(name, _)| redaction::is_secret_name(name))
+                }) =>
         {
             Some(ProcessArgOmission {
                 flag: "--query",
                 width: 2,
             })
         }
-        arg if arg.strip_prefix("--query=").is_some_and(|value| {
-            value
-                .split_once('=')
-                .is_some_and(|(name, _)| redaction::is_secret_name(name))
-        }) =>
+        arg if is_raw_command_context(args, index)
+            && arg.strip_prefix("--query=").is_some_and(|value| {
+                value
+                    .split_once('=')
+                    .is_some_and(|(name, _)| redaction::is_secret_name(name))
+            }) =>
         {
             Some(ProcessArgOmission {
                 flag: "--query",
@@ -940,6 +942,11 @@ fn process_arg_omission(args: &[String], index: usize) -> Option<ProcessArgOmiss
         }
         _ => None,
     }
+}
+
+fn is_raw_command_context(args: &[String], index: usize) -> bool {
+    args.get(1..index)
+        .is_some_and(|before| before.iter().any(|arg| arg == "raw"))
 }
 
 fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {

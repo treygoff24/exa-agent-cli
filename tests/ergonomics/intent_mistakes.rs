@@ -255,6 +255,17 @@ fn corrected_raw_commands_omit_secret_named_query_values() {
 }
 
 #[test]
+fn typed_query_recovery_keeps_secret_shaped_natural_language_queries() {
+    let json = error_json(&["search", "--query", "api_key=natural language", "--json"]);
+    assert_eq!(json["error"]["code"], "unknown_flag");
+    assert_eq!(
+        json["error"]["suggestedCommand"],
+        "exa-agent search 'api_key=natural language' --json"
+    );
+    assert!(json["error"]["details"].get("omittedFlags").is_none());
+}
+
+#[test]
 fn corrected_commands_preserve_safe_base_url() {
     for (args, expected) in [
         (

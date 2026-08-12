@@ -37,6 +37,7 @@ enum ConstraintKind {
 
 const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
     ("createAgentRun", "effort", ConstraintKind::Enum),
+    ("createAgentRun", "max-cost-dollars", ConstraintKind::Range),
     ("findSimilar", "category", ConstraintKind::Enum),
     ("findSimilar", "num-results", ConstraintKind::Range),
     ("search", "category", ConstraintKind::Enum),
@@ -342,6 +343,13 @@ fn enum_range_ops_agree_on_verdict_between_validate_input_and_live() {
 
             let mut valid_body = base_body;
             set_body_value(&mut valid_body, field.body_path, valid_value);
+            if op.operation_id == "createAgentRun" && field.flag == "max-cost-dollars" {
+                set_body_value(
+                    &mut valid_body,
+                    "effort",
+                    serde_json::Value::String("auto".to_string()),
+                );
+            }
             // Dry-run is enough here: registry validation runs before the live/dry-run branch.
             let live_valid = run_live_with_body(
                 manifest_entry(&manifest, op.operation_id),

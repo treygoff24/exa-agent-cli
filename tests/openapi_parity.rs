@@ -2,6 +2,7 @@ use exa_agent_cli::registry;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
+use std::process::Command;
 
 struct SpecDoc {
     name: &'static str,
@@ -94,6 +95,116 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
         "OpenAPI requestBody parity failures:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn agent_effort_and_budget_match_current_openapi() {
+    let spec = load_specs()
+        .into_iter()
+        .find(|spec| spec.name == "exa-openapi")
+        .expect("exa openapi spec");
+    let schemas = spec
+        .value
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("schemas");
+    let effort: BTreeSet<_> = schemas["AgentEffort"]["enum"]
+        .as_array()
+        .expect("AgentEffort enum")
+        .iter()
+        .map(|value| value.as_str().expect("enum string").to_string())
+        .collect();
+    assert_eq!(
+        effort,
+        BTreeSet::from([
+            "auto".to_string(),
+            "high".to_string(),
+            "low".to_string(),
+            "max".to_string(),
+            "medium".to_string(),
+            "minimal".to_string(),
+            "xhigh".to_string(),
+        ])
+    );
+    let create_props = schemas["CreateAgentRunRequest"]["properties"]
+        .as_object()
+        .expect("CreateAgentRunRequest properties");
+    assert!(create_props.contains_key("budget"));
+    assert!(create_props.contains_key("effort"));
+}
+
+#[test]
+fn agent_data_source_runtime_accepts_current_openapi_provider_enum() {
+    let spec = load_specs()
+        .into_iter()
+        .find(|spec| spec.name == "exa-openapi")
+        .expect("exa openapi spec");
+    let schemas = spec
+        .value
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .expect("schemas");
+    let expected: Value = schemas["AgentDataSourceProvider"]["enum"].clone();
+    assert_eq!(
+        serde_json::to_value(registry::AGENT_DATA_SOURCE_PROVIDERS).unwrap(),
+        expected,
+        "registry provider source must track AgentDataSourceProvider enum"
+    );
+    for provider in expected.as_array().expect("provider enum array") {
+        let provider = provider.as_str().expect("provider enum string");
+        for given in [provider.to_string(), provider.to_ascii_uppercase()] {
+            let output = Command::new(env!("CARGO_BIN_EXE_exa-agent"))
+                .args([
+                    "agent",
+                    "runs",
+                    "create",
+                    "q",
+                    "--data-source",
+                    &given,
+                    "--dry-run",
+                    "--compact",
+                ])
+                .env("EXA_AGENT_NO_NETWORK", "1")
+                .env_remove("EXA_API_KEY")
+                .env_remove("EXA_SERVICE_KEY")
+                .output()
+                .unwrap_or_else(|err| panic!("run exa-agent with provider {given}: {err}"));
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "provider {given} should be accepted\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let ok: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
+            assert_eq!(
+                ok["data"]["request"]["body"]["dataSources"],
+                serde_json::json!([{ "provider": provider }]),
+                "provider {given} should canonicalize to {provider}"
+            );
+        }
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_exa-agent"))
+        .args([
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--data-source",
+            "not_a_provider",
+            "--dry-run",
+            "--compact",
+        ])
+        .env("EXA_AGENT_NO_NETWORK", "1")
+        .env_remove("EXA_API_KEY")
+        .env_remove("EXA_SERVICE_KEY")
+        .output()
+        .expect("run exa-agent");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).expect("stderr JSON");
+    assert_eq!(error["error"]["details"]["accepted"], expected);
 }
 
 fn load_specs() -> Vec<SpecDoc> {

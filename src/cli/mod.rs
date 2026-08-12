@@ -218,6 +218,7 @@ pub enum Effort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl Effort {
@@ -229,6 +230,7 @@ impl Effort {
             Effort::Medium => "medium",
             Effort::High => "high",
             Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
         }
     }
 }
@@ -311,6 +313,48 @@ pub struct GlobalArgs {
     /// Add a non-secret HTTP header as `Name: value`.
     #[arg(long = "header", global = true)]
     pub headers: Vec<String>,
+    /// Read an x402 PAYMENT-SIGNATURE header value from stdin for raw /search or /contents.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = [
+            "mpp_payment_stdin",
+            "payment_discovery",
+            "api_key",
+            "api_key_stdin",
+            "service_key",
+            "service_key_stdin"
+        ]
+    )]
+    pub x402_payment_stdin: bool,
+    /// Read an MPP Authorization: Payment header value from stdin for raw /search or /contents.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = [
+            "x402_payment_stdin",
+            "payment_discovery",
+            "api_key",
+            "api_key_stdin",
+            "service_key",
+            "service_key_stdin"
+        ]
+    )]
+    pub mpp_payment_stdin: bool,
+    /// Send a raw unauthenticated payment discovery request to get a 402 challenge.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = [
+            "x402_payment_stdin",
+            "mpp_payment_stdin",
+            "api_key",
+            "api_key_stdin",
+            "service_key",
+            "service_key_stdin"
+        ]
+    )]
+    pub payment_discovery: bool,
     /// Opt into an upstream beta header value.
     #[arg(long, global = true)]
     pub beta: Option<String>,
@@ -403,12 +447,18 @@ impl std::fmt::Debug for GlobalArgs {
                     })
                     .collect::<Vec<_>>(),
             )
+            .field("x402_payment_stdin", &self.x402_payment_stdin)
+            .field("mpp_payment_stdin", &self.mpp_payment_stdin)
+            .field("payment_discovery", &self.payment_discovery)
             .field("beta", &self.beta)
             .field("timeout", &self.timeout)
             .field("connect_timeout", &self.connect_timeout)
             .field("retry", &self.retry)
             .field("retry_after", &self.retry_after)
-            .field("idempotency_key", &self.idempotency_key)
+            .field(
+                "idempotency_key",
+                &self.idempotency_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("input", &self.input)
             .field("input_format", &self.input_format)
             .field(
@@ -550,6 +600,9 @@ pub struct SearchArgs {
         value_name = crate::registry::field_value_name("search", "output-schema").expect("search output-schema metadata")
     )]
     pub output_schema: Option<String>,
+    /// Request SSE for synthesized output; without outputSchema upstream returns normal JSON.
+    #[arg(long)]
+    pub stream: bool,
     /// Additional instructions for search output or behavior.
     #[arg(
         long,
@@ -653,6 +706,7 @@ impl SearchArgs {
         vec![
             ("query", Some(self.query.clone())),
             ("output-schema", self.output_schema.clone()),
+            ("stream", self.stream.then(|| "true".to_string())),
             ("system-prompt", self.system_prompt.clone()),
             ("num-results", self.num_results.clone()),
             ("text", self.text.clone()),
@@ -965,7 +1019,15 @@ pub struct AgentRunArgs {
     pub previous_run_id: Option<String>,
     #[arg(long, value_enum, ignore_case = true)]
     pub effort: Option<Effort>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = crate::registry::field_input_help("agent runs create", "max-cost-dollars").expect("agent max-cost-dollars metadata"),
+        value_name = crate::registry::field_value_name("agent runs create", "max-cost-dollars").unwrap_or("DOLLARS"),
+        value_parser = crate::registry::ranged_f64_value_parser("agent runs create", "max-cost-dollars")
+    )]
+    pub max_cost_dollars: Option<f64>,
+    /// Repeatable provider (max 5): fiber, financial_datasets, similarweb, baselayer, affiliate, particle, or jinko.
+    #[arg(long, value_name = "PROVIDER")]
     pub data_source: Vec<String>,
     #[arg(long)]
     pub metadata: Option<String>,

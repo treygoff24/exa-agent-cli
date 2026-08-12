@@ -149,7 +149,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 
 | Official operation | Canonical command | Notes |
 |---|---|---|
-| `POST /search` | `exa-agent search QUERY` | `type`: `auto`(default)`,fast,instant,deep-lite,deep,deep-reasoning`. Content extraction nested under `contents.*`. Streaming only when `--output-schema` is set. Uses `--num-results` (1..100), **not** `--limit`. |
+| `POST /search` | `exa-agent search QUERY` | `type`: `auto`(default)`,fast,instant,deep-lite,deep,deep-reasoning`. Content extraction nested under `contents.*`. `--stream` requests SSE; without a non-null `outputSchema`, upstream falls back to normal JSON and the CLI warns. Uses `--num-results` (1..100), **not** `--limit`. |
 | `POST /contents` | `exa-agent contents URL...` | URLs are positional. The legacy `urls` self-description body-field key is not a CLI spelling (`legacyFlagIsCliFlag: false`); `inputKind: argument` and `name: URLS` are authoritative. Accepts positional URLS or `--ids` (mutually exclusive). 1..100 urls/ids; >100 needs `--chunk-size`. Top-level `text/highlights/summary` upstream. |
 | `POST /findSimilar` | `exa-agent similar URL` | **Deprecated upstream**; warns on stderr, suggests `exa-agent search --similar-to URL`. Kept for breadth. |
 | `POST /answer` | `exa-agent answer QUESTION` | `--text`, `--output-schema`, `--stream`. Returns `data.answer` + `data.citations`. |
@@ -160,7 +160,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `POST /monitors/{id}/trigger` | `exa-agent monitor trigger ID` | Mutating but cheap; supports `--dry-run --print-request`. |
 | `POST /monitors/batch` | `exa-agent monitor batch` | Defaults to upstream `dry_run: true`; mutating ops (delete/pause/unpause) require `--yes`. |
 | `GET /monitors/{id}/runs[/runId]` | `exa-agent monitor runs list/get` | Cursor on list. |
-| `POST /agent/runs` | `exa-agent agent run QUERY` or `agent runs create QUERY` | `[create-POST]`. JSON or SSE (`--stream`). `--effort`, `--output-schema`, `--input`, `--data-source`. |
+| `POST /agent/runs` | `exa-agent agent run QUERY` or `agent runs create QUERY` | `[create-POST]`. JSON or SSE (`--stream`). `--effort`, `--max-cost-dollars`, `--output-schema`, `--input`, `--data-source`. |
 | `GET /agent/runs` | `exa-agent agent runs list` | Cursor. |
 | `GET /agent/runs/{id}` | `exa-agent agent runs get ID` | Status read; surface `stopReason`. |
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
@@ -188,7 +188,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `PUT /api-keys/{id}` | `exa-agent admin keys update ID` | **PUT**, not PATCH. `--name`, `--rate-limit`, `--budget-cents` (null clears budget). |
 | `DELETE /api-keys/{id}` | `exa-agent admin keys delete ID --confirm ID` | Irreversible, team-wide. Confirm-by-id (D4). |
 | `GET /api-keys/{id}/usage` | `exa-agent admin keys usage ID` | `--start-date`, `--end-date` (≤180d lookback), `--group-by hour|day|month`. |
-| (any new/uncovered op) | `exa-agent raw METHOD PATH` | Escape hatch with full auth/output/error contracts. |
+| (any new/uncovered op) | `exa-agent raw METHOD PATH` | Escape hatch with full auth/output/error contracts. Payment pass-through/discovery is raw-only for exact nonstreaming `POST /search` and `/contents`. |
 
 ---
 
@@ -203,9 +203,9 @@ Work on every command unless explicitly irrelevant. Output flags follow D6 / con
 | `--format human\|json\|ndjson` | Canonical format selector. |
 | `--json` | Alias for `--format json`. |
 | `--ndjson` | Alias for `--format ndjson` (one envelope per line; streams/batches/`--all`). |
-| `--raw` | Exact upstream bytes, **no** CLI envelope. `--raw --stream` = raw SSE. Single spelling. |
+| `--raw` | Exact upstream bytes, **no** CLI envelope. Signed payment raw output is exact except exact submitted payment credential echoes are replaced with `<redacted>`. `--raw --stream` = raw SSE. Single spelling. |
 | `--pretty` / `--compact` | Whitespace only. Default: pretty in TTY, compact when piped. |
-| `-o, --output FILE` | Write the envelope (or `--raw` bytes) to FILE; stdout carries a small confirmation envelope with `dataPath` (D10, contracts §9). Context-window protection. |
+| `-o, --output FILE` | Write the envelope (or `--raw` bytes, subject to signed-payment echo redaction) to FILE; stdout carries a small confirmation envelope with `dataPath` (D10, contracts §9). Context-window protection. |
 | `--max-output-bytes N` | Default-on ceiling on inline stdout payload (default 48 KiB); over-ceiling spills pretty-printed JSON to a file + handle (contracts §9). `0` disables. |
 | `--correlation-id ID` | Agent-supplied id echoed into `request.correlationId` across stdout/stderr/`--trace` (contracts §4). Env: `EXA_CORRELATION_ID`. |
 
@@ -228,8 +228,10 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 | `--api-key KEY` | One-shot key; **never persisted** (D11). ⚠️ Leaks into `ps`/shell history/agent transcript — prefer `--api-key-stdin` in untrusted shells. |
 | `--api-key-stdin` | Read the one-shot key from stdin instead of argv (no process-table leak). |
 | `--base-url URL` | Override API host (default `https://api.exa.ai`). |
-| `--header 'Name: value'` | Extra header; repeatable; secret headers redacted in traces. |
+| `--header 'Name: value'` | Extra header; repeatable; managed auth, payment, and secret headers are refused/redacted. |
 | `--beta VALUE` | Sets the Exa beta header where required. |
+| `--payment-discovery` | Raw-only unauthenticated challenge request for exact nonstreaming `POST /search` or `/contents` on the default host. No retries, redirects, API key, or idempotency key. |
+| `--x402-payment-stdin` / `--mpp-payment-stdin` | Raw-only signed payment pass-through for exact nonstreaming `POST /search` or `/contents`. Reads the complete payment header value from stdin; conflicts with API/service credentials and other stdin body/input. Raw output has no envelope/payment metadata and replaces exact submitted payment credential echoes with `<redacted>`. |
 | `--timeout DURATION` / `--connect-timeout DURATION` | e.g. `30s`. |
 | `--retry N` | Retry count for retryable failures (default 2). Auto-retry applies only to GETs, network (exit-4), 429, 5xx — **never** un-keyed create-POSTs (D7, contracts §7). |
 | `--retry-after` | Honor `Retry-After` on 429 (default on). |
@@ -310,9 +312,9 @@ exa-agent search QUERY
   --compliance hipaa             # enterprise-only
   --additional-query QUERY       # repeatable; deep-* variants only
   --system-prompt TEXT|@file
-  --output-schema JSON|@file     # enables synthesized output + streaming
+  --output-schema JSON|@file     # enables synthesized output; required upstream for effective SSE
   --similar-to URL               # future-safe replacement for `similar`
-  --stream                       # SSE; valid only with --output-schema
+  --stream                       # request SSE; warns + returns normal JSON without --output-schema
   # ---- content extraction (nested under contents.*) ----
   --text[=N|full]                # bare search/similar: maxCharacters=1500; full uncapped
   --text-verbosity compact|standard|full
@@ -344,7 +346,7 @@ Guards:
 - `--category people` with `--start/end-published-date` or `--exclude-domain` → exit 1; `--include-domain` accepts LinkedIn domains only.
 - More than one `--include-text` / `--exclude-text` → exit 1 (single-phrase arrays only).
 - `--offset` / `--page` are not defined (search has no offset pagination).
-- `--stream` without `--output-schema` → `warnings[]`: streaming has no effect; falls back to a single JSON envelope.
+- `--stream` without a final non-null `outputSchema` → `warnings[]` code `stream_ignored`: upstream ignores streaming and falls back to a single JSON envelope. Explicit `--body`/`--set` overrides determine the final value.
 - Deprecated knobs (`--livecrawl`, `--context*`) used → non-fatal `warnings[]` with replacement.
 
 Query/domain distinction:
@@ -423,8 +425,9 @@ exa-agent agent runs create QUERY
   --input-row JSON             # repeatable convenience → input.data[]
   --exclusion JSON|@file       # input.exclusion
   --previous-run-id ID         # continue a completed run (same team)
-  --effort auto|minimal|low|medium|high|xhigh   # default auto; `medium` good single-entity default
-  --data-source PROVIDER       # repeatable; max 5 (e.g. similarweb, fiber_ai)
+  --effort auto|minimal|low|medium|high|xhigh|max   # default auto; `medium` good single-entity default
+  --max-cost-dollars 1..100    # budget.maxCostDollars for omitted/auto/max effort
+  --data-source PROVIDER       # repeatable; max 5; fiber|financial_datasets|similarweb|baselayer|affiliate|particle|jinko
   --metadata JSON
   --stream                     # SSE via Accept: text/event-stream
   --beta VALUE
@@ -444,7 +447,9 @@ exa-agent agent runs delete ID --yes
 Guards / notes:
 - Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --since ...` (D7, contracts §7).
 - `--data-source` count > 5 → exit 1.
-- Surface `stopReason` in output; treat `budget_reached` as not-fully-complete (do not silently report success).
+- Typed `--data-source` values are case-insensitive and sent with canonical spelling; invalid values exit 1 with the accepted set. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; explicit `--body`/`--set` values pass through unchanged.
+- `--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. `effort max` requires both an explicit budget cap and `--beta agent-max-effort-2026-07-27` (comma-separated beta tokens are accepted; the CLI never invents the beta header).
+- Surface `stopReason` in output; `budget_reached` emits a `budget_reached` warning so agents do not silently treat the run as fully complete.
 
 ### `research` — `/research/v1` (retired upstream)
 
@@ -597,6 +602,8 @@ exa-agent config list [--effective]   get PATH   set PATH VALUE   unset PATH
 exa-agent config path
 exa-agent config profiles list | show NAME | use NAME | create NAME | delete NAME
 exa-agent raw METHOD PATH [--body @file] [--query k=v]
+printf '%s' "$PAYMENT_SIGNATURE" | exa-agent --x402-payment-stdin raw POST /search --body @request.json
+exa-agent --payment-discovery raw POST /search --body @request.json
 ```
 
 Notes:

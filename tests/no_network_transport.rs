@@ -57,6 +57,8 @@ fn no_network_guard_stops_before_fake_and_live_transport_send_for_any_present_va
             retry: 0,
             retry_after: false,
             idempotency_key: None,
+            follow_redirects: true,
+            payment_mode: false,
         };
         let result = send_with_retry(&fake, &request, &options).unwrap_err();
         assert_eq!(result.diag().code, "usage_error", "value {value:?}");
@@ -108,7 +110,7 @@ fn no_network_guard_stops_before_custom_stream_transport_override() {
         query_raw: &[],
         body: serde_json::json!({"query": "never sent"}),
         globals: &cli.globals,
-        credential: &credential,
+        auth: exa_agent_cli::transport::RawAuth::Api(&credential),
         request_id: "req_guard".to_string(),
     };
     let mut on_item = |_item: StreamItem<'_>| Ok(());

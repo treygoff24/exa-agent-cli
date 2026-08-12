@@ -24,7 +24,7 @@ Default format is **auto** (D3): JSON envelope when stdout is not a TTY, human w
 | `--format human\|json\|ndjson` | Canonical format selector. |
 | `--json` | Alias for `--format json`. |
 | `--ndjson` | Alias for `--format ndjson` (one envelope per line; for streams/batches/`--all`). |
-| `--raw` | Emit exact upstream bytes, **no** CLI envelope. `--raw --stream` = raw SSE. Single spelling (no `--raw-response`, no `--format raw`). |
+| `--raw` | Emit exact upstream bytes, **no** CLI envelope. Signed payment raw output is exact except exact submitted payment credential echoes are replaced with `<redacted>`. `--raw --stream` = raw SSE. Single spelling (no `--raw-response`, no `--format raw`). |
 | `--pretty` / `--compact` | Whitespace only. Default: pretty in TTY, compact when piped. |
 | `--max-output-bytes N` | Hard ceiling on inline stdout payload (default conservative; see §9). Over-ceiling spills to a file and returns a handle. |
 | `--correlation-id ID` | Agent-supplied id echoed verbatim into `request.correlationId` across stdout/stderr/`--trace` (§4). |
@@ -82,18 +82,24 @@ Written to **stdout**. Field order is stable (serialized in this order).
   "nextActions": [],
   "warnings": [],
   "diagnostics": { "durationMs": 0, "retries": 0 },
-  "dataTruncated": false
+  "dataTruncated": false,
+  "payment": {
+    "kind": "receipt",
+    "headers": [
+      { "name": "payment-receipt", "present": true, "bytes": 123, "value": "..." }
+    ]
+  }
 }
 ```
 
-`upstreamRequestId`, `correlationId`, `dataPath`, `bytes`, and `pagination` are shown above only
-where populated for this example (`pagination` on a list/paginated command). On an actual call,
+`upstreamRequestId`, `correlationId`, `dataPath`, `bytes`, `payment`, and `pagination` are shown above only
+where populated for this example (`payment` on successful signed raw payment responses; `pagination` on a list/paginated command). On an actual call,
 any of these that would otherwise be `null` are **omitted from the envelope entirely** rather
 than serialized as `null` — an agent should check for key presence, not compare against `null`.
 `warnings[]`/`nextActions[]` are the exception: they always serialize, even when empty.
 
 Rules:
-- `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`.
+- `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`; all non-payment raw bytes remain exact, while signed payment raw output is exact except exact submitted payment credential echoes are replaced with `<redacted>`.
 - Live `/contents`, `fetch`, `/answer`, and `ask` result envelopes add required `outcome`. For contents, a row counts only when `text`, `summary`, `context`, or at least one highlight contains non-whitespace, non-binary text. Gzip/PDF signatures, replacement-heavy strings, and strings with at least 30% non-whitespace control characters are binary, not content. `full` means one usable row per requested item with no failure evidence; missing statuses do not downgrade complete usable coverage. `partial` means some usable content plus a failed, missing, empty, or binary item. `no_content` means zero usable rows, including all-URL crawl failures; `all_urls_failed` still exits 10 while `url_failed` and empty/binary rows keep their existing exit behavior. For answer, `full` means a non-empty answer, `partial` means an empty answer with citations, and `no_content` means both answer and citations are empty; answer/ask remain exit 0. `--dry-run`/`--print-request` envelopes are request previews and never carry `outcome`.
 - Those live result envelopes also add `contentDiagnostics[]` immediately after `outcome`. Contents entries are keyed by requested URL/document `id` and may carry `crawl_status` (exact `statuses[].status`), `error_tag` (exact `statuses[].error.tag`), `http_status` (exact `statuses[].error.httpStatusCode`), `content_type`, and `content_type_source`. `content_status` is one of `usable`, `crawl_error`, `empty_content`, `binary_content`, or `pdf_unextracted`; `usable` is the corresponding boolean, and an unextracted PDF also carries `pdf_unextracted: true`. The embedded Exa schema defines no content-type or crawl-status field on result rows: MIME is omitted unless the URL/body conclusively identifies PDF/gzip, in which case `content_type_source` says `inferred_url` or `inferred_body`. Answer/ask currently emit an empty array because `AnswerResponse` exposes no per-citation crawl, HTTP, or MIME diagnostics; the CLI does not fabricate them.
 - Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs or `--ids`; agents must never infer a named URL flag.
@@ -103,10 +109,12 @@ Rules:
 - `costDollars` always present; `{ "total": 0.0 }` when upstream reports none.
 - `warnings[]` carries non-fatal notices (deprecated flag used, livecrawl fallback, empty-result broaden hint, etc.) — never on stdout as prose, always here.
 - **`legacy_value_coerced`** (added 0.5.0): a typed flag accepted a legacy enum spelling and sent the canonical one upstream; details name `field`, `given`, `sent`. Mappings: category `research paper`→`publication` (search + similar), agent data-source provider `fiber_ai`→`fiber`, `particle_news`→`particle`. Coercion applies to typed flags only — `--body`/`--set` values are the explicit escape hatch and pass through unrewritten, unwarned.
+- **`stream_ignored`**: the final Search request has `stream:true` but no non-null `outputSchema`, so upstream falls back to its normal JSON response. This is non-fatal and appears on both request previews and live envelopes; add `--output-schema` to receive SSE.
 - For a `/contents` status whose upstream `error` object is empty or has no non-empty `tag`, `message`, or `reason`, warnings use the stable label `upstream_reason_unavailable` and include a suggested direct-fetch command. The CLI never invents an upstream reason.
 - A non-`full` contents/answer result always carries a non-empty warning naming the empty crawl, binary body, crawl error, or unextracted PDF and a paste-ready fallback in `suggestedCommand`/`nextActions[]`. Government URLs and `CRAWL_UNKNOWN_ERROR` use `parallel-cli extract URL --full-content --json`; other empty rows suggest a fresh full-text Exa retry. The API returns extracted text strings, not trustworthy raw response bytes, so this version reports `pdf_unextracted` rather than passing a lossy JSON string to `pdftotext` or introducing an out-of-band downloader.
 - `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
 - `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `dataTruncated: false`, with `dataPath`/`bytes` omitted.
+- `payment` is a top-level field only on successful signed raw payment responses (`--x402-payment-stdin` or `--mpp-payment-stdin`) in JSON-envelope mode. It is inserted after `dataTruncated` and is never nested under `data`, so agents can parse receipt metadata without depending on upstream body shape. Its exact shape is `{ "kind": "receipt", "headers": [{ "name": <allowlisted-receipt-header-name-as-received>, "present": true, "bytes": <value-byte-length>, "value": <header-value> }] }`; only receipt headers whose names case-insensitively match `payment-response`, `payment-receipt`, `x-payment-response`, or `x-payment-receipt` appear, with `name` casing preserved as received. If no safe receipt header is present, `headers` is `[]`. Successful signed payment responses redact exact submitted payment credential echoes before any output. Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `<redacted>`.
 - `pagination` present only on list/paginated commands; omitted otherwise (commands.md specifies per-command). `pagination.total` is the upstream total when the cursor API supplies it, else `null` (pure cursor pagination legitimately can't know it — `count` always can).
 
 ## 5. Error envelope — `exa.cli.error.v1`
@@ -155,6 +163,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `broadcast_scope_refused` | usage (1) | false | a broad/destructive scope was refused without an explicit `--all`/opt-in. |
 | `not_authenticated` | auth (2) | false | no credential resolved locally; `details.checked` lists the ladder rungs tried. |
 | `reauth_required` | auth (2) | false | a credential was sent but upstream rejected it (401/403 — revoked/expired/wrong scope). |
+| `payment_required` | auth (2) | false | a raw payment discovery/pass-through request received a challenge-evidenced 402. This classification wins before any credit-body sniffing; safe challenge metadata may be surfaced and payment secrets are never echoed. |
 | `key_scope_mismatch` | auth (2) | false | an api key was presented where a service key is required, or vice versa (D4). |
 | `config_parse_error` | config (3) | false | config TOML failed to parse. |
 | `unknown_profile` | config (3) | false | `--profile`/`EXA_PROFILE` names a profile that doesn't exist. |
@@ -171,7 +180,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `partial_batch` | partial (10) | false | a batch had mixed success/failure (§11). |
 | `no_input` | no_input (11) | false | required stdin/input was empty or a TTY (§1). |
 | `interrupted` | interrupted (12) | false | SIGINT or a stream broke after partial output (§8). |
-| `insufficient_credits` | billing (13) | false | HTTP 402 (or any 4xx carrying `NO_MORE_CREDITS`): the account is out of credits. Valid key, valid request, no balance — never classify as `usage`. |
+| `insufficient_credits` | billing (13) | false | Bare HTTP 402, or any 4xx carrying `NO_MORE_CREDITS` after challenge checks: the account is out of credits. Valid key, valid request, no balance — never classify as `usage`. A 402 with a safe payment challenge is `payment_required`. |
 | `probe_inconclusive` | upstream (5) | true | the credential probe got a response that neither confirms nor denies the key. |
 | `invalid_field_type` | usage (1) | false | a body field was the wrong JSON type for its schema. |
 | `research_retired` | usage (1) | false | the upstream Research API is retired (HTTP 410 upstream, 2026-08); the local `research` stub emits this without a network call. `details.replacement` names `search --type deep-reasoning`; `suggestedCommand` is per-verb: `create` interpolates the supplied query, `get`/`list` point at `exa-agent search --help`, and any supplied id is preserved in `details.researchId`. |
@@ -215,6 +224,7 @@ This is a deliberate small-integer scheme, **not** sysexits — it is the publis
 - Ambiguous create failure (request sent, no confirmed response): exit non-zero, write a **pending-run record** (append-only JSONL under the state dir), and set `suggestedCommand` to the exact recovery (`exa-agent agent runs list --limit 10` for Agent runs, or re-issue with `--idempotency-key` where listing is not the right recovery).
 - The pending-run record is an **agent-facing recovery contract** — agents parse it, so its shape is frozen. Schema `exa.cli.pending_run.v1`, one JSON object per line: `{ "schema": "exa.cli.pending_run.v1", "requestId": "...", "command": "agent runs create", "operationId": "createAgentRun", "apiPath": "/agent/runs", "idempotencyKey": null, "attemptedAt": "<SOURCE_DATE_EPOCH-aware epoch seconds>", "recoveryCommand": "exa-agent agent runs list --limit 10" }`. Golden-pinned (§14).
 - `retryable: true` in the error envelope means "a retry of *this exact request* is safe and may succeed." It is `false` for every un-keyed create failure.
+- Raw payment discovery/pass-through is never retried, never redirected, never given an API key or idempotency key, and never writes pending-run recovery records.
 
 ## 8. Streaming contract
 
@@ -234,12 +244,14 @@ This is a deliberate small-integer scheme, **not** sysexits — it is the publis
 
 `type` is a stable top-level kind discriminator (`begin` | `delta` | `item` | `progress` | `summary` | `error` | `done`) so an agent routes records without unwrapping the opaque upstream `event` blob. `timestamp` is a JSON field (never free-text prose), `SOURCE_DATE_EPOCH`-aware and scrubbed in goldens; `correlationId` echoes `--correlation-id` as in §4. The terminal `exa.cli.response.v1` line still carries the accumulated `data` + final cost.
 
+For Search SSE, upstream `type:"text-delta"` events map to envelope `type:"delta"`; the terminal response combines the `results` event with the terminal `done` event's required `output` and numeric `searchTime`, plus `costDollars` when present. A canonical `error` event exits 5 with `upstream_error`; a framed Search stream with a malformed `done`, an event after `done`, or no `done` exits 5 with `upstream_malformed` rather than returning partial data as success.
+
 Interrupted stream → exit 12 + `exa.cli.error.v1` on stderr including the last observed `eventId` when available. `--last-event-id ID` resumes Agent event replay.
 
 ## 9. Output target & large payloads (D10)
 
-- `-o/--output FILE` writes the complete selected output to `FILE` instead of stdout: JSON writes the full envelope (respecting `--pretty`/`--compact`), human and NDJSON write their full rendered forms, and `--raw` writes exact upstream bytes. Stdout then carries a small confirmation envelope with `data` elided, `dataTruncated: true`, `dataPath` set to `FILE`, and the original `count`/`dataHash` plus `bytes` (the exact file byte length) preserved. An explicit output path supersedes `--max-output-bytes` auto-spill, so no state-dir copy is created. A write failure is a structured non-zero error and never falls back to auto-spill — but it also never destroys the response: when the upstream call already succeeded, the full envelope is emitted inline on stdout with an `output_write_failed` entry in `warnings[]` naming the path, and the command still exits non-zero.
-- `--output` applies to **every** surface that writes to stdout, not only live structured responses: `--dry-run`/`--print-request` previews and the self-description commands (`capabilities`, `schema *`, `robot-docs *`) write their document to `FILE` and print a `{schema, ok, command, data: null, dataTruncated: true, dataPath, bytes}` confirmation; a stream writes its events (and its terminal line, or exact upstream bytes under `--raw`) to `FILE` and prints the same confirmation shape on stdout when it finishes.
+- `-o/--output FILE` writes the complete selected output to `FILE` instead of stdout: JSON writes the full envelope (respecting `--pretty`/`--compact`), human and NDJSON write their full rendered forms, and `--raw` writes exact upstream bytes except signed payment raw output replaces exact submitted payment credential echoes with `<redacted>`. Stdout then carries a small confirmation envelope with `data` elided, `dataTruncated: true`, `dataPath` set to `FILE`, and the original `count`/`dataHash` plus `bytes` (the exact file byte length) preserved. An explicit output path supersedes `--max-output-bytes` auto-spill, so no state-dir copy is created. A write failure is a structured non-zero error and never falls back to auto-spill — but it also never destroys the response: when the upstream call already succeeded, the full envelope is emitted inline on stdout with an `output_write_failed` entry in `warnings[]` naming the path, and the command still exits non-zero.
+- `--output` applies to **every** surface that writes to stdout, not only live structured responses: `--dry-run`/`--print-request` previews and the self-description commands (`capabilities`, `schema *`, `robot-docs *`) write their document to `FILE` and print a `{schema, ok, command, data: null, dataTruncated: true, dataPath, bytes}` confirmation; a stream writes its events (and its terminal line, or exact upstream bytes under non-payment `--raw`) to `FILE` and prints the same confirmation shape on stdout when it finishes.
 - `--output` and `--secret-output` may not resolve to the same file. The combination is rejected with `invalid_flag_combination` before the secret file is reserved and before any request is sent, because the response write happens after the secret is committed and would overwrite the only copy of a one-time secret.
 - `--max-output-bytes N` is a **default-on** ceiling on the inline stdout payload (48 KiB by default) so one accidental `contents --text` over long pages can't blow the agent's context window even without `--output`. When the serialized `data` would exceed it, the CLI spills `data` as pretty-printed JSON to a temp file under the state dir and emits the envelope with `dataTruncated: true`, `dataPath`, `bytes` set and `data` elided — and a `warnings[]` note naming the ways forward (raise `--max-output-bytes`, pass `--output FILE`, or narrow fields). `--max-output-bytes 0` disables the ceiling.
 - Auto-spill (threshold-gated): the same spill mechanism, also triggered by the `--max-output-bytes` ceiling above. The standalone *auto*-spill threshold (independent of `--output`) ships conservative; the manual `--max-output-bytes` ceiling is the v1 guarantee.
@@ -264,83 +276,92 @@ One uniform model over endpoint-specific cursors.
 
 ## 12. Redaction & determinism
 
-- Known secrets are never emitted, by prevention at the source rather than a value-shape scrub of output: managed auth headers are injected only at send time and refused if user-supplied (below); secret-*named* headers and query params are redacted in request previews; and the one-time secrets returned by create ops (`apiKey`, `webhookSecret`, `secret`) are redacted from the default response envelope after `--secret-output` capture. `request.redacted` is `true` on these governed paths and `false` on the ungoverned `raw` escape hatch, which emits the upstream response as-is.
-- `--header 'Name: value'` may *add* request headers but MUST NOT override the managed `Authorization` / auth headers (or any known secret header). An attempt is refused with exit 1, so credentials can't be shadowed, leaked via an injected header, or prompt-injected.
+- Known secrets are never emitted, by prevention at the source rather than a value-shape scrub of output: managed auth headers are injected only at send time and refused if user-supplied (below); secret-*named* headers and query params are redacted in request previews; and the one-time secrets returned by create ops (`apiKey`, `webhookSecret`, `secret`) are redacted from the default response envelope after `--secret-output` capture. `request.redacted` is `true` on these governed paths and `false` on the ungoverned `raw` escape hatch. Non-payment `raw` emits the upstream response as-is; signed payment `raw` emits it as-is except exact submitted payment credential echoes are replaced with `<redacted>`.
+- `--header 'Name: value'` may *add* request headers but MUST NOT override managed `Authorization` / auth headers, payment namespaces, or any known secret header. An attempt is refused with exit 1, so credentials/payment material can't be shadowed, leaked via an injected header, or prompt-injected.
 - Determinism applies to the **CLI's own output** — stable field/key ordering (the envelope's own fields serialize in fixed declaration order; the upstream `data` payload preserves insertion order — "stable" means *deterministic given identical input*, not alphabetized), no wall-clock timestamps in free text (timestamps live in JSON fields), `SOURCE_DATE_EPOCH` honored for any CLI-generated time. It does **not** apply to upstream search results (Exa is a live index; identical queries may return different results — that is expected and not a determinism violation).
 - **Documented volatile fields** (the only fields exempt from byte-identical determinism, normalized/scrubbed before golden snapshots and excluded from any two-invocation determinism assertion): `request.requestId`, `request.upstreamRequestId`, `request.correlationId`, `diagnostics.durationMs`, `diagnostics.retries`, `event.timestamp`, and the pending-run `attemptedAt` (§7). `embeddedSpecSha256` and `dataHash` are **not** volatile — a change in either is a real signal. With `SOURCE_DATE_EPOCH` set and these fields held aside, two consecutive structured invocations of the same command on the same input are byte-identical.
 
 ## 13. `capabilities --json` — `exa.cli.capabilities.v1`
 
-Offline, no network. Describes the CLI contract, not account state. `describe` is a documented alias of `capabilities` (the verb an agent is likely to guess first). All maps below are **fully populated**, not placeholders — an agent self-orients entirely from this surface.
+Offline, no network. Describes the CLI contract, not account state. `describe` is a documented alias of `capabilities` (the verb an agent is likely to guess first). The abbreviated example below shows the runtime shape; the real command fully populates every command and dictionary entry.
 
 ```json
 {
   "schema": "exa.cli.capabilities.v1",
-  "tool": "exa-agent",
-  "version": "0.1.0",
+  "ok": true,
+  "binary": "exa-agent",
   "build": {
-    "commit": "abc1234",
-    "buildDate": "2026-06-29",
+    "version": "0.5.0",
+    "gitSha": "abc1234",
+    "buildDate": "2026-08-11",
     "target": "aarch64-apple-darwin"
   },
-  "api": {
-    "specUrl": "https://exa.ai/docs/exa-spec.json",
-    "specTitle": "Exa Public API",
-    "specVersion": "2.0.0",
-    "embeddedSpecSha256": "..."
+  "spec": {
+    "title": "Exa Public API",
+    "version": "2.0.0",
+    "url": "https://exa.ai/docs/exa-spec.json",
+    "embeddedSpecSha256": "...",
+    "adminTitle": "Team Management API",
+    "adminVersion": "1.0.0"
   },
+  "supportsRawBody": true,
+  "supportsPrintRequest": true,
+  "defaults": { "maxOutputBytes": 49152 },
+  "commandCount": 67,
   "commands": [
     {
-      "path": ["search"],
-      "operationId": "search",
+      "path": "agent runs create",
+      "operationId": "createAgentRun",
       "method": "POST",
-      "apiPath": "/search",
-      "readOnly": true,
+      "apiPath": "/agent/runs",
+      "namespace": "api",
+      "readOnly": false,
       "destructive": false,
-      "idempotencySensitive": false,
-      "streaming": true,
-      "pagination": "none",
-      "supportsRawBody": true,
-      "supportsPrintRequest": true,
+      "idempotencySensitive": true,
       "requiresConfirm": false,
-      "dangerous": false
+      "streaming": true,
+      "deprecated": false,
+      "pagination": null,
+      "fields": [
+        {
+          "flag": "effort",
+          "bodyPath": "effort",
+          "kind": "string",
+          "required": false,
+          "inputKind": "flag",
+          "name": "--effort",
+          "enumValues": ["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
+        }
+      ]
     }
   ],
-  "universalFlags": [
-    { "flag": "--format", "values": ["human", "json", "ndjson"], "default": "auto" },
-    { "flag": "--json" }, { "flag": "--ndjson" }, { "flag": "--raw" },
-    { "flag": "--max-output-bytes", "default": 49152 },
-    { "flag": "--correlation-id" }, { "flag": "--output" },
-    { "flag": "--idempotency-key" }, { "flag": "--retry", "default": 2 },
-    { "flag": "--timeout" }, { "flag": "--yes" }, { "flag": "--confirm" },
-    { "flag": "--dry-run" }, { "flag": "--print-request" },
-    { "flag": "--api-key" }, { "flag": "--api-key-stdin" }, { "flag": "--profile" }
-  ],
-  "outputFormats": ["human", "json", "ndjson", "raw"],
-  "configPrecedence": ["--api-key", "EXA_API_KEY", "keyring", "config-metadata"],
+  "rawPaymentModes": {
+    "flags": ["--payment-discovery", "--x402-payment-stdin", "--mpp-payment-stdin"],
+    "endpoints": [
+      { "method": "POST", "path": "/search" },
+      { "method": "POST", "path": "/contents" }
+    ],
+    "defaultHostOnly": true,
+    "nonStreaming": true,
+    "stdinOnlySecrets": true,
+    "noApiKey": true,
+    "noRedirect": true,
+    "noRetry": true,
+    "noIdempotencyKey": true
+  },
   "exitCodes": {
-    "0": "success", "1": "usage", "2": "auth", "3": "config", "4": "network",
-    "5": "upstream", "6": "rate_limit", "7": "not_found", "8": "conflict",
-    "9": "safety", "10": "partial", "11": "no_input", "12": "interrupted",
-    "13": "billing"
+    "0": { "name": "ok", "description": "success" },
+    "13": { "name": "billing", "description": "account credits exhausted" }
   },
   "errorCodes": {
     "not_authenticated": { "category": "auth", "exit": 2, "retryable": false },
     "rate_limited": { "category": "rate_limit", "exit": 6, "retryable": true },
+    "payment_required": { "category": "auth", "exit": 2, "retryable": false },
     "insufficient_credits": { "category": "billing", "exit": 13, "retryable": false }
   },
-  "doctor": {
-    "exitCodes": { "0": "healthy", "1": "findings", "4": "refused-unsafe" },
-    "detectors": ["config.parse", "key.present", "service-key.scope", "base-url", "spec.hash", "binary.version", "tty.discipline", "auth.online", "connectivity"]
-  },
-  "schemas": {
-    "response": "exa.cli.response.v1",
-    "error": "exa.cli.error.v1",
-    "event": "exa.cli.event.v1",
-    "capabilities": "exa.cli.capabilities.v1",
-    "doctor": "exa.cli.doctor.v1",
-    "pendingRun": "exa.cli.pending_run.v1"
-  }
+  "doctor": { "exitCodes": { "0": "healthy", "1": "findings", "4": "refused-unsafe" } },
+  "presets": { "commands": ["preset list", "preset show", "search --preset"] },
+  "macros": { "commands": ["macro list", "macro show", "ask", "fetch"] }
 }
 ```
 
@@ -348,7 +369,7 @@ The presence of `EXA_AGENT_NO_NETWORK` is an execution guard, not a `capabilitie
 networked paths before credential resolution or transport creation while preserving dry-run and
 self-description commands.
 
-`errorCodes` is shown abbreviated above; the binary emits the **full** §5.1 dictionary. Each command entry carries the blast-radius triad an agent reasons about before calling: `readOnly` / `destructive` / `idempotencySensitive` (plus `requiresConfirm`, `dangerous`), all derived from the registry + overlay (D17). `build.commit`/`buildDate`/`target` are baked at compile time so an agent (or `doctor`) can detect a stale binary.
+`commands`, `exitCodes`, and `errorCodes` are shown abbreviated above; the binary emits the full registry and §5.1 dictionary. Each command entry carries the blast-radius triad an agent reasons about before calling: `readOnly` / `destructive` / `idempotencySensitive` (plus `requiresConfirm`), all derived from the registry + overlay (D17). `build.gitSha`/`buildDate`/`target` are baked at compile time so an agent (or `doctor`) can detect a stale binary.
 
 ## 14. Golden-pinned surfaces
 

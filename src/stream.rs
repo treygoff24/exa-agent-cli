@@ -41,7 +41,10 @@ pub fn interrupted_stream_error(last_event_id: Option<&str>) -> CliError {
     let mut diag = Diag::new("interrupted", "stream interrupted");
     diag.retryable = false;
     if let Some(id) = last_event_id {
-        diag = diag.with_details(serde_json::json!({ "lastEventId": id }));
+        diag.details = Some(crate::transport::stream_event_id_details_with_existing(
+            diag.details.take(),
+            id,
+        ));
     }
     CliError::Interrupted(diag)
 }
@@ -164,5 +167,18 @@ mod tests {
         assert_eq!(err.category(), 12);
         assert_eq!(err.diag().code, "interrupted");
         assert_eq!(err.diag().details.as_ref().unwrap()["lastEventId"], "evt-9");
+    }
+
+    #[test]
+    fn interrupted_error_caps_oversized_unicode_last_event_id() {
+        let id = "é".repeat(600);
+        let err = interrupted_stream_error(Some(&id));
+        let details = err.diag().details.as_ref().unwrap();
+        let shown = details["lastEventId"].as_str().unwrap();
+
+        assert_eq!(shown, "é".repeat(512));
+        assert!(shown.is_char_boundary(shown.len()));
+        assert_eq!(shown.len(), 1024);
+        assert_eq!(details["lastEventIdTruncated"], true);
     }
 }

@@ -4,7 +4,7 @@ An agent-first command-line interface over the full [Exa](https://exa.ai) API.
 
 Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
-`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints the upstream bytes as-is, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
+`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
 The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.5.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
@@ -113,12 +113,12 @@ commands still work.
 ### Command surface
 
 - **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream).
-- **Agent runs** — `agent runs create|get|list|events|cancel|delete`; `create` streams.
+- **Agent runs** — `agent runs create|get|list|events|cancel|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/beta `max` effort.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
 - **Websets** — the full tree: websets, searches, items, enrichments, exports, monitors and their runs, imports, webhooks and their delivery attempts, and events.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
-- **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling.
+- **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.
 
 ### Presets and macros
@@ -174,12 +174,13 @@ The contract is what makes this usable from code. Highlights:
 
 - **One JSON envelope per call.** Success is `exa.cli.response.v1`; errors are `exa.cli.error.v1` carrying a stable `error.code` and a category.
 - **stdout is data, stderr is diagnostics.** Errors and trace output go to stderr; the parseable result goes to stdout.
-- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass the upstream JSON through untouched.
+- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass upstream JSON through untouched except signed payment responses replace exact submitted payment credential echoes with `<redacted>`.
 - **Contents coverage is explicit.** Live `contents` and `fetch` result envelopes carry `outcome: "full"`, `"partial"`, or `"no_content"`, independent of the exit code.
 - **Exit codes are stable and meaningful** — `0` ok, `1` usage (bad invocation or local body validation failure), `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
 - **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it, but invalid bodies still exit `1` before any request is printed.
 - **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).
 - **No surprise double-billing.** `--idempotency-key` is forwarded upstream, and the CLI never auto-retries a non-idempotent create-POST.
+- **Billing vs payment is explicit.** `insufficient_credits` remains exit `13`; only a challenge-evidenced raw payment 402 is `payment_required` / exit `2`.
 
 ## Authentication
 

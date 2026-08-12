@@ -47,8 +47,8 @@ use output::{
 use request::RequestOverrides;
 use transport::{
     body_wants_stream, execute_raw_stream_with_request_id, execute_raw_with_request_id,
-    infer_stream_event_type, parse_user_headers, terminal_stream_data, RawExecuteParams,
-    StreamItem, Transport, UreqTransport,
+    infer_stream_event_type, parse_user_headers, search_terminal_stream_data, terminal_stream_data,
+    RawAuth, RawExecuteParams, StreamItem, Transport, UreqTransport,
 };
 
 const MAX_CONTENTS_BATCH_SIZE: usize = 100;
@@ -203,6 +203,15 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             let mut details = serde_json::Map::new();
             let mut message = public_clap_text(first_line(&e.to_string()));
             let mut suggestion = None;
+            let mut suggestion_omits_process_flags = false;
+            let invalid_flag = (kind == ErrorKind::UnknownArgument)
+                .then(|| {
+                    clap_ctx_strings(&e, ContextKind::InvalidArg)
+                        .into_iter()
+                        .next()
+                        .map(public_clap_text)
+                })
+                .flatten();
 
             if kind == ErrorKind::UnknownArgument
                 && message.contains("--urls")
@@ -226,6 +235,16 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             {
                 message = "websets imports create no longer accepts --csv or --url; use the documented upload flow".to_string();
                 suggestion = Some(IMPORTS_CREATE_BODY_EXAMPLE.to_string());
+            }
+
+            if kind == ErrorKind::UnknownArgument {
+                if let Some((targeted_message, targeted_suggestion, omitted_process_flags)) =
+                    known_cli_trap_suggestion(&e, invalid_flag.as_deref())
+                {
+                    message = targeted_message.to_string();
+                    suggestion = Some(targeted_suggestion);
+                    suggestion_omits_process_flags = omitted_process_flags;
+                }
             }
 
             if matches!(kind, ErrorKind::MissingRequiredArgument) {
@@ -292,13 +311,21 @@ fn handle_clap_error(e: clap::Error) -> i32 {
                     .into_iter()
                     .last()
                     .map(public_clap_text);
-                suggestion = flag
-                    .as_deref()
-                    .zip(corrected.as_deref())
-                    .and_then(|(flag, corrected)| rewrite_argv_value(flag, corrected))
+                let command = command_path_from_error(&e);
+                let rewritten =
+                    flag.as_deref()
+                        .zip(corrected.as_deref())
+                        .and_then(|(flag, corrected)| {
+                            rewrite_argv_value(flag, corrected, command.as_deref())
+                        });
+                if rewritten.is_some() {
+                    suggestion_omits_process_flags = true;
+                }
+                suggestion = rewritten
                     .or_else(|| {
-                        command_path_from_error(&e)
-                            .map(|command| unknown_flag_suggestion(&command, flag.as_deref()))
+                        command
+                            .as_deref()
+                            .map(|command| unknown_flag_suggestion(command, flag.as_deref()))
                     })
                     // Total fallback: a flag placed before any subcommand has no usage line
                     // to recover a command path from, but the agent still needs a move.
@@ -307,7 +334,14 @@ fn handle_clap_error(e: clap::Error) -> i32 {
             }
             if replaceable && matches!(kind, ErrorKind::InvalidValue | ErrorKind::ValueValidation) {
                 if let Some(rewritten) = rejected_value_suggestion(&e) {
+                    suggestion_omits_process_flags = true;
                     suggestion = Some(rewritten);
+                }
+            }
+            if suggestion_omits_process_flags {
+                let omitted_flags = omitted_process_flags(&std::env::args().collect::<Vec<_>>());
+                if !omitted_flags.is_empty() {
+                    details.insert("omittedFlags".to_string(), serde_json::json!(omitted_flags));
                 }
             }
 
@@ -502,6 +536,419 @@ fn unknown_flag_suggestion(command: &str, flag: Option<&str>) -> String {
     }
 }
 
+fn known_cli_trap_suggestion(
+    error: &clap::Error,
+    flag: Option<&str>,
+) -> Option<(&'static str, String, bool)> {
+    let command = command_path_from_error(error)?;
+    let clap_token = flag?.split_whitespace().next()?;
+    let trap_flag = if clap_token.starts_with('-') {
+        clap_token
+    } else {
+        known_process_trap_flag(&command)?
+    };
+    match (command.as_str(), trap_flag) {
+        ("search", "--query") => {
+            let rewritten = positionalize_search_query_flag();
+            let omitted = rewritten.is_some();
+            Some((
+                "search QUERY is positional; remove --query",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("search", "--contents") => {
+            let rewritten = rewrite_search_contents_process_flag();
+            let omitted = rewritten.is_some();
+            Some((
+                "search has no --contents flag; use --text [N|full] or --highlights [N] for inline content",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("search", "--content-size") => Some((
+            "search has no --content-size preset; use --text [N|full] or --highlights [N], or run contents for known URLs",
+            "exa-agent search --help".to_string(),
+            false,
+        )),
+        ("search", "--include-domains") => {
+            let rewritten = rewrite_search_process_flag("--include-domains", "--include-domain");
+            let omitted = rewritten.is_some();
+            Some((
+                "search uses repeatable --include-domain flags, not --include-domains",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("search", "--exclude-domains") => {
+            let rewritten = rewrite_search_process_flag("--exclude-domains", "--exclude-domain");
+            let omitted = rewritten.is_some();
+            Some((
+                "search uses repeatable --exclude-domain flags, not --exclude-domains",
+                rewritten.unwrap_or_else(|| "exa-agent search --help".to_string()),
+                omitted,
+            ))
+        }
+        ("contents", "--no-highlights") => {
+            let rewritten = remove_process_flag_with_optional_bool("--no-highlights");
+            let omitted = rewritten.is_some();
+            Some((
+                "contents highlights are opt-in; omit --highlights instead of passing --no-highlights",
+                rewritten.unwrap_or_else(|| "exa-agent contents --help".to_string()),
+                omitted,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn known_process_trap_flag(command: &str) -> Option<&'static str> {
+    let candidates: &[&str] = match command {
+        "search" => &[
+            "--query",
+            "--contents",
+            "--content-size",
+            "--include-domains",
+            "--exclude-domains",
+        ],
+        "contents" => &["--no-highlights"],
+        _ => return None,
+    };
+    let args: Vec<String> = std::env::args().collect();
+    candidates.iter().copied().find(|candidate| {
+        let equals_prefix = format!("{candidate}=");
+        args.iter()
+            .any(|arg| arg == candidate || arg.starts_with(&equals_prefix))
+    })
+}
+
+fn positionalize_search_query_flag() -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    for index in 1..args.len() {
+        if args[index] == "--query" {
+            let end = args[index + 1..]
+                .iter()
+                .position(|value| value.starts_with('-'))
+                .map_or(args.len(), |offset| index + 1 + offset);
+            if end == index + 1 {
+                return None;
+            }
+            let query = args[index + 1..end].join(" ");
+            args.splice(index..end, [query]);
+            return render_process_argv(args);
+        }
+        if let Some(value) = args[index].strip_prefix("--query=") {
+            if value.is_empty() {
+                return None;
+            }
+            args[index] = value.to_string();
+            return render_process_argv(args);
+        }
+    }
+    None
+}
+
+fn rewrite_search_process_flag(flag: &str, replacement: &str) -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    let equals_prefix = format!("{flag}=");
+    let index = (1..args.len())
+        .find(|index| args[*index] == flag || args[*index].starts_with(&equals_prefix))?;
+    if args[index] == flag {
+        args[index] = replacement.to_string();
+    } else {
+        let value = args[index].strip_prefix(&equals_prefix)?;
+        args[index] = format!("{replacement}={value}");
+    }
+    render_search_process_argv(args)
+}
+
+fn remove_process_flag_with_optional_bool(flag: &str) -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    let equals_prefix = format!("{flag}=");
+    let index = (1..args.len())
+        .find(|index| args[*index] == flag || args[*index].starts_with(&equals_prefix))?;
+    args.remove(index);
+    if args.get(index).is_some_and(|value| {
+        value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
+    }) {
+        args.remove(index);
+    }
+    render_process_argv(args)
+}
+
+fn rewrite_search_contents_process_flag() -> Option<String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    for index in 1..args.len() {
+        if args[index] == "--contents" {
+            let next = args.get(index + 1);
+            let negative_number = next.is_some_and(|value| {
+                value.strip_prefix('-').is_some_and(|digits| {
+                    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+                })
+            });
+            if negative_number {
+                return None;
+            }
+            let value = next.filter(|value| !value.starts_with('-')).cloned();
+            match value.as_deref() {
+                Some(value) if value.eq_ignore_ascii_case("highlights") => {
+                    args[index] = "--highlights".to_string();
+                    args.remove(index + 1);
+                }
+                Some(value) if value.eq_ignore_ascii_case("text") => {
+                    args[index] = "--text".to_string();
+                    args.remove(index + 1);
+                }
+                Some(value) if valid_search_text_value(value) => {
+                    args[index] = "--text".to_string();
+                }
+                Some(_) => return None,
+                None => args[index] = "--text".to_string(),
+            }
+            return render_search_process_argv(args);
+        }
+
+        if let Some(value) = args[index].strip_prefix("--contents=") {
+            if value.eq_ignore_ascii_case("highlights") {
+                args[index] = "--highlights".to_string();
+            } else if value.eq_ignore_ascii_case("text") || value.is_empty() {
+                args[index] = "--text".to_string();
+            } else if valid_search_text_value(value) {
+                args[index] = format!("--text={value}");
+            } else {
+                return None;
+            }
+            return render_search_process_argv(args);
+        }
+    }
+    None
+}
+
+fn valid_search_text_value(value: &str) -> bool {
+    if value.eq_ignore_ascii_case("full") {
+        return true;
+    }
+    let range = registry::lookup_by_command("search")
+        .and_then(|operation| operation.fields.iter().find(|field| field.flag == "text"))
+        .and_then(registry::field_range);
+    range.is_some_and(|(min, max)| {
+        value
+            .parse::<u64>()
+            .is_ok_and(|value| (min..=max).contains(&value))
+    })
+}
+
+fn render_process_argv(mut args: Vec<String>) -> Option<String> {
+    *args.first_mut()? = "exa-agent".to_string();
+    sanitize_process_argv(&mut args);
+    render_validated_process_argv(&args)
+}
+
+fn render_search_process_argv(mut args: Vec<String>) -> Option<String> {
+    *args.first_mut()? = "exa-agent".to_string();
+    sanitize_process_argv(&mut args);
+    if let Some(rendered) = render_validated_process_argv(&args) {
+        return Some(rendered);
+    }
+    coalesce_split_search_query(&mut args)?;
+    render_validated_process_argv(&args)
+}
+
+fn coalesce_split_search_query(args: &mut Vec<String>) -> Option<()> {
+    let command = Cli::command().mut_subcommand("search", |search| {
+        search.mut_arg("query", |query| query.num_args(1..))
+    });
+    let matches = command.try_get_matches_from(args.iter()).ok()?;
+    let search = matches.subcommand_matches("search")?;
+    let indices: Vec<usize> = search.indices_of("query")?.collect();
+    let values: Vec<&str> = search
+        .get_many::<String>("query")?
+        .map(String::as_str)
+        .collect();
+    let local_start = *indices.first()?;
+    if indices.len() < 2
+        || indices
+            .iter()
+            .enumerate()
+            .any(|(offset, index)| *index != local_start + offset)
+    {
+        return None;
+    }
+    let command_index = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.as_str() == "search")
+        .find_map(|(command_index, _)| {
+            indices
+                .iter()
+                .zip(&values)
+                .all(|(index, value)| {
+                    args.get(command_index + index).map(String::as_str) == Some(*value)
+                })
+                .then_some(command_index)
+        })?;
+    let start = command_index.checked_add(local_start)?;
+    let end = start.checked_add(indices.len())?;
+    let query = args.get(start..end)?.join(" ");
+    args.splice(start..end, [query]);
+    Some(())
+}
+
+fn render_validated_process_argv(args: &[String]) -> Option<String> {
+    Cli::try_parse_from(args).ok()?;
+    Some(
+        args.iter()
+            .map(|arg| display_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn sanitize_process_argv(args: &mut Vec<String>) {
+    let mut index = 1;
+    while index < args.len() {
+        if let Some(omission) = process_arg_omission(args, index) {
+            for _ in 0..omission.width {
+                if index >= args.len() {
+                    break;
+                }
+                args.remove(index);
+            }
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn omitted_process_flags(args: &[String]) -> Vec<&'static str> {
+    let mut omitted = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        if let Some(omission) = process_arg_omission(args, index) {
+            if !omitted.contains(&omission.flag) {
+                omitted.push(omission.flag);
+            }
+            index += omission.width;
+        } else {
+            index += 1;
+        }
+    }
+    omitted
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessArgOmission {
+    flag: &'static str,
+    width: usize,
+}
+
+fn process_arg_omission(args: &[String], index: usize) -> Option<ProcessArgOmission> {
+    let arg = args.get(index)?.as_str();
+    match arg {
+        "--api-key" => Some(ProcessArgOmission {
+            flag: "--api-key",
+            width: 2,
+        }),
+        "--service-key" => Some(ProcessArgOmission {
+            flag: "--service-key",
+            width: 2,
+        }),
+        "--header" => Some(ProcessArgOmission {
+            flag: "--header",
+            width: 2,
+        }),
+        "--set" => Some(ProcessArgOmission {
+            flag: "--set",
+            width: 2,
+        }),
+        "--body"
+            if args
+                .get(index + 1)
+                .is_none_or(|value| !value.starts_with('@')) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--body",
+                width: 2,
+            })
+        }
+        "--base-url"
+            if args
+                .get(index + 1)
+                .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--base-url",
+                width: 2,
+            })
+        }
+        arg if arg.starts_with("--api-key=") => Some(ProcessArgOmission {
+            flag: "--api-key",
+            width: 1,
+        }),
+        arg if arg.starts_with("--service-key=") => Some(ProcessArgOmission {
+            flag: "--service-key",
+            width: 1,
+        }),
+        arg if arg.starts_with("--header=") => Some(ProcessArgOmission {
+            flag: "--header",
+            width: 1,
+        }),
+        arg if arg.starts_with("--set=") => Some(ProcessArgOmission {
+            flag: "--set",
+            width: 1,
+        }),
+        "--query"
+            if is_raw_command_context(args, index)
+                && args.get(index + 1).is_some_and(|value| {
+                    value
+                        .split_once('=')
+                        .is_some_and(|(name, _)| redaction::is_secret_name(name))
+                }) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--query",
+                width: 2,
+            })
+        }
+        arg if is_raw_command_context(args, index)
+            && arg.strip_prefix("--query=").is_some_and(|value| {
+                value
+                    .split_once('=')
+                    .is_some_and(|(name, _)| redaction::is_secret_name(name))
+            }) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--query",
+                width: 1,
+            })
+        }
+        arg if arg
+            .strip_prefix("--body=")
+            .is_some_and(|value| !value.starts_with('@')) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--body",
+                width: 1,
+            })
+        }
+        arg if arg
+            .strip_prefix("--base-url=")
+            .is_some_and(|value| !transport::is_safe_suggestion_base_url_origin(value)) =>
+        {
+            Some(ProcessArgOmission {
+                flag: "--base-url",
+                width: 1,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn is_raw_command_context(args: &[String], index: usize) -> bool {
+    args.get(1..index)
+        .is_some_and(|before| before.iter().any(|arg| arg == "raw"))
+}
+
 fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str> {
     let token = flag
         .trim()
@@ -553,11 +1000,12 @@ fn rejected_value_suggestion(e: &clap::Error) -> Option<String> {
     let owner = clap_ctx_strings(e, ContextKind::InvalidArg)
         .into_iter()
         .next();
-    rewrite_argv_value_for(&invalid, &replacement, owner.as_deref())
+    let command = command_path_from_error(e);
+    rewrite_argv_value_for(&invalid, &replacement, owner.as_deref(), command.as_deref())
 }
 
-fn rewrite_argv_value(invalid: &str, replacement: &str) -> Option<String> {
-    rewrite_argv_value_for(invalid, replacement, None)
+fn rewrite_argv_value(invalid: &str, replacement: &str, command: Option<&str>) -> Option<String> {
+    rewrite_argv_value_for(invalid, replacement, None, command)
 }
 
 /// Rewrite the argv occurrence of `invalid` that belongs to `owner_flag` (clap's InvalidArg,
@@ -567,6 +1015,7 @@ fn rewrite_argv_value_for(
     invalid: &str,
     replacement: &str,
     owner_flag: Option<&str>,
+    command: Option<&str>,
 ) -> Option<String> {
     let mut args: Vec<String> = std::env::args().collect();
     if args.is_empty() {
@@ -604,12 +1053,15 @@ fn rewrite_argv_value_for(
         }
         previous = Some(arg.clone());
     }
-    replaced.then(|| {
-        args.iter()
-            .map(|arg| display_arg(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
+    replaced
+        .then(|| {
+            if command == Some("search") {
+                render_search_process_argv(args)
+            } else {
+                render_process_argv(args)
+            }
+        })
+        .flatten()
 }
 
 fn display_arg(arg: &str) -> String {
@@ -761,6 +1213,15 @@ fn first_line(s: &str) -> String {
 
 fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
+    if payment_flow_requested(&cli.globals) && !matches!(cli.command, Command::Raw(_)) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment modes are only supported by raw POST /search and raw POST /contents",
+            )
+            .with_suggestion("exa-agent --payment-discovery raw POST /search --body @request.json"),
+        ));
+    }
     match &cli.command {
         Command::Capabilities(args) => {
             emit_document(
@@ -2161,7 +2622,7 @@ fn build_agent_run_spec(
         .map(|raw| request::read_json_value_arg(raw, "exclusion"))
         .transpose()?
         .map(|value| value.to_string());
-    let data_sources = agent_data_sources_json(&args.data_source)?;
+    let data_sources = agent_data_sources_json(&args.data_source, &args.query)?;
     let system_prompt = args
         .system_prompt
         .as_deref()
@@ -2185,10 +2646,125 @@ fn build_agent_run_spec(
             "effort",
             args.effort.map(|effort| effort.as_str().to_string()),
         ),
+        (
+            "max-cost-dollars",
+            args.max_cost_dollars.map(|value| value.to_string()),
+        ),
         ("data-source", data_sources),
         ("metadata", metadata),
     ];
-    build_typed_spec(op, &flag_values, globals)
+    let spec = build_typed_spec(op, &flag_values, globals)?;
+    validate_agent_run_budget(&spec.body, globals, &args.query)?;
+    Ok(spec)
+}
+
+fn validate_agent_run_budget(
+    body: &serde_json::Value,
+    globals: &GlobalArgs,
+    query: &str,
+) -> Result<(), CliError> {
+    let effort = body.get("effort").and_then(serde_json::Value::as_str);
+    let budget = body.get("budget");
+
+    if effort == Some("max") {
+        let capped = budget
+            .and_then(|value| value.get("maxCostDollars"))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|value| value.is_finite() && (1.0..=100.0).contains(&value));
+        if !capped {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`effort:max` requires an explicit budget.maxCostDollars cap from 1 to 100",
+                )
+                .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
+            ));
+        }
+        if !beta_has_token(globals.beta.as_deref(), "agent-max-effort-2026-07-27") {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_flag_combination",
+                    "`effort:max` requires --beta agent-max-effort-2026-07-27",
+                )
+                .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
+            ));
+        }
+    }
+
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let Some(object) = budget.as_object() else {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget` must be a JSON object with maxCostDollars",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
+    };
+    let Some(value) = object.get("maxCostDollars") else {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget.maxCostDollars` is required when budget is present",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
+    };
+    let Some(max_cost) = value.as_f64().filter(|value| value.is_finite()) else {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget.maxCostDollars` must be a finite number",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
+    };
+    if !(1.0..=100.0).contains(&max_cost) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "`budget.maxCostDollars` must be between 1 and 100",
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+        ));
+    }
+    match effort {
+        None | Some("auto") | Some("max") => Ok(()),
+        Some(other) => Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                format!("budget is only valid with omitted, auto, or max effort; got `{other}`"),
+            )
+            .with_suggestion(agent_budget_suggestion(query, "auto", max_cost, false)),
+        )),
+    }
+}
+
+fn agent_budget_suggestion(query: &str, effort: &str, max_cost: f64, beta: bool) -> String {
+    let mut command = format!(
+        "exa-agent agent runs create {} --effort {effort} --max-cost-dollars {}",
+        shell_quote(query),
+        format_agent_cost(max_cost)
+    );
+    if beta {
+        command.push_str(" --beta agent-max-effort-2026-07-27");
+    }
+    command.push_str(" --dry-run --print-request");
+    command
+}
+
+fn format_agent_cost(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as u64)
+    } else {
+        value.to_string()
+    }
+}
+
+fn beta_has_token(raw: Option<&str>, token: &str) -> bool {
+    raw.is_some_and(|raw| raw.split(',').any(|part| part.trim() == token))
 }
 
 fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError> {
@@ -2209,7 +2785,7 @@ fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError
     Ok(Some(serde_json::Value::Array(rows).to_string()))
 }
 
-fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliError> {
+fn agent_data_sources_json(providers: &[String], query: &str) -> Result<Option<String>, CliError> {
     if providers.is_empty() {
         return Ok(None);
     }
@@ -2219,28 +2795,57 @@ fn agent_data_sources_json(providers: &[String]) -> Result<Option<String>, CliEr
                 "invalid_value",
                 "`--data-source` accepts at most 5 providers",
             )
-            .with_suggestion("exa-agent agent runs create <query> --data-source similarweb"),
+            .with_suggestion(format!(
+                "exa-agent agent runs create {} --data-source similarweb",
+                shell_quote(query)
+            )),
         ));
     }
     let mut sources = Vec::with_capacity(providers.len());
     for provider in providers {
         let provider = provider.trim();
-        let provider = if provider.eq_ignore_ascii_case("fiber_ai") {
-            "fiber"
-        } else if provider.eq_ignore_ascii_case("particle_news") {
-            "particle"
-        } else {
-            provider
-        };
         if provider.is_empty() {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 "`--data-source` provider must not be empty",
             )));
         }
-        sources.push(serde_json::json!({ "provider": provider }));
+        let Some(canonical) = canonical_agent_data_source_provider(provider) else {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    format!(
+                        "invalid `--data-source` provider `{provider}`; accepted providers are {}",
+                        registry::AGENT_DATA_SOURCE_PROVIDERS.join(", ")
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "field": "dataSources.provider",
+                    "given": provider,
+                    "accepted": registry::AGENT_DATA_SOURCE_PROVIDERS,
+                }))
+                .with_suggestion(format!(
+                    "exa-agent agent runs create {} --data-source fiber",
+                    shell_quote(query)
+                )),
+            ));
+        };
+        sources.push(serde_json::json!({ "provider": canonical }));
     }
     Ok(Some(serde_json::Value::Array(sources).to_string()))
+}
+
+fn canonical_agent_data_source_provider(provider: &str) -> Option<&'static str> {
+    let lower = provider.to_ascii_lowercase();
+    let normalized = match lower.as_str() {
+        "fiber_ai" => "fiber",
+        "particle_news" => "particle",
+        other => other,
+    };
+    registry::AGENT_DATA_SOURCE_PROVIDERS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == normalized)
 }
 
 fn typed_provider_alias_warnings(
@@ -5865,7 +6470,7 @@ fn execute_paginated_live<T: Transport>(
                 query_raw: &query_raw,
                 body: typed_wire_body(spec),
                 globals,
-                credential,
+                auth: RawAuth::Api(credential),
                 request_id,
             },
         )?;
@@ -6276,7 +6881,7 @@ fn execute_typed_live<T: Transport>(
             query_raw: &query_raw,
             body: body.clone(),
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
         };
         return match execute_streaming_live(
@@ -6309,7 +6914,7 @@ fn execute_typed_live<T: Transport>(
             query_raw: &query_raw,
             body: body.clone(),
             globals,
-            credential,
+            auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
         },
     ) {
@@ -6434,14 +7039,13 @@ fn execute_streaming_live<T: Transport>(
     transport: &T,
     params: RawExecuteParams<'_>,
     command: &str,
-    operation: Option<&registry::OperationDef>,
+    operation: Option<&'static registry::OperationDef>,
     globals: &GlobalArgs,
     pretty: bool,
     warnings: &[serde_json::Value],
 ) -> Result<i32, CliError> {
-    let answer_request_body = operation
-        .is_some_and(|op| op.command() == "answer")
-        .then(|| params.body.clone());
+    let request_body = params.body.clone();
+    let answer_stream = operation.is_some_and(|op| op.command() == "answer");
     let stream_mode = stream_output_mode(globals, stdout_is_tty());
     let ndjson = !globals.raw && stream_mode == OutputMode::Ndjson;
     let human = !globals.raw && stream_mode == OutputMode::Human;
@@ -6469,6 +7073,7 @@ fn execute_streaming_live<T: Transport>(
                     &mut out,
                     &frame,
                     command,
+                    operation,
                     &mut seq,
                     globals.correlation_id.as_deref(),
                 )?;
@@ -6503,9 +7108,7 @@ fn execute_streaming_live<T: Transport>(
             }
         }
         let mut response_warnings = warnings.to_vec();
-        if let Some(request_body) = answer_request_body.as_ref() {
-            append_answer_warning(request_body, &data, &mut response_warnings);
-        }
+        postprocess_stream_response(operation, &request_body, &mut data, &mut response_warnings);
         let mut envelope = response_envelope(ResponseEnvelopeArgs {
             command,
             method: &result.method,
@@ -6521,14 +7124,8 @@ fn execute_streaming_live<T: Transport>(
             duration_ms: result.duration_ms,
             warnings: &response_warnings,
         });
-        let answer_outcome = answer_request_body
-            .as_ref()
-            .map(|_| transport::answer_outcome(&envelope["data"]));
-        attach_content_metadata(
-            &mut envelope,
-            answer_outcome,
-            answer_request_body.as_ref().map(|_| Vec::new()),
-        );
+        let answer_outcome = answer_stream.then(|| transport::answer_outcome(&envelope["data"]));
+        attach_content_metadata(&mut envelope, answer_outcome, answer_stream.then(Vec::new));
         append_warning_next_actions(&mut envelope);
         if let Some(path) = output_path {
             write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
@@ -6542,11 +7139,19 @@ fn execute_streaming_live<T: Transport>(
         return Ok(0);
     }
 
-    let terminal_data = terminal_stream_data(&frames);
+    let mut terminal_data = if operation.is_some_and(|op| op.operation_id == "search") {
+        search_terminal_stream_data(&frames)
+            .map_err(|err| search_sse_recovery_error(err, &request_body))?
+    } else {
+        terminal_stream_data(&frames)
+    };
     let mut response_warnings = warnings.to_vec();
-    if let Some(request_body) = answer_request_body.as_ref() {
-        append_answer_warning(request_body, &terminal_data, &mut response_warnings);
-    }
+    postprocess_stream_response(
+        operation,
+        &request_body,
+        &mut terminal_data,
+        &mut response_warnings,
+    );
     let count = transport::primary_count(&terminal_data);
     let hash = transport::data_hash(&terminal_data);
     let mut terminal = response_envelope(ResponseEnvelopeArgs {
@@ -6564,14 +7169,8 @@ fn execute_streaming_live<T: Transport>(
         duration_ms: result.duration_ms,
         warnings: &response_warnings,
     });
-    let answer_outcome = answer_request_body
-        .as_ref()
-        .map(|_| transport::answer_outcome(&terminal["data"]));
-    attach_content_metadata(
-        &mut terminal,
-        answer_outcome,
-        answer_request_body.as_ref().map(|_| Vec::new()),
-    );
+    let answer_outcome = answer_stream.then(|| transport::answer_outcome(&terminal["data"]));
+    attach_content_metadata(&mut terminal, answer_outcome, answer_stream.then(Vec::new));
     append_warning_next_actions(&mut terminal);
     let last_event_id = last_frame_event_id(&frames);
     if let Some(path) = output_path {
@@ -6586,6 +7185,24 @@ fn execute_streaming_live<T: Transport>(
     Ok(0)
 }
 
+fn search_sse_recovery_error(err: CliError, request_body: &serde_json::Value) -> CliError {
+    let suggestion = request_body
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .filter(|query| !query.trim().is_empty())
+        .map(|query| {
+            format!(
+                "exa-agent search {} --stream --output-schema '{{\"type\":\"object\"}}'",
+                shell_quote(query)
+            )
+        })
+        .unwrap_or_else(|| "exa-agent search --help".to_string());
+
+    let mut err = err;
+    err.diag_mut().suggested_command = Some(suggestion);
+    err
+}
+
 fn write_stream_terminal(
     out: &mut impl std::io::Write,
     envelope: &serde_json::Value,
@@ -6595,14 +7212,14 @@ fn write_stream_terminal(
     last_event_id: Option<&str>,
 ) -> Result<(), CliError> {
     if ndjson {
-        write_ndjson(out, envelope).map_err(|err| stream_write_error(err, last_event_id))
+        write_ndjson(out, envelope)
     } else if human {
-        out.flush()
-            .map_err(|err| stream_write_error(err, last_event_id))
+        Ok(())
     } else {
         write_stdout_value(out, envelope, pretty)
-            .map_err(|err| stream_write_error(err, last_event_id))
     }
+    .and_then(|_| out.flush())
+    .map_err(|err| stream_write_error(err, last_event_id))
 }
 
 fn written_output_bytes(path: &str) -> u64 {
@@ -6613,6 +7230,7 @@ fn write_stream_event_ndjson(
     out: &mut impl std::io::Write,
     frame: &transport::SseFrame,
     command: &str,
+    operation: Option<&registry::OperationDef>,
     seq: &mut u64,
     correlation_id: Option<&str>,
 ) -> Result<(), CliError> {
@@ -6624,7 +7242,7 @@ fn write_stream_event_ndjson(
         let event = serde_json::from_str::<serde_json::Value>(chunk)
             .unwrap_or_else(|_| serde_json::Value::String(chunk.clone()));
         let envelope = event_envelope(EventEnvelopeArgs {
-            event_type: infer_stream_event_type(&event),
+            event_type: typed_stream_event_type(operation, &event),
             command,
             seq: next_seq,
             event_id: frame.id.as_deref(),
@@ -6635,6 +7253,21 @@ fn write_stream_event_ndjson(
         *seq = next_seq;
     }
     Ok(())
+}
+
+fn typed_stream_event_type(
+    operation: Option<&registry::OperationDef>,
+    event: &serde_json::Value,
+) -> &'static str {
+    if operation.is_some_and(|op| op.operation_id == "search") {
+        return match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("text-delta") => "delta",
+            Some("done") => "done",
+            Some("error") => "error",
+            _ => "item",
+        };
+    }
+    infer_stream_event_type(event)
 }
 
 fn write_stream_event_human(
@@ -6659,7 +7292,7 @@ fn stream_write_error(err: std::io::Error, last_event_id: Option<&str>) -> CliEr
         format!("failed to write stream stdout: {err}"),
     );
     if let Some(last_event_id) = last_event_id {
-        diag = diag.with_details(serde_json::json!({ "lastEventId": last_event_id }));
+        diag = diag.with_details(transport::stream_event_id_details(last_event_id));
     }
     CliError::Interrupted(diag)
 }
@@ -6842,6 +7475,19 @@ fn omit_empty_resolved_search_type(op: &registry::OperationDef, data: &mut serde
     }
 }
 
+fn postprocess_stream_response(
+    operation: Option<&'static registry::OperationDef>,
+    request_body: &serde_json::Value,
+    data: &mut serde_json::Value,
+    warnings: &mut Vec<serde_json::Value>,
+) {
+    let Some(op) = operation else {
+        return;
+    };
+    omit_empty_resolved_search_type(op, data);
+    append_response_warnings(op, request_body, data, None, None, warnings);
+}
+
 #[cfg(test)]
 fn stream_ndjson_values(
     result: &transport::RawExecuteResult,
@@ -6929,7 +7575,7 @@ fn request_body_warnings(
     op: &'static registry::OperationDef,
     body: &serde_json::Value,
 ) -> Vec<serde_json::Value> {
-    text_max_characters(op, body)
+    let mut warnings = text_max_characters(op, body)
         .map(|cap| {
             vec![serde_json::json!({
                 "code": "text_capped",
@@ -6939,7 +7585,31 @@ fn request_body_warnings(
                 "suggestedCommand": "exa-agent contents <url> --text full"
             })]
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if op.command() == "search"
+        && body.get("stream").and_then(serde_json::Value::as_bool) == Some(true)
+        && body
+            .get("outputSchema")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<query>");
+        warnings.push(serde_json::json!({
+            "code": "stream_ignored",
+            "message": "Search streaming requires a non-null outputSchema upstream; stream:true falls back to the normal JSON response.",
+            "details": {
+                "field": "outputSchema",
+                "stream": true,
+            },
+            "suggestedCommand": format!(
+                "exa-agent search {} --stream --output-schema '{{\"type\":\"object\"}}'",
+                shell_quote(query)
+            ),
+        }));
+    }
+    warnings
 }
 
 fn text_max_characters(
@@ -6981,6 +7651,10 @@ fn append_response_warnings(
         append_answer_warning(request_body, data, warnings);
         return;
     }
+    if op.command().starts_with("agent runs ") {
+        append_agent_budget_warning(data, warnings);
+        return;
+    }
     if op.command() != "search" {
         return;
     }
@@ -7009,6 +7683,37 @@ fn append_response_warnings(
         ),
         "suggestedCommand": format!("exa-agent search {} --text 1500", shell_quote(query)),
     }));
+}
+
+fn append_agent_budget_warning(data: &serde_json::Value, warnings: &mut Vec<serde_json::Value>) {
+    let count = count_budget_reached(data);
+    if count == 0 {
+        return;
+    }
+    warnings.push(serde_json::json!({
+        "code": "budget_reached",
+        "message": if count == 1 {
+            "agent run stopped because its budget cap was reached".to_string()
+        } else {
+            format!("{count} agent run records stopped because their budget cap was reached")
+        },
+        "details": {"stopReason": "budget_reached", "count": count},
+    }));
+}
+
+fn count_budget_reached(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let here = fields
+                .get("stopReason")
+                .or_else(|| fields.get("stop_reason"))
+                .and_then(serde_json::Value::as_str)
+                == Some("budget_reached");
+            u64::from(here) + fields.values().map(count_budget_reached).sum::<u64>()
+        }
+        serde_json::Value::Array(items) => items.iter().map(count_budget_reached).sum(),
+        _ => 0,
+    }
 }
 
 fn append_answer_warning(
@@ -7675,6 +8380,8 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     retry: globals.retry,
                     retry_after: globals.retry_after,
                     idempotency_key: None,
+                    follow_redirects: true,
+                    payment_mode: false,
                 },
             )?;
             let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
@@ -7716,25 +8423,31 @@ fn dispatch_robot_docs(
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Named output controls include search --output-schema JSON|@file and --system-prompt TEXT|@file, contents --highlights [QUERY|JSON], and agent runs create --system-prompt TEXT|@file.",
+                    "Search --stream requests SSE for synthesized output. Without a final non-null outputSchema, upstream returns normal JSON and the envelope warns with stream_ignored; --body/--set overrides determine the final request.",
+                    "Agent --data-source accepts fiber, financial_datasets, similarweb, baselayer, affiliate, particle, and jinko case-insensitively (max 5) and sends canonical spellings. Legacy fiber_ai and particle_news remain accepted with legacy_value_coerced; --body/--set values pass through unchanged.",
+                    "Agent --max-cost-dollars maps budget.maxCostDollars and is valid only with omitted/auto/max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; stopReason budget_reached emits a warning.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
                     "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
                     "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
-                    "Search results are under `.data.results[]`; verify the live JSON path with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '.data.results[] | {title,url}'`.",
+                    "Inline search and contents results are under `.data.results[]`; use the null-safe iterator `(.data.results // [])[]`, and inspect `ok`, `warnings`, and `dataPath` before treating an empty iterator as zero results. Verify with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '(.data.results // [])[] | {title,url}'`.",
+                    "Global output control is `--max-output-bytes N`; use `--max-output-bytes 0` to keep the full data payload on stdout, or `-o FILE` to write complete output when the default spill cap is too small.",
                     "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
+                    "`--include-domain` accepts hostnames, hostname paths, or wildcard subdomains, not bare TLDs such as `gov`; for broad government discovery put `site:.gov` in the query and inspect the returned domains.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
-                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[.data.results[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
+                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
                     "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
                     "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
                     "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
-                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (HTTP 402). The key is valid and the command was correct, so do not retry and do not re-guess flags: top up at https://dashboard.exa.ai or switch lanes to `parallel-cli` for the rest of the task.",
+                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (bare HTTP 402 or NO_MORE_CREDITS). A challenge-evidenced raw payment 402 is payment_required / exit 2.",
                     "`exa-agent auth test --json` and `exa-agent doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
                     "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
                     "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
                     "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
-                    "Do not pass managed auth headers; use EXA_API_KEY or auth login.",
+                    "Do not pass managed auth or payment headers; use EXA_API_KEY/auth login, or raw payment flags.",
+                    "Raw payment modes are pass-through only: --payment-discovery, --x402-payment-stdin, and --mpp-payment-stdin are limited to exact nonstreaming raw POST /search or /contents on the default host.",
                     "Errors are JSON on stderr with stable error.code values; run exa-agent robot-docs errors for the full dictionary."
                 ],
             }),
@@ -7761,6 +8474,11 @@ fn dispatch_robot_docs(
                 }).collect::<Vec<_>>(),
                 "errorCodes": error_codes_json(),
                 "warningCodes": [
+                    {
+                        "code": "stream_ignored",
+                        "exit": 0,
+                        "description": "search requested stream:true without a non-null outputSchema, so upstream returned its normal JSON response"
+                    },
                     {
                         "code": "legacy_value_coerced",
                         "exit": 0,
@@ -9071,16 +9789,28 @@ fn dispatch_raw_inner(
 ) -> Result<i32, CliError> {
     reject_placeholder_value(&args.path, "path")?;
     parse_user_headers(&globals.headers)?;
+    validate_raw_payment_stdin_conflicts(globals)?;
+    validate_raw_payment_idempotency(globals)?;
+    if payment_flow_requested(globals) {
+        let cfg = config::Config::load()?;
+        transport::payment_base_url(globals, &cfg, &args.path, method)?;
+    }
     if globals.print_request || globals.dry_run {
         let body = raw_body(globals)?;
+        validate_raw_payment_body(globals, &body)?;
         let query = raw_query_preview(&args.query)?;
+        let mut request = serde_json::json!({
+            "method": method,
+            "path": args.path,
+            "query": query,
+            "body": body,
+        });
+        let headers = raw_payment_preview_headers(globals);
+        if !headers.is_empty() {
+            request["headers"] = serde_json::Value::Array(header_preview(&headers));
+        }
         let data = serde_json::json!({
-            "request": {
-                "method": method,
-                "path": args.path,
-                "query": query,
-                "body": body,
-            },
+            "request": request,
             "dryRun": true,
         });
         let hash = transport::data_hash(&data);
@@ -9090,7 +9820,7 @@ fn dispatch_raw_inner(
             path: &args.path,
             operation: None,
             request_id,
-            profile: "default",
+            profile: raw_preview_profile(globals),
             correlation_id: globals.correlation_id.as_deref(),
             data,
             count: None,
@@ -9104,14 +9834,22 @@ fn dispatch_raw_inner(
     }
 
     transport::ensure_network_allowed()?;
-    let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
-    let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
-        .map_err(|missing| auth::not_authenticated_error(&missing))?;
-    reject_mismatched_credential_scope(&credential)?;
     let body = raw_body(globals)?;
+    validate_raw_payment_body(globals, &body)?;
+    let payment_secret = raw_payment_secret(globals)?;
+    let credential = if payment_secret.is_none() && !globals.payment_discovery {
+        let api_input = credential_input(auth::CredentialNamespace::Api, globals)?;
+        let credential = auth::resolve_api_credential(&api_input, &auth::NoopKeyring)
+            .map_err(|missing| auth::not_authenticated_error(&missing))?;
+        reject_mismatched_credential_scope(&credential)?;
+        Some(credential)
+    } else {
+        None
+    };
     let cfg = config::Config::load()?;
     let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
+    let raw_auth = raw_auth(credential.as_ref(), payment_secret.as_ref(), globals);
     if body_wants_stream(&body) {
         return execute_streaming_live(
             &transport,
@@ -9121,7 +9859,7 @@ fn dispatch_raw_inner(
                 query_raw: &args.query,
                 body,
                 globals,
-                credential: &credential,
+                auth: raw_auth,
                 request_id: request_id.to_string(),
             },
             "raw",
@@ -9139,7 +9877,7 @@ fn dispatch_raw_inner(
             query_raw: &args.query,
             body,
             globals,
-            credential: &credential,
+            auth: raw_auth,
             request_id: request_id.to_string(),
         },
     )?;
@@ -9149,6 +9887,15 @@ fn dispatch_raw_inner(
         return Ok(0);
     }
 
+    let mut envelope = raw_response_envelope(&result, payment_requested(globals));
+    emit_completed_response(&mut envelope, globals, pretty)?;
+    Ok(0)
+}
+
+fn raw_response_envelope(
+    result: &transport::RawExecuteResult,
+    signed_payment: bool,
+) -> serde_json::Value {
     let data = transport::parse_response_data(&result.response.body);
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
@@ -9167,8 +9914,11 @@ fn dispatch_raw_inner(
         duration_ms: result.duration_ms,
         warnings: &[],
     });
-    emit_completed_response(&mut envelope, globals, pretty)?;
-    Ok(0)
+    if signed_payment {
+        envelope["payment"] =
+            transport::payment_headers_metadata(&result.response.headers, "receipt");
+    }
+    envelope
 }
 
 fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
@@ -9187,6 +9937,144 @@ fn raw_body(globals: &GlobalArgs) -> Result<serde_json::Value, CliError> {
         request::set_at_path(&mut body, &path, value)?;
     }
     Ok(body)
+}
+
+enum RawPaymentSecret {
+    X402(auth::Secret),
+    Mpp(auth::Secret),
+}
+
+fn payment_requested(globals: &GlobalArgs) -> bool {
+    globals.x402_payment_stdin || globals.mpp_payment_stdin
+}
+
+fn payment_flow_requested(globals: &GlobalArgs) -> bool {
+    payment_requested(globals) || globals.payment_discovery
+}
+
+fn raw_auth<'a>(
+    credential: Option<&'a auth::ResolvedCredential>,
+    payment: Option<&'a RawPaymentSecret>,
+    globals: &GlobalArgs,
+) -> RawAuth<'a> {
+    match payment {
+        Some(RawPaymentSecret::X402(signature)) => {
+            RawAuth::Payment(transport::PaymentAuth::X402 { signature })
+        }
+        Some(RawPaymentSecret::Mpp(authorization)) => {
+            RawAuth::Payment(transport::PaymentAuth::Mpp { authorization })
+        }
+        None if globals.payment_discovery => RawAuth::PaymentDiscovery,
+        None => RawAuth::Api(credential.expect("non-payment raw requires API credential")),
+    }
+}
+
+fn raw_preview_profile(globals: &GlobalArgs) -> &'static str {
+    if globals.payment_discovery {
+        "payment-discovery"
+    } else if payment_requested(globals) {
+        "payment"
+    } else {
+        "default"
+    }
+}
+
+fn raw_payment_preview_headers(globals: &GlobalArgs) -> Vec<(String, String)> {
+    if globals.x402_payment_stdin {
+        vec![(
+            "PAYMENT-SIGNATURE".to_string(),
+            redaction::REDACTED.to_string(),
+        )]
+    } else if globals.mpp_payment_stdin {
+        vec![("Authorization".to_string(), redaction::REDACTED.to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn raw_payment_secret(globals: &GlobalArgs) -> Result<Option<RawPaymentSecret>, CliError> {
+    if globals.x402_payment_stdin {
+        let secret = read_secret_stdin("--x402-payment-stdin", "PAYMENT_SIGNATURE")?;
+        validate_payment_secret("--x402-payment-stdin", &secret)?;
+        return Ok(Some(RawPaymentSecret::X402(secret)));
+    }
+    if globals.mpp_payment_stdin {
+        let secret = read_secret_stdin("--mpp-payment-stdin", "MPP_AUTHORIZATION")?;
+        validate_payment_secret("--mpp-payment-stdin", &secret)?;
+        if !secret.expose().starts_with("Payment ") {
+            return Err(CliError::Usage(
+                Diag::new(
+                    "invalid_value",
+                    "--mpp-payment-stdin expects the complete `Payment ...` Authorization header value",
+                )
+                .with_suggestion(
+                    "printf '%s' \"$MPP_AUTHORIZATION\" | exa-agent --mpp-payment-stdin raw POST /search --body @request.json",
+                ),
+            ));
+        }
+        return Ok(Some(RawPaymentSecret::Mpp(secret)));
+    }
+    Ok(None)
+}
+
+fn validate_payment_secret(flag: &str, secret: &auth::Secret) -> Result<(), CliError> {
+    if secret.expose().chars().any(char::is_control) {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_value",
+            format!("{flag} value must be a single header value without control characters"),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_raw_payment_stdin_conflicts(globals: &GlobalArgs) -> Result<(), CliError> {
+    if !payment_requested(globals) {
+        return Ok(());
+    }
+    if globals.body.as_deref() == Some("-") || globals.input.as_deref() == Some("-") {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment stdin modes cannot be combined with another stdin consumer",
+            )
+            .with_suggestion(
+                "use --body @request.json with --x402-payment-stdin or --mpp-payment-stdin",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_payment_idempotency(globals: &GlobalArgs) -> Result<(), CliError> {
+    if globals.idempotency_key.is_none() || !payment_flow_requested(globals) {
+        return Ok(());
+    }
+    let suggestion = if globals.mpp_payment_stdin {
+        transport::MPP_PAYMENT_RETRY_SUGGESTION
+    } else if globals.x402_payment_stdin {
+        transport::X402_PAYMENT_RETRY_SUGGESTION
+    } else {
+        transport::PAYMENT_DISCOVERY_RETRY_SUGGESTION
+    };
+    Err(transport::payment_idempotency_usage_for_suggestion(
+        suggestion,
+    ))
+}
+
+fn validate_raw_payment_body(
+    globals: &GlobalArgs,
+    body: &serde_json::Value,
+) -> Result<(), CliError> {
+    if payment_flow_requested(globals) && body_wants_stream(body) {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_flag_combination",
+                "payment modes do not support streaming requests; omit `stream:true`",
+            )
+            .with_suggestion("remove `stream:true` and send a nonstreaming raw payment request"),
+        ));
+    }
+    Ok(())
 }
 
 fn raw_query_preview(raw: &[String]) -> Result<Vec<serde_json::Value>, CliError> {
@@ -9798,6 +10686,74 @@ mod tests {
         );
     }
 
+    fn signed_payment_raw_result() -> RawExecuteResult {
+        RawExecuteResult {
+            request_id: "req_payment".into(),
+            method: "POST".into(),
+            path: "/search".into(),
+            profile: "payment".into(),
+            correlation_id: None,
+            response: HttpResponse {
+                status: 200,
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("Payment-Receipt".into(), "receipt-abc".into()),
+                ],
+                body: format!(
+                    r#"{{"results":[{{"title":"paid"}}],"echo":"{}"}}"#,
+                    redaction::REDACTED
+                )
+                .into_bytes(),
+            },
+            retries: 0,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn signed_payment_json_envelope_puts_receipt_metadata_after_data_truncated() {
+        let result = signed_payment_raw_result();
+        let envelope = raw_response_envelope(&result, true);
+
+        assert_eq!(envelope["data"]["results"][0]["title"], "paid");
+        assert_eq!(envelope["payment"]["kind"], "receipt");
+        assert_eq!(envelope["payment"]["headers"][0]["name"], "Payment-Receipt");
+        assert_eq!(envelope["payment"]["headers"][0]["value"], "receipt-abc");
+        assert_eq!(
+            envelope["payment"]["headers"][0]["bytes"],
+            "receipt-abc".len()
+        );
+        assert!(envelope["data"].get("payment").is_none());
+
+        let rendered = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            rendered.contains(r#""dataTruncated":false,"payment":{"kind":"receipt""#),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn raw_output_writes_already_redacted_payment_bytes_without_envelope_metadata() {
+        let result = signed_payment_raw_result();
+        let output_path = std::env::temp_dir().join(format!(
+            "exa-agent-raw-payment-output-{}-{}.bin",
+            std::process::id(),
+            transport::new_request_id()
+        ));
+        let _ = std::fs::remove_file(&output_path);
+        let globals = parse_globals(&["--raw", "--output", output_path.to_str().unwrap()]);
+
+        emit_raw_result(&result, None, "raw", &globals, false, &[]).unwrap();
+
+        let written = std::fs::read(&output_path).unwrap();
+        let _ = std::fs::remove_file(&output_path);
+        assert_eq!(written, result.response.body);
+        let rendered = String::from_utf8_lossy(&written);
+        assert!(rendered.contains(redaction::REDACTED), "{rendered}");
+        assert!(!rendered.contains("Payment-Receipt"), "{rendered}");
+        assert!(!rendered.contains(r#""payment""#), "{rendered}");
+    }
+
     struct FailAfterWrites {
         remaining: usize,
         bytes: Vec<u8>,
@@ -9821,6 +10777,24 @@ mod tests {
         }
     }
 
+    struct FailOnFlush {
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Write for FailOnFlush {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "flush failed",
+            ))
+        }
+    }
+
     #[test]
     fn stream_event_ndjson_write_failure_returns_interrupted() {
         let mut out = FailAfterWrites {
@@ -9832,20 +10806,57 @@ mod tests {
             id: Some("evt-1".into()),
             data: vec![r#"{"type":"progress","message":"first"}"#.into()],
         };
-        write_stream_event_ndjson(&mut out, &first, "agent runs events", &mut seq, None).unwrap();
+        write_stream_event_ndjson(&mut out, &first, "agent runs events", None, &mut seq, None)
+            .unwrap();
         assert_eq!(seq, 1);
 
         let second = transport::SseFrame {
             id: Some("evt-2".into()),
             data: vec![r#"{"type":"progress","message":"second"}"#.into()],
         };
-        let err = write_stream_event_ndjson(&mut out, &second, "agent runs events", &mut seq, None)
-            .unwrap_err();
+        let err =
+            write_stream_event_ndjson(&mut out, &second, "agent runs events", None, &mut seq, None)
+                .unwrap_err();
 
         assert_eq!(err.category(), 12);
         assert_eq!(err.diag().code, "interrupted");
         assert_eq!(seq, 1);
         assert!(String::from_utf8_lossy(&out.bytes).contains("\"eventId\":\"evt-1\""));
+    }
+
+    #[test]
+    fn stream_terminal_flush_failure_returns_interrupted() {
+        let mut out = FailOnFlush { bytes: Vec::new() };
+        let envelope = serde_json::json!({"schema":"exa.cli.response.v1","ok":true});
+
+        let err =
+            write_stream_terminal(&mut out, &envelope, false, false, false, Some("evt-final"))
+                .unwrap_err();
+
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().code, "interrupted");
+        assert_eq!(
+            err.diag().details.as_ref().unwrap()["lastEventId"],
+            "evt-final"
+        );
+        assert!(!out.bytes.is_empty());
+    }
+
+    #[test]
+    fn stream_write_error_caps_oversized_unicode_last_event_id() {
+        let last_event_id = "é".repeat(600);
+        let err = stream_write_error(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout closed"),
+            Some(&last_event_id),
+        );
+
+        assert_eq!(err.category(), 12);
+        assert_eq!(err.diag().code, "interrupted");
+        let details = err.diag().details.as_ref().unwrap();
+        let shown = details["lastEventId"].as_str().unwrap();
+        assert_eq!(shown, "é".repeat(512));
+        assert_eq!(shown.len(), 1024);
+        assert_eq!(details["lastEventIdTruncated"], true);
     }
 
     #[test]
@@ -10489,6 +11500,7 @@ mod tests {
             SearchArgs {
                 query: "rust cli".into(),
                 output_schema: None,
+                stream: false,
                 system_prompt: None,
                 num_results: Some("7".into()),
                 text: Some(String::new()),
@@ -10509,6 +11521,7 @@ mod tests {
             vec![
                 ("query", Some("rust cli".to_string())),
                 ("output-schema", None),
+                ("stream", None),
                 ("system-prompt", None),
                 ("num-results", Some("7".to_string())),
                 ("text", Some(String::new())),
@@ -10636,6 +11649,7 @@ mod tests {
                 &SearchArgs {
                     query: "q".into(),
                     output_schema: None,
+                    stream: false,
                     system_prompt: None,
                     num_results: None,
                     text: None,

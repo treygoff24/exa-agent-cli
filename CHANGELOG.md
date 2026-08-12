@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented here.
 
+## 0.6.0 — 2026-08-11
+
+### Added
+
+- Raw Search/Contents payment pass-through: `--payment-discovery`, `--x402-payment-stdin`, and
+  `--mpp-payment-stdin` work only with exact nonstreaming `raw POST /search` or `/contents` on
+  the default Exa host. Payment values are stdin-only, generic payment headers are refused, dry-run
+  previews redact placeholders, and wallet/signing/custody remain out of scope.
+- `agent runs create --max-cost-dollars DOLLARS` maps to `budget.maxCostDollars`; `effort max`
+  is exposed behind explicit `--beta agent-max-effort-2026-07-27` and requires an explicit budget
+  cap. `stopReason: budget_reached` now emits a machine-visible `budget_reached` warning.
+- `search --stream` now maps to the upstream Search SSE field, is advertised by help and
+  capabilities, and emits `stream_ignored` when upstream will fall back to normal JSON because
+  the final request has no non-null `outputSchema`. Canonical Search SSE events expose
+  `text-delta` as NDJSON `delta` records and reconstruct terminal results, output, timing, and
+  cost metadata. Search stream error events and streams missing a terminal `done` event now
+  fail with structured upstream errors instead of returning partial data as success; malformed
+  or non-terminal `done` events are rejected as upstream contract violations.
+
+### Changed
+
+- Error envelopes now expose `error.details.omittedFlags` when argv-derived recovery commands
+  drop unsafe or conflicting flags, and argv-derived `suggestedCommand` values are sanitized so
+  recovery hints do not echo secrets or invalid combinations.
+- Successful signed raw payment responses in JSON-envelope mode now add top-level `payment`
+  receipt metadata. Signed payment `--raw` remains envelope-free; all non-payment raw bytes stay
+  exact, while exact submitted payment credential echoes are redacted as `<redacted>`.
+- HTTP 402 classification now distinguishes billing exhaustion from payment challenges:
+  `NO_MORE_CREDITS` / bare 402 stays `insufficient_credits` (exit 13), while a 402 with safe
+  payment challenge metadata is `payment_required` (exit 2).
+- Typed `agent runs create --data-source` values are validated case-insensitively against the
+  current provider enum (`fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`,
+  `particle`, `jinko`) and sent canonically. Legacy aliases and explicit `--body`/`--set`
+  pass-through behavior are unchanged.
+
 ## 0.5.0 — 2026-08-04
 
 Restores typed parity with the current Exa API under D16/D40: the surface now matches the live spec (2.0.0 as served 2026-08-03) and the documented docs-only endpoints. OpenAI-compatible routes remain raw-only; MPP/x402 remain unsupported (`raw` covers them; see decisions.md D40).

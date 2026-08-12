@@ -112,6 +112,24 @@ impl CliError {
             | CliError::Billing(d) => d,
         }
     }
+
+    pub fn diag_mut(&mut self) -> &mut Diag {
+        match self {
+            CliError::Usage(d)
+            | CliError::Auth(d)
+            | CliError::Config(d)
+            | CliError::Network(d)
+            | CliError::Upstream(d)
+            | CliError::RateLimit(d)
+            | CliError::NotFound(d)
+            | CliError::Conflict(d)
+            | CliError::Safety(d)
+            | CliError::Partial(d)
+            | CliError::NoInput(d)
+            | CliError::Interrupted(d)
+            | CliError::Billing(d) => d,
+        }
+    }
 }
 
 /// The exit-code dictionary (contracts §6), surfaced in `capabilities.exitCodes`.
@@ -248,6 +266,15 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
                 "auth",
                 false,
                 "a credential was sent but upstream rejected it",
+            ),
+        ),
+        (
+            "payment_required",
+            spec(
+                2,
+                "auth",
+                false,
+                "upstream returned a payment challenge for a raw payment-capable request",
             ),
         ),
         (

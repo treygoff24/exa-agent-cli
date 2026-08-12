@@ -9,6 +9,16 @@ pub use generated::{
     SPEC_TITLE, SPEC_URL, SPEC_VERSION, TARGET,
 };
 
+pub const AGENT_DATA_SOURCE_PROVIDERS: &[&str] = &[
+    "fiber",
+    "financial_datasets",
+    "similarweb",
+    "baselayer",
+    "affiliate",
+    "particle",
+    "jinko",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
@@ -156,6 +166,12 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
                 .to_string(),
         );
     }
+    if command == "agent runs create" && flag == "max-cost-dollars" {
+        return Some(
+            "Set `budget.maxCostDollars` (1..=100); valid only with omitted, auto, or max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`."
+                .to_string(),
+        );
+    }
     if flag == "output-schema" {
         return Some(format!(
             "Set the `{}` request field; accepts inline JSON or @file.",
@@ -186,6 +202,16 @@ pub fn field_range(field: &FieldDef) -> Option<(u64, u64)> {
                 .then_some((min as u64, max as u64))
         })
     })
+}
+
+pub fn field_enum_values(op: &OperationDef, field: &FieldDef) -> &'static [&'static str] {
+    if !field.enum_values.is_empty() {
+        field.enum_values
+    } else if op.cli_path == ["agent", "runs", "create"] && field.flag == "data-source" {
+        AGENT_DATA_SOURCE_PROVIDERS
+    } else {
+        &[]
+    }
 }
 
 fn required_field_range(command: &str, flag: &str) -> (u64, u64) {
@@ -241,6 +267,19 @@ pub fn ranged_u32_value_parser(
         raw.parse::<u32>()
             .ok()
             .filter(|value| (min..=max).contains(&u64::from(*value)))
+            .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
+    }
+}
+
+pub fn ranged_f64_value_parser(
+    command: &'static str,
+    flag: &'static str,
+) -> impl clap::builder::TypedValueParser<Value = f64> {
+    move |raw: &str| {
+        let (min, max) = required_field_range(command, flag);
+        raw.parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && (*value >= min as f64) && (*value <= max as f64))
             .ok_or_else(|| format!("--{flag} accepts {min}..={max}"))
     }
 }

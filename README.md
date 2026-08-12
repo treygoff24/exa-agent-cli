@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 `exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
-The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 (version `0.5.0`) and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
+The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
 ## Install
 

@@ -1030,17 +1030,15 @@ fn backup_config(config_path: &Path) -> Result<PathBuf, String> {
             config_path.display()
         )
     })?;
-    let permissions = fs::metadata(config_path)
-        .map_err(|error| {
-            format!(
-                "failed to inspect config {} permissions: {error}",
-                config_path.display()
-            )
-        })?
-        .permissions();
-    write_atomic_with_permissions(&backup, &bytes, Some(permissions))?;
+    // The backup holds a verbatim copy of a config that may carry secrets, so it is always
+    // written 0600 rather than inheriting a world-readable config's mode. The pre-fix mode
+    // goes in the marker instead, which is what `--undo` restores.
+    write_atomic_with_permissions(&backup, &bytes, private_permissions())?;
     let marker = latest_backup_marker(config_path);
-    write_atomic(&marker, backup.display().to_string().as_bytes())?;
+    write_atomic(
+        &marker,
+        backup_marker_contents(config_path, &backup)?.as_bytes(),
+    )?;
     cleanup_old_backups(config_path, &backup, &marker)?;
     Ok(backup)
 }
@@ -1085,7 +1083,12 @@ fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
                 ctx.config_path.display()
             )
         })?;
-        let backup = PathBuf::from(raw.trim());
+        let mut lines = raw.lines();
+        let backup = PathBuf::from(lines.next().unwrap_or_default().trim());
+        let recorded_mode = lines.find_map(|line| {
+            let mode = line.trim().strip_prefix("mode=")?;
+            u32::from_str_radix(mode, 8).ok()
+        });
         if !is_backup_for(&backup, &ctx.config_path) {
             return Err(format!(
                 "latest doctor marker points outside the config backup scope: {}",
@@ -1098,7 +1101,7 @@ fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
                 backup.display()
             ));
         }
-        restore_backup(&backup, &ctx.config_path)?;
+        restore_backup(&backup, &ctx.config_path, recorded_mode)?;
         fs::remove_file(&marker)
             .map_err(|error| format!("restored config but could not clear undo marker: {error}"))?;
         Ok(backup)
@@ -1149,19 +1152,61 @@ fn is_backup_for(backup: &Path, config_path: &Path) -> bool {
             .is_some_and(|name| name.starts_with(&format!("{config_name}.doctor-backup-")))
 }
 
-fn restore_backup(backup: &Path, config_path: &Path) -> Result<(), String> {
+fn restore_backup(backup: &Path, config_path: &Path, mode: Option<u32>) -> Result<(), String> {
     let bytes = fs::read(backup)
         .map_err(|error| format!("failed to read backup {}: {error}", backup.display()))?;
     write_atomic(config_path, &bytes)?;
     #[cfg(unix)]
-    {
-        let permissions = fs::metadata(backup)
-            .map_err(|error| format!("failed to inspect backup permissions: {error}"))?
-            .permissions();
-        fs::set_permissions(config_path, permissions)
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(config_path, fs::Permissions::from_mode(mode))
             .map_err(|error| format!("failed to restore config permissions: {error}"))?;
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     Ok(())
+}
+
+/// The marker carries the backup path plus the config's pre-fix mode. The backup file is
+/// always 0600, so it cannot itself record the mode `--undo` has to put back.
+fn backup_marker_contents(config_path: &Path, backup: &Path) -> Result<String, String> {
+    let mut contents = backup.display().to_string();
+    if let Some(mode) = config_mode(config_path)? {
+        contents.push_str(&format!("\nmode={mode:04o}"));
+    }
+    Ok(contents)
+}
+
+#[cfg(unix)]
+fn config_mode(config_path: &Path) -> Result<Option<u32>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(config_path)
+        .map_err(|error| {
+            format!(
+                "failed to inspect config {} permissions: {error}",
+                config_path.display()
+            )
+        })?
+        .permissions()
+        .mode()
+        & 0o777;
+    Ok(Some(mode))
+}
+
+#[cfg(not(unix))]
+fn config_mode(_config_path: &Path) -> Result<Option<u32>, String> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn private_permissions() -> Option<fs::Permissions> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn private_permissions() -> Option<fs::Permissions> {
+    None
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {

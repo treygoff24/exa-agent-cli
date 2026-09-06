@@ -16,6 +16,7 @@ const ADMIN_SPEC_URL: &str = "https://exa.ai/docs/team-management-spec.yaml";
 const EXA_SPEC: &str = "openapi/exa-openapi.json";
 const ADMIN_SPEC: &str = "openapi/team-management.json";
 const OVERLAY: &str = "openapi/overlay.toml";
+const PROVENANCE: &str = "openapi/provenance.toml";
 const GENERATED_SKILL: &str = "work/generated/exa-agent-cli/SKILL.md";
 
 // Verified spec identity (D22, 2026-06-29). The Phase-1 goldens freeze these.
@@ -82,7 +83,10 @@ fn vendor_spec(check_only: bool) -> Result<()> {
         verify_spec(&root.join(EXA_SPEC), EXA_TITLE, EXA_VERSION)?;
         verify_spec(&root.join(ADMIN_SPEC), ADMIN_TITLE, ADMIN_VERSION)?;
         verify_overlay(&root)?;
-        println!("vendor-spec --check: OK (specs parse, identity verified, overlay consistent)");
+        verify_provenance(&root)?;
+        println!(
+            "vendor-spec --check: OK (specs parse, identity verified, overlay consistent, provenance record current)"
+        );
         return Ok(());
     }
 
@@ -96,8 +100,69 @@ fn vendor_spec(check_only: bool) -> Result<()> {
     fetch_yaml_as_json(ADMIN_SPEC_URL, &root.join(ADMIN_SPEC))?;
     verify_spec(&root.join(EXA_SPEC), EXA_TITLE, EXA_VERSION)?;
     verify_spec(&root.join(ADMIN_SPEC), ADMIN_TITLE, ADMIN_VERSION)?;
+    // A re-vendor that changed the specs must also update `openapi/provenance.toml`, so the
+    // freshly measured values are printed before the record is re-asserted.
+    for (section, spec) in [("exa", EXA_SPEC), ("admin", ADMIN_SPEC)] {
+        let path = root.join(spec);
+        println!(
+            "[{section}] vendored_sha256 = {:?}  operations = {}",
+            file_sha256(&path)?,
+            collect_op_ids(&path)?.len()
+        );
+    }
+    verify_provenance(&root)?;
     println!("vendor-spec: re-vendored and verified {EXA_SPEC} + {ADMIN_SPEC}");
     Ok(())
+}
+
+/// The provenance record is only worth having if something re-measures it. `PROVENANCE.md`
+/// went six operations stale under a green `--check` because the check compared
+/// `info.title`/`info.version`, which a spec expansion does not move.
+fn verify_provenance(root: &Path) -> Result<()> {
+    let path = root.join(PROVENANCE);
+    let record: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let mut problems = Vec::new();
+    for (section, spec) in [("exa", EXA_SPEC), ("admin", ADMIN_SPEC)] {
+        let entry = record
+            .get(section)
+            .ok_or_else(|| anyhow!("{PROVENANCE} has no [{section}] table"))?;
+        let recorded_sha = entry
+            .get("vendored_sha256")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow!("{PROVENANCE} [{section}] has no vendored_sha256"))?;
+        let recorded_ops = entry
+            .get("operations")
+            .and_then(|x| x.as_integer())
+            .ok_or_else(|| anyhow!("{PROVENANCE} [{section}] has no operations count"))?;
+        let spec_path = root.join(spec);
+        let actual_sha = file_sha256(&spec_path)?;
+        if actual_sha != recorded_sha {
+            problems.push(format!(
+                "{spec}: vendored SHA-256 is {actual_sha}, {PROVENANCE} [{section}] records {recorded_sha}"
+            ));
+        }
+        let actual_ops = collect_op_ids(&spec_path)?.len() as i64;
+        if actual_ops != recorded_ops {
+            problems.push(format!(
+                "{spec}: {actual_ops} operations, {PROVENANCE} [{section}] records {recorded_ops}"
+            ));
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "provenance record is stale — update {PROVENANCE} (and the narrative in \
+             openapi/PROVENANCE.md):\n  {}",
+            problems.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn fetch_json(url: &str, dest: &Path) -> Result<()> {

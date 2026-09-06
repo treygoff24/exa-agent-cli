@@ -798,7 +798,11 @@ fn schema_refresh_check_fetches_and_compares_live_spec() {
     let refresh: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(refresh["schema"], "exa.cli.schema_refresh.v1");
     assert_eq!(refresh["status"], "drift");
-    assert_ne!(refresh["liveSpecSha256"], refresh["embeddedSpecSha256"]);
+    assert_ne!(
+        refresh["liveCanonicalSha256"],
+        refresh["embeddedCanonicalSha256"]
+    );
+    assert!(refresh.get("liveSpecSha256").is_none());
 }
 
 #[test]
@@ -850,8 +854,15 @@ fn schema_refresh_ignores_formatting_but_detects_content_drift() {
         assert_eq!(output.status.code(), Some(i32::from(changed)));
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["status"], if changed { "drift" } else { "current" });
-        assert_ne!(result["embeddedSpecSha256"], result["liveSpecSha256"]);
-        assert_eq!(result["comparison"], "parsed-json");
+        assert_eq!(
+            result["embeddedCanonicalSha256"] == result["liveCanonicalSha256"],
+            !changed
+        );
+        assert_ne!(
+            result["embeddedSpecSha256"],
+            result["embeddedCanonicalSha256"]
+        );
+        assert_eq!(result["comparison"], "canonical-json");
     }
 }
 
@@ -1519,7 +1530,8 @@ fn doctor_fix_backs_up_formats_and_undo_restores_latest_config() {
     assert_eq!(report["status"], "healthy");
     let backup_path = PathBuf::from(report["backupPath"].as_str().unwrap());
     assert!(backup_path.exists());
-    assert_eq!(fs::metadata(&backup_path).unwrap().mode() & 0o777, 0o644);
+    // The backup is always 0600, even though the config it copied was 0644.
+    assert_eq!(fs::metadata(&backup_path).unwrap().mode() & 0o777, 0o600);
     assert!(report["actions"]
         .as_array()
         .unwrap()

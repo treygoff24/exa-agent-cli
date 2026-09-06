@@ -896,6 +896,7 @@ fn successful_payment_trace_scrubs_echoed_payment_secret_values() {
                 signature: &signature,
             }),
             request_id: "req_payment_success_trace".to_string(),
+            no_auto_retry: false,
         },
     )
     .unwrap();
@@ -984,6 +985,7 @@ fn payment_trace_url_redacts_percent_encoded_x402_and_mpp_secrets() {
                 globals: &cli,
                 auth: raw_auth,
                 request_id: format!("req_payment_encoded_url_{auth}"),
+                no_auto_retry: false,
             },
         )
         .unwrap();
@@ -1026,6 +1028,7 @@ fn payment_error_details_scrub_secret_json_keys() {
                 signature: &signature,
             }),
             request_id: "req_payment_error_key".to_string(),
+            no_auto_retry: false,
         },
     )
     .unwrap_err();
@@ -1074,6 +1077,7 @@ fn successful_payment_raw_response_scrubs_secret_and_preserves_other_bytes() {
                 signature: &signature,
             }),
             request_id: "req_payment_raw_response".to_string(),
+            no_auto_retry: false,
         },
     )
     .unwrap();

@@ -151,8 +151,10 @@ Exa does not document deduplication for this beta. An ambiguous failure records
 the request and points to a scoped batch listing instead of risking a duplicate.
 
 `agent runs stop ID --yes` completes a max-effort run early with the results it
-has gathered. It differs from cancellation and still incurs accrued usage.
-The stop command adds the required beta token automatically.
+has gathered and still incurs accrued usage. `agent runs cancel ID --yes`
+terminates the run and discards those results, so both are gated the same way.
+The stop command adds the required beta token automatically, and neither command
+repeats a token you already supplied through `--beta` or `--header Exa-Beta:`.
 
 ### Presets and macros
 

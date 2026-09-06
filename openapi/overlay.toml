@@ -13,6 +13,8 @@
 [operations."cancelAgentRun"]
 cli_path = "agent runs cancel"
 namespace = "api"
+dangerous = true
+confirm = "yes"
 
 [operations."stopAgentRun"]
 cli_path = "agent runs stop"
@@ -51,11 +53,13 @@ cli_path = "batches create"
 namespace = "api"
 idempotency_sensitive = true
 
+# Not `required`: --body, --set, and presets are equally valid sources for `requests`, and
+# build_flag_body would reject a missing required field before those layers merge. The
+# createBatch validator enforces presence over the merged body instead.
 [[operations."createBatch".fields]]
 flag = "requests"
 body_path = "requests"
 kind = "json"
-required = true
 input_kind = "flag"
 input_name = "--requests"
 value_name = "JSON|@file"

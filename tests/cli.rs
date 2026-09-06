@@ -158,6 +158,7 @@ fn assert_confirmation_required(output: &Output, command: &str) -> serde_json::V
 
 fn destructive_refusal_args(command: &str) -> Option<Vec<&'static str>> {
     Some(match command {
+        "agent runs cancel" => vec!["agent", "runs", "cancel", "run_abc123"],
         "agent runs stop" => vec!["agent", "runs", "stop", "run_abc123"],
         "batches cancel" => vec!["batches", "cancel", "batch_abc123"],
         "batches delete" => vec!["batches", "delete", "batch_abc123"],

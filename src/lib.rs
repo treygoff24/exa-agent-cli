@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
-mod batches;
+pub mod batches;
 pub mod cli;
 pub mod config;
 pub mod doctor;
@@ -2691,7 +2691,7 @@ fn validate_agent_run_budget(
                 .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
             ));
         }
-        if !beta_has_token(globals.beta.as_deref(), "agent-max-effort-2026-07-27") {
+        if !beta_opted_in(globals, AGENT_MAX_EFFORT_BETA)? {
             return Err(CliError::Usage(
                 Diag::new(
                     "invalid_flag_combination",
@@ -2774,8 +2774,27 @@ fn format_agent_cost(value: f64) -> String {
     }
 }
 
+/// The beta opt-in `POST /agent/runs/{id}/stop` and `effort: max` both require. The vendored
+/// spec names it in prose only, so `tests/spec_drift.rs` pins this copy against the spec.
+pub const AGENT_MAX_EFFORT_BETA: &str = "agent-max-effort-2026-07-27";
+
 fn beta_has_token(raw: Option<&str>, token: &str) -> bool {
     raw.is_some_and(|raw| raw.split(',').any(|part| part.trim() == token))
+}
+
+/// True when `token` is already opted in, whether through `--beta` or a hand-written
+/// `--header 'Exa-Beta: …'`. Both reach the wire as one `Exa-Beta` header, so every beta gate and
+/// every required-token injection has to read both sources or it double-sends (or wrongly
+/// refuses) a token the user supplied.
+fn beta_opted_in(globals: &GlobalArgs, token: &str) -> Result<bool, CliError> {
+    if beta_has_token(globals.beta.as_deref(), token) {
+        return Ok(true);
+    }
+    Ok(parse_user_headers(&globals.headers)?
+        .iter()
+        .any(|(name, value)| {
+            name.eq_ignore_ascii_case("Exa-Beta") && beta_has_token(Some(value), token)
+        }))
 }
 
 fn agent_input_rows_json(raw_rows: &[String]) -> Result<Option<String>, CliError> {
@@ -2932,12 +2951,7 @@ fn dispatch_agent_runs_list(
 }
 
 fn dispatch_agent_runs_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["agent", "runs", "get"]).expect("agent runs get");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["agent", "runs", "get"], id, globals, pretty)
 }
 
 fn dispatch_agent_runs_events(
@@ -3026,30 +3040,12 @@ fn dispatch_agent_runs_cancel(
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["agent", "runs", "cancel"]).expect("agent runs cancel");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["agent", "runs", "cancel"], id, globals, pretty)
 }
 
 fn dispatch_agent_runs_stop(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["agent", "runs", "stop"]).expect("agent runs stop");
-    let globals = globals_with_required_beta(globals, "agent-max-effort-2026-07-27");
-    with_typed_error_context(op, &globals, || {
-        let spec = build_typed_spec(op, &[], &globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(
-            spec,
-            &globals,
-            pretty,
-            Some(path.as_str()),
-            &[],
-            false,
-            None,
-        )
-    })
+    let globals = globals_with_required_beta(globals, AGENT_MAX_EFFORT_BETA)?;
+    dispatch_id_command(&["agent", "runs", "stop"], id, &globals, pretty)
 }
 
 fn dispatch_agent_runs_delete(
@@ -3057,9 +3053,47 @@ fn dispatch_agent_runs_delete(
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["agent", "runs", "delete"]).expect("agent runs delete");
+    dispatch_id_command(&["agent", "runs", "delete"], id, globals, pretty)
+}
+
+/// Operations whose replay is not provably safe, so `--retry` never applies. The Exa spec
+/// documents no server-side idempotency for the beta Batch API, and a replayed batch creation
+/// bills twice.
+fn never_auto_retry(op: &registry::OperationDef) -> bool {
+    op.operation_id == "createBatch"
+}
+
+/// Dispatch an operation whose only input is the `{id}` path parameter: look it up by registry
+/// segments, build its (empty) typed body, substitute the id, and route the request.
+fn dispatch_id_command(
+    segments: &[&str],
+    id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = registry::lookup_by_segments(segments)
+        .unwrap_or_else(|| panic!("{} is in the registry", segments.join(" ")));
+    dispatch_id_command_with_spec(op, id, globals, pretty, |op, globals| {
+        build_typed_spec(op, &[], globals)
+    })
+}
+
+/// `dispatch_id_command` for the two `{id}` operations that build a body from named flags.
+fn dispatch_id_command_with_spec<F>(
+    op: &'static registry::OperationDef,
+    id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+    build_spec: F,
+) -> Result<i32, CliError>
+where
+    F: FnOnce(
+        &'static registry::OperationDef,
+        &GlobalArgs,
+    ) -> Result<request::RequestSpec, CliError>,
+{
     with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
+        let spec = build_spec(op, globals)?;
         let path = checked_substitute_path(op.api_path, &[("id", id)])?;
         dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
@@ -3075,9 +3109,12 @@ fn globals_with_extra_headers(globals: &GlobalArgs, extra: &[(String, String)]) 
     merged
 }
 
-fn globals_with_required_beta(globals: &GlobalArgs, required: &str) -> GlobalArgs {
-    if beta_has_token(globals.beta.as_deref(), required) {
-        return globals.clone();
+fn globals_with_required_beta(
+    globals: &GlobalArgs,
+    required: &str,
+) -> Result<GlobalArgs, CliError> {
+    if beta_opted_in(globals, required)? {
+        return Ok(globals.clone());
     }
     let mut merged = globals.clone();
     merged.beta = Some(
@@ -3090,7 +3127,7 @@ fn globals_with_required_beta(globals: &GlobalArgs, required: &str) -> GlobalArg
             None => required.to_string(),
         },
     );
-    merged
+    Ok(merged)
 }
 
 fn dispatch_research(
@@ -3138,6 +3175,14 @@ fn validate_cursor_pagination(pagination: &PaginationArgs) -> Result<(), CliErro
         return Err(CliError::Usage(
             Diag::new("invalid_value", "--max-pages must be at least 1")
                 .with_suggestion("exa-agent websets events list --all --max-pages 1"),
+        ));
+    }
+    // Every cursor-paginated operation declares `minimum: 1` on `limit` upstream.
+    if pagination.limit == Some(0) {
+        return Err(CliError::Usage(
+            Diag::new("invalid_value", "--limit must be at least 1")
+                .with_details(serde_json::json!({ "field": "limit", "min": 1, "received": 0 }))
+                .with_suggestion("exa-agent websets events list --limit 100"),
         ));
     }
     if let Some(raw) = &pagination.page_delay {
@@ -3612,12 +3657,7 @@ fn parse_metadata_kv(raw: &str) -> Result<(String, String), CliError> {
 }
 
 fn dispatch_monitor_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["monitor", "get"]).expect("monitor get is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["monitor", "get"], id, globals, pretty)
 }
 
 #[derive(Clone, Copy)]
@@ -3639,10 +3679,8 @@ fn dispatch_monitor_update(
 ) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["monitor", "update"])
         .expect("monitor update is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_monitor_update_spec(op, fields, globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
+    dispatch_id_command_with_spec(op, id, globals, pretty, |op, globals| {
+        build_monitor_update_spec(op, fields, globals)
     })
 }
 
@@ -3689,23 +3727,11 @@ fn build_monitor_update_spec(
 }
 
 fn dispatch_monitor_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["monitor", "delete"])
-        .expect("monitor delete is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["monitor", "delete"], id, globals, pretty)
 }
 
 fn dispatch_monitor_trigger(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["monitor", "trigger"])
-        .expect("monitor trigger is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["monitor", "trigger"], id, globals, pretty)
 }
 
 fn dispatch_monitor_batch(
@@ -4218,31 +4244,15 @@ fn build_websets_update_spec(
 fn dispatch_websets_update(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     let op = registry::lookup_by_segments(&["websets", "update"])
         .expect("websets update is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_websets_update_spec(op, globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command_with_spec(op, id, globals, pretty, build_websets_update_spec)
 }
 
 fn dispatch_websets_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["websets", "delete"])
-        .expect("websets delete is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["websets", "delete"], id, globals, pretty)
 }
 
 fn dispatch_websets_cancel(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["websets", "cancel"])
-        .expect("websets cancel is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
-    })
+    dispatch_id_command(&["websets", "cancel"], id, globals, pretty)
 }
 
 fn dispatch_websets_items(
@@ -6144,11 +6154,7 @@ fn validate_highlights_beta(
                 .any(|key| options.get(*key).is_some_and(|value| !value.is_null()))
         });
     const BETA: &str = "dynamic-highlights-2026-08-28";
-    let headers = parse_user_headers(&globals.headers)?;
-    let opted_in = beta_has_token(globals.beta.as_deref(), BETA)
-        || headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("Exa-Beta") && beta_has_token(Some(value), BETA)
-        });
+    let opted_in = beta_opted_in(globals, BETA)?;
     if needs_beta && !opted_in {
         return Err(CliError::Usage(Diag::new(
             "invalid_flag_combination",
@@ -6624,6 +6630,7 @@ fn execute_paginated_live<T: Transport>(
                 globals,
                 auth: RawAuth::Api(credential),
                 request_id,
+                no_auto_retry: never_auto_retry(spec.op),
             },
         );
         let result = match result {
@@ -7179,6 +7186,7 @@ fn execute_typed_live<T: Transport>(
             globals,
             auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
+            no_auto_retry: never_auto_retry(spec.op),
         };
         return match execute_streaming_live(
             transport,
@@ -7212,6 +7220,7 @@ fn execute_typed_live<T: Transport>(
             globals,
             auth: RawAuth::Api(credential),
             request_id: execution.request_id.to_string(),
+            no_auto_retry: never_auto_retry(spec.op),
         },
     ) {
         Ok(result) => result,
@@ -10276,6 +10285,7 @@ fn dispatch_raw_inner(
     let timeout = transport::resolve_timeout(globals, &cfg)?;
     let transport = UreqTransport::new(timeout);
     let raw_auth = raw_auth(credential.as_ref(), payment_secret.as_ref(), globals);
+    let no_auto_retry = transport::raw_path_creates_batch(method, &args.path);
     if body_wants_stream(&body) {
         return execute_streaming_live(
             &transport,
@@ -10287,6 +10297,7 @@ fn dispatch_raw_inner(
                 globals,
                 auth: raw_auth,
                 request_id: request_id.to_string(),
+                no_auto_retry,
             },
             "raw",
             None,
@@ -10305,6 +10316,7 @@ fn dispatch_raw_inner(
             globals,
             auth: raw_auth,
             request_id: request_id.to_string(),
+            no_auto_retry,
         },
     )?;
 

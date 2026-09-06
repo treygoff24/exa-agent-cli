@@ -527,6 +527,10 @@ fn externally_sourced_required(operation_id: &str) -> &'static [&'static str] {
         // required by the bespoke validator in src/lib.rs (`monitor batch requires
         // \`action\``, `monitor batch requires a non-empty \`filter\` object`).
         "batchMonitors" => &["action", "filter"],
+        // Same shape: `requests` may arrive via --requests, --body, --set, or a preset, so
+        // the overlay leaves it optional and `batches::validate_create_body` requires a
+        // non-empty array on the merged body.
+        "createBatch" => &["requests"],
         // `websets monitors create` builds all three from typed clap flags outside the
         // registry: --webset-id, --cron/--timezone, and --search-behavior/--query/--count.
         "monitors-create" => &["websetId", "cadence", "behavior"],

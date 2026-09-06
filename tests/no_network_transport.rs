@@ -112,6 +112,7 @@ fn no_network_guard_stops_before_custom_stream_transport_override() {
         globals: &cli.globals,
         auth: exa_agent_cli::transport::RawAuth::Api(&credential),
         request_id: "req_guard".to_string(),
+        no_auto_retry: false,
     };
     let mut on_item = |_item: StreamItem<'_>| Ok(());
     let error = execute_raw_stream_with_request_id(&transport, params, &mut on_item).unwrap_err();

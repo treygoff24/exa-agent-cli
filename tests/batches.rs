@@ -1,9 +1,11 @@
 use serde_json::Value;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -477,6 +479,12 @@ fn cancellation_deletion_and_stop_require_yes_but_preview_without_it() {
             vec!["agent", "runs", "stop", "agent_run_abc"],
             "/agent/runs/agent_run_abc/stop",
         ),
+        // Cancel discards the results the run gathered, so it is gated at least as hard as stop,
+        // which keeps them.
+        (
+            vec!["agent", "runs", "cancel", "agent_run_abc"],
+            "/agent/runs/agent_run_abc/cancel",
+        ),
     ];
     for (args, path) in cases {
         let mut preview_args = args.clone();
@@ -664,4 +672,153 @@ metadata = {origin="preset"}
         );
     }
     fs::remove_dir_all(directory).unwrap();
+}
+
+/// Answers every request with a 500 and counts them. `stop_counting_server` unblocks the accept
+/// loop once the command under test has exited.
+fn counting_error_server() -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&count);
+    let server = thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let request = read_http_request(&mut stream);
+            if request.starts_with("STOP") {
+                break;
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+            let body = r#"{"error":"upstream is down"}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.flush();
+            // Drain before closing: a reset would throw away the response the client is reading.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.read_to_end(&mut Vec::new());
+        }
+    });
+    (format!("http://{address}"), count, server)
+}
+
+fn stop_counting_server(base_url: &str, server: thread::JoinHandle<()>) {
+    let address = base_url.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(address).expect("stop the counting server");
+    stream.write_all(b"STOP / HTTP/1.1\r\n\r\n").unwrap();
+    stream.flush().unwrap();
+    server.join().expect("counting server");
+}
+
+fn run_against(base_url: &str, args: &[&str]) -> Output {
+    let pending = temp_path("retry-pending").join("pending-runs.jsonl");
+    fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
+    command
+        .args(args)
+        .args(["--api-key", "test-key-abcdef12", "--base-url", base_url])
+        .env_remove("EXA_AGENT_NO_NETWORK")
+        .env_remove("EXA_PROFILE")
+        .env_remove("EXA_OUTPUT")
+        .env("EXA_AGENT_PENDING_RUNS", pending)
+        .env("EXA_AGENT_CONFIG", temp_path("config").join("config.toml"))
+        .env(
+            "EXA_AGENT_CREDENTIALS",
+            temp_path("credentials").join("credentials.json"),
+        );
+    command.output().expect("run exa-agent against the server")
+}
+
+/// Batch creation may bill even when the response never arrives and the Exa spec documents no
+/// server-side idempotency for it, so `--retry` never applies — not even with an explicit
+/// `Idempotency-Key`. The `search` leg is the control: the same flags do retry there.
+#[test]
+fn batch_create_never_retries_but_search_does() {
+    let (base_url, batch_requests, batch_server) = counting_error_server();
+    let batch = run_against(
+        &base_url,
+        &[
+            "batches",
+            "create",
+            "--requests",
+            VALID_REQUESTS,
+            "--retry",
+            "3",
+            "--idempotency-key",
+            "batch-key-1",
+            "--compact",
+        ],
+    );
+    stop_counting_server(&base_url, batch_server);
+    assert!(!batch.status.success());
+    assert_eq!(
+        batch_requests.load(Ordering::SeqCst),
+        1,
+        "an undocumented idempotency key must not authorize replaying a batch creation"
+    );
+
+    let (search_url, search_requests, search_server) = counting_error_server();
+    let search = run_against(
+        &search_url,
+        &[
+            "search",
+            "sanity",
+            "--retry",
+            "3",
+            "--idempotency-key",
+            "search-key-1",
+            "--compact",
+        ],
+    );
+    stop_counting_server(&search_url, search_server);
+    assert!(!search.status.success());
+    assert_eq!(
+        search_requests.load(Ordering::SeqCst),
+        4,
+        "--retry 3 with an idempotency key must still retry an ordinary POST"
+    );
+}
+
+/// `requests` is optional at the flag layer so `--body`, `--set`, and presets can supply it. With
+/// nothing supplying it the user gets the message that names all three routes.
+#[test]
+fn create_without_requests_names_every_source() {
+    let output = run(&["batches", "create", "--dry-run", "--compact"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "missing_required_argument");
+    assert_eq!(
+        error["error"]["message"],
+        "batches create requires a non-empty requests array via --requests, --body, or --set"
+    );
+    assert_eq!(error["error"]["details"]["field"], "requests");
+
+    let body_only = stdout_json(&run(&[
+        "batches",
+        "create",
+        "--body",
+        r#"{"requests":[{"customId":"body-only","method":"POST","url":"/search","body":{"query":"q"}}]}"#,
+        "--dry-run",
+        "--compact",
+    ]));
+    assert_eq!(
+        body_only["data"]["request"]["body"]["requests"][0]["customId"],
+        "body-only"
+    );
+}
+
+/// The `--limit 0` rule lives in the shared cursor-pagination validator, so it now covers every
+/// cursor-paginated list rather than `batches list` alone.
+#[test]
+fn zero_limit_is_rejected_on_a_non_batch_list() {
+    let output = run(&["monitor", "list", "--limit", "0", "--compact"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_value");
+    assert_eq!(error["error"]["message"], "--limit must be at least 1");
+    assert_eq!(error["error"]["details"]["field"], "limit");
+    assert_eq!(error["error"]["details"]["min"], 1);
 }

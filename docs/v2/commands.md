@@ -164,7 +164,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET /agent/runs` | `exa-agent agent runs list` | Cursor. |
 | `GET /agent/runs/{id}` | `exa-agent agent runs get ID` | Status read; surface `stopReason`. |
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
-| `POST /agent/runs/{id}/cancel` | `exa-agent agent runs cancel ID` | Safe; returns terminal run if already done. |
+| `POST /agent/runs/{id}/cancel` | `exa-agent agent runs cancel ID --yes` | Discards gathered results; returns terminal run if already done. |
 | `DELETE /agent/runs/{id}` | `exa-agent agent runs delete ID --yes` | Destructive. |
 | `/research/v1` (all verbs) | `exa-agent research …` (stub) | **Retired upstream** (HTTP 410, 2026-08). Local stub errors with `research_retired` and the deep-reasoning replacement; see D40. |
 | `GET/POST /websets/v0/websets` | `exa-agent websets list/create` | `create` is `[create-POST]`. Body-first; `--body @file` + `--set`. |
@@ -440,7 +440,7 @@ exa-agent agent runs list   --limit N --cursor TOKEN --all
 exa-agent agent runs get    ID
 exa-agent agent runs events ID --limit N --cursor TOKEN          # JSON pages
 exa-agent agent runs events ID --stream --last-event-id ID       # SSE replay
-exa-agent agent runs cancel ID
+exa-agent agent runs cancel ID --yes                            # discards gathered results
 exa-agent agent runs stop   ID --yes                            # max effort: finish early with accrued results
 exa-agent agent runs delete ID --yes
 ```

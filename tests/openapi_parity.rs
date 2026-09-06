@@ -1,6 +1,6 @@
 use exa_agent_cli::registry;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::Command;
 
@@ -56,52 +56,67 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
     let mut skipped_ids = BTreeSet::new();
     let mut failures = Vec::new();
 
-    for op in registry::REGISTRY.iter().filter(|op| !op.fields.is_empty()) {
-        let shape = match request_body_shape(&specs, op.operation_id) {
-            Ok(Some((spec_name, shape))) => {
-                checked.push(format!("{} ({spec_name})", op.operation_id));
-                shape
-            }
-            Ok(None) => {
-                skipped.push(format!(
-                    "{}: no resolvable OpenAPI JSON requestBody schema",
-                    op.operation_id
-                ));
-                skipped_ids.insert(op.operation_id);
+    for op in registry::REGISTRY.iter() {
+        let (spec, schema, shape) = match request_body_shape(&specs, op.operation_id) {
+            BodyLookup::Shape(spec, schema, shape) => (spec, schema, shape),
+            // The operation exists upstream and simply has no JSON request body (every GET,
+            // most DELETEs). Nothing to compare, and nothing worth reporting as a skip
+            // unless the overlay models fields for it anyway.
+            BodyLookup::NoRequestBody => {
+                if !op.fields.is_empty() {
+                    skipped.push(format!(
+                        "{}: no resolvable OpenAPI JSON requestBody schema",
+                        op.operation_id
+                    ));
+                    skipped_ids.insert(op.operation_id);
+                }
                 continue;
             }
-            Err(err) => {
+            BodyLookup::NoOperation => {
+                if !op.fields.is_empty() {
+                    skipped.push(format!(
+                        "{}: no such operation in any vendored spec",
+                        op.operation_id
+                    ));
+                    skipped_ids.insert(op.operation_id);
+                }
+                continue;
+            }
+            BodyLookup::Failed(err) => {
                 skipped.push(format!("{}: {err}", op.operation_id));
                 skipped_ids.insert(op.operation_id);
                 continue;
             }
         };
+        checked.push(format!("{} ({})", op.operation_id, spec.name));
 
         for field in op.fields {
-            let top = top_level_segment(field.body_path);
-            if !shape.properties.contains(top) {
+            if let Err(err) = resolve_body_path(&spec.value, schema, field.body_path) {
                 failures.push(format!(
-                    "{} field `{}` body_path `{}` has top-level segment `{}` missing from OpenAPI requestBody properties {:?}",
-                    op.operation_id, field.flag, field.body_path, top, shape.properties
+                    "{} field `{}` body_path `{}`: {err}",
+                    op.operation_id, field.flag, field.body_path
                 ));
             }
         }
 
+        // The required half runs for every operation with a request body, including the
+        // ones the registry models no fields for — those expose their required properties
+        // through bespoke clap flags, and nothing else notices when one disappears.
         let required_fields: BTreeSet<&str> = op
             .fields
             .iter()
             .filter(|field| field.required)
             .map(|field| top_level_segment(field.body_path))
             .collect();
-        let positional_required = positional_required_allowlist(op.operation_id);
+        let externally_sourced = externally_sourced_required(op.operation_id);
         for required in &shape.required {
             if required_fields.contains(required.as_str())
-                || positional_required.contains(&required.as_str())
+                || externally_sourced.contains(&required.as_str())
             {
                 continue;
             }
             failures.push(format!(
-                "{} OpenAPI required property `{}` is not covered by a required FieldDef or positional-source allowlist; required modeled top-level fields: {:?}",
+                "{} OpenAPI required property `{}` is not covered by a required FieldDef or the externally-sourced allowlist; required modeled top-level fields: {:?}",
                 op.operation_id, required, required_fields
             ));
         }
@@ -240,6 +255,58 @@ fn agent_data_source_runtime_accepts_current_openapi_provider_enum() {
     assert_eq!(error["error"]["details"]["accepted"], expected);
 }
 
+/// `openapi/PROVENANCE.md` went six operations and two hashes stale while
+/// `xtask vendor-spec --check` stayed green, because that check compared `info.title` and
+/// `info.version` — neither of which moves when upstream adds operations. The record now
+/// lives in `openapi/provenance.toml` and is re-measured here as well, so a re-vendor that
+/// forgets it fails in the ordinary test run rather than only in a tool nobody runs.
+#[test]
+fn provenance_records_the_committed_specs() {
+    use sha2::{Digest, Sha256};
+
+    let record: toml::Value = toml::from_str(
+        &fs::read_to_string("openapi/provenance.toml").expect("read openapi/provenance.toml"),
+    )
+    .expect("parse openapi/provenance.toml");
+    let specs = load_specs();
+    for (section, path, name) in [
+        ("exa", "openapi/exa-openapi.json", "exa-openapi"),
+        ("admin", "openapi/team-management.json", "team-management"),
+    ] {
+        let entry = record
+            .get(section)
+            .unwrap_or_else(|| panic!("provenance.toml has no [{section}] table"));
+        assert_eq!(
+            entry.get("vendored_path").and_then(toml::Value::as_str),
+            Some(path),
+            "[{section}] vendored_path"
+        );
+        let bytes = fs::read(path).unwrap_or_else(|err| panic!("read {path}: {err}"));
+        assert_eq!(
+            entry.get("vendored_sha256").and_then(toml::Value::as_str),
+            Some(format!("{:x}", Sha256::digest(&bytes)).as_str()),
+            "[{section}] vendored_sha256 is stale; re-run `cargo run -p xtask -- vendor-spec --check`"
+        );
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .expect("loaded spec");
+        let operations = spec.value["paths"]
+            .as_object()
+            .expect("OpenAPI paths")
+            .values()
+            .filter_map(Value::as_object)
+            .flat_map(|methods| methods.values())
+            .filter_map(|operation| operation.get("operationId"))
+            .count() as i64;
+        assert_eq!(
+            entry.get("operations").and_then(toml::Value::as_integer),
+            Some(operations),
+            "[{section}] operations is stale; the spec now has {operations}"
+        );
+    }
+}
+
 fn load_specs() -> Vec<SpecDoc> {
     [
         ("openapi/exa-openapi.json", "exa-openapi"),
@@ -256,10 +323,17 @@ fn load_specs() -> Vec<SpecDoc> {
     .collect()
 }
 
-fn request_body_shape(
-    specs: &[SpecDoc],
-    operation_id: &str,
-) -> Result<Option<(&'static str, BodyShape)>, String> {
+/// What the vendored specs say about one operation's request body. Distinguishing "this
+/// operation has no request body" from "this operation is not in any vendored spec" is what
+/// lets the required-property check run over every operation without drowning in skips.
+enum BodyLookup<'a> {
+    Shape(&'a SpecDoc, &'a Value, BodyShape),
+    NoRequestBody,
+    NoOperation,
+    Failed(String),
+}
+
+fn request_body_shape<'a>(specs: &'a [SpecDoc], operation_id: &str) -> BodyLookup<'a> {
     for spec in specs {
         let Some(operation) = find_operation(&spec.value, operation_id) else {
             continue;
@@ -270,12 +344,14 @@ fn request_body_shape(
             .and_then(|content| content.get("application/json"))
             .and_then(|json| json.get("schema"))
         else {
-            return Ok(None);
+            return BodyLookup::NoRequestBody;
         };
-        let shape = collect_shape(&spec.value, schema, 0)?;
-        return Ok(Some((spec.name, shape)));
+        return match collect_shape(&spec.value, schema, 0) {
+            Ok(shape) => BodyLookup::Shape(spec, schema, shape),
+            Err(err) => BodyLookup::Failed(err),
+        };
     }
-    Ok(None)
+    BodyLookup::NoOperation
 }
 
 fn find_operation<'a>(doc: &'a Value, operation_id: &str) -> Option<&'a Value> {
@@ -346,6 +422,72 @@ fn collect_shape(doc: &Value, schema: &Value, depth: usize) -> Result<BodyShape,
     }
 }
 
+/// Walk a dotted `body_path` segment by segment through the request-body schema, merging
+/// `$ref`, `allOf`, `oneOf`, and `anyOf` branches at every level. Checking only the first
+/// segment let a nested typo — `search.includeDomain` for `search.includeDomains` — pass the
+/// gate while the CLI silently sent a property the API drops.
+fn resolve_body_path(doc: &Value, schema: &Value, body_path: &str) -> Result<(), String> {
+    let mut current: Vec<&Value> = vec![schema];
+    let mut walked: Vec<&str> = Vec::new();
+    for segment in body_path.split('.') {
+        if segment.is_empty() {
+            return Err(format!("empty segment in body path `{body_path}`"));
+        }
+        let mut properties: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+        for schema in &current {
+            merge_properties(doc, schema, 0, &mut properties)?;
+        }
+        let Some(next) = properties.remove(segment) else {
+            let known: Vec<&str> = properties.keys().copied().collect();
+            let parent = if walked.is_empty() {
+                "the request body".to_string()
+            } else {
+                format!("`{}`", walked.join("."))
+            };
+            return Err(format!(
+                "segment `{segment}` is not a property of {parent}; available: {known:?}"
+            ));
+        };
+        walked.push(segment);
+        current = next;
+    }
+    Ok(())
+}
+
+/// Collect every property name reachable from `schema` without descending into a property's
+/// own sub-schema, mapping each name to the sub-schemas the composition branches give it.
+fn merge_properties<'a>(
+    doc: &'a Value,
+    schema: &'a Value,
+    depth: usize,
+    out: &mut BTreeMap<&'a str, Vec<&'a Value>>,
+) -> Result<(), String> {
+    if depth > 8 {
+        return Err("body-path schema resolution exceeded depth limit".to_string());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return merge_properties(doc, resolve_schema_ref(doc, reference)?, depth + 1, out);
+    }
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (name, sub) in properties {
+            out.entry(name.as_str()).or_default().push(sub);
+        }
+    }
+    // An array of objects exposes its element's properties one level down, so a body path
+    // through it reads the same way an object's does.
+    if let Some(items) = schema.get("items") {
+        merge_properties(doc, items, depth + 1, out)?;
+    }
+    for composition in ["allOf", "oneOf", "anyOf"] {
+        if let Some(parts) = schema.get(composition).and_then(Value::as_array) {
+            for part in parts {
+                merge_properties(doc, part, depth + 1, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_schema_ref<'a>(doc: &'a Value, reference: &str) -> Result<&'a Value, String> {
     let name = reference
         .strip_prefix("#/components/schemas/")
@@ -363,10 +505,8 @@ impl BodyShape {
     }
 }
 
-/// Returns the top-level body-path segment only.
-///
-/// Known non-goal: nested typos like `entity.typ` are not caught here; validating
-/// nested segments would require per-branch oneOf/anyOf checking.
+/// The first body-path segment, which is the level OpenAPI `required` lists name. Whole-path
+/// validation is [`resolve_body_path`]'s job, not this one's.
 fn top_level_segment(body_path: &str) -> &str {
     body_path
         .split('.')
@@ -375,14 +515,21 @@ fn top_level_segment(body_path: &str) -> &str {
         .unwrap_or(body_path)
 }
 
-fn positional_required_allowlist(operation_id: &str) -> &'static [&'static str] {
+/// Required body properties the CLI supplies from something other than a required
+/// `FieldDef` — a positional argument, or a bespoke clap flag outside the registry. Every
+/// entry names a real, verified source; never use this to silence a property nothing sends.
+fn externally_sourced_required(operation_id: &str) -> &'static [&'static str] {
     match operation_id {
-        // Forward-looking net for required body properties sourced from positional
-        // args but not modeled as required FieldDefs. Redundant today: every entry
-        // is already covered by a required FieldDef. Only add genuine positional-
-        // sourced required body properties; never use this to silence a real miss.
+        // Positional arguments.
         "answer" | "createAgentRun" | "search" => &["query"],
         "findSimilar" => &["url"],
+        // `monitor batch` takes its body whole from --body/--set; both properties are
+        // required by the bespoke validator in src/lib.rs (`monitor batch requires
+        // \`action\``, `monitor batch requires a non-empty \`filter\` object`).
+        "batchMonitors" => &["action", "filter"],
+        // `websets monitors create` builds all three from typed clap flags outside the
+        // registry: --webset-id, --cron/--timezone, and --search-behavior/--query/--count.
+        "monitors-create" => &["websetId", "cadence", "behavior"],
         _ => &[],
     }
 }

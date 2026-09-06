@@ -937,12 +937,7 @@ impl AnswerArgs {
             ("text", bool_flag(self.text)),
             ("stream", bool_flag(self.stream)),
             ("model", self.model.clone()),
-            (
-                "user-location",
-                self.user_location
-                    .as_ref()
-                    .map(|value| serde_json::json!(value).to_string()),
-            ),
+            ("user-location", self.user_location.clone()),
         ]
     }
 }

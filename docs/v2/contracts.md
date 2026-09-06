@@ -400,6 +400,8 @@ Post-v1 repair is additive to this schema: `doctor --fix` may add `actions[]` (`
 `path`, optional `reason`/`requiredFlag`) and `backupPath`. `--fix --dry-run` emits `planned` actions
 without mutation. Formatting and config permission repairs need no extra flag; credential permission
 repairs require `--allow-auth`, and deleting spill files older than seven days requires
-`--allow-delete`. `doctor --undo` restores the latest timestamped config backup and consumes the
-latest-backup marker; it does not expose a history selector. All repair and undo paths remain offline
-unless `--online` is also explicit.
+`--allow-delete`. The backup copy is always written `0600`, whatever the config's own mode was, so a
+world-readable config is never duplicated into a world-readable snapshot; the pre-fix mode is recorded
+in the latest-backup marker instead. `doctor --undo` restores the latest timestamped config backup
+along with that recorded mode and consumes the marker; it does not expose a history selector. All
+repair and undo paths remain offline unless `--online` is also explicit.

@@ -1,0 +1,23 @@
+# Machine-checked vendoring record — the single source of truth for what was vendored.
+# `cargo run -p xtask -- vendor-spec --check` and `tests/openapi_parity.rs` assert
+# `vendored_sha256` and `operations` against the committed files, so this file cannot go
+# stale silently. PROVENANCE.md narrates it and deliberately keeps no second copy.
+#
+# `source_sha256` records the upstream bytes the vendored file came from. It is provenance
+# only: nothing offline can re-verify it, and re-fetching may legitimately change it.
+
+[exa]
+source_url = "https://exa.ai/docs/exa-spec.json"
+vendored_path = "openapi/exa-openapi.json"
+source_sha256 = "9d64d1e34417ad595a0bc2927db07d40c4e32336c09f46eddf294b11272df477"
+vendored_sha256 = "0ce2fee25690daa28a5ad4717fd0bd277225d4c4f6c88f226619f2ea3862a212"
+operations = 64
+verified = "2026-09-06"
+
+[admin]
+source_url = "https://exa.ai/docs/team-management-spec.yaml"
+vendored_path = "openapi/team-management.json"
+source_sha256 = "ac1778eaaf11f99ac547727130b53475a63802da1d53fe8f4f98635f0456bd0b"
+vendored_sha256 = "bd93463c7c6154accd3ca8eaa99b77ac875cce09a0f66291f2307ba3a822dc28"
+operations = 6
+verified = "2026-08-11"

@@ -1591,7 +1591,7 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
     let Some(raw) = body.get("numResults") else {
         return Ok(());
     };
-    if json_integer(raw).is_some_and(|value| (1.0..=100.0).contains(&value)) {
+    if matches!(raw.as_u64(), Some(1..=100)) {
         return Ok(());
     }
 
@@ -1599,7 +1599,7 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    if !raw.is_null() && json_integer(raw).is_none() {
+    if !raw.is_null() && raw.as_i64().is_none() && raw.as_u64().is_none() {
         return Err(CliError::Usage(
             Diag::new(
                 "invalid_field_type",
@@ -2080,8 +2080,14 @@ fn validate_context_tokens_num(body: &serde_json::Value) -> Result<(), CliError>
     {
         return Ok(());
     }
-    if let Some(n) = json_integer(value) {
-        if (50.0..=100_000.0).contains(&n) {
+    if let Some(n) = value.as_i64() {
+        if (50..=100_000).contains(&n) {
+            return Ok(());
+        }
+        return Err(context_tokens_invalid_value(value.clone(), true));
+    }
+    if let Some(n) = value.as_u64() {
+        if (50..=100_000).contains(&n) {
             return Ok(());
         }
         return Err(context_tokens_invalid_value(value.clone(), true));
@@ -2394,7 +2400,7 @@ fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(
         )));
     };
     if let Some(value) = obj.get("rateLimit") {
-        if json_unsigned_integer(value).is_none_or(|rate| rate > u32::MAX as u64) {
+        if value.as_u64().is_none_or(|rate| rate > u32::MAX as u64) {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("{command} rateLimit must be a non-negative integer"),
@@ -2402,7 +2408,7 @@ fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(
         }
     }
     if let Some(value) = obj.get("budgetCents") {
-        if !(value.is_null() || json_unsigned_integer(value).is_some()) {
+        if !(value.is_null() || value.as_u64().is_some()) {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("{command} budgetCents must be a non-negative integer or null"),
@@ -8627,9 +8633,9 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                     payment_mode: false,
                 },
             )?;
-            let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
-            // Vendoring normalizes object order and whitespace. Byte hashes remain useful
-            // provenance, but formatting differences do not mean the API contract drifted.
+            // Vendoring normalizes object order and whitespace, so drift is decided on
+            // canonical JSON rather than on bytes. `embeddedSpecSha256` stays in the
+            // envelope as provenance for the vendored file itself.
             let live: serde_json::Value =
                 serde_json::from_slice(&response.body).map_err(|error| {
                     CliError::Upstream(Diag::new(
@@ -8637,20 +8643,19 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                         format!("live OpenAPI document is not valid JSON: {error}"),
                     ))
                 })?;
-            let embedded: serde_json::Value =
-                serde_json::from_str(include_str!("../openapi/exa-openapi.json"))
-                    .expect("build.rs validates the embedded spec");
-            let current = live == embedded;
+            let live_canonical_sha256 = canonical_sha256(&live);
+            let current = live_canonical_sha256 == registry::EMBEDDED_SPEC_CANONICAL_SHA256;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
                     "ok": true,
                     "check": args.check,
-                    "comparison": "parsed-json",
+                    "comparison": "canonical-json",
                     "status": if current { "current" } else { "drift" },
                     "specUrl": spec_url,
                     "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,
-                    "liveSpecSha256": live_spec_sha256,
+                    "embeddedCanonicalSha256": registry::EMBEDDED_SPEC_CANONICAL_SHA256,
+                    "liveCanonicalSha256": live_canonical_sha256,
                 }),
                 "schema refresh",
                 globals,
@@ -8658,6 +8663,30 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             )?;
             Ok(i32::from(args.check && !current))
         }
+    }
+}
+
+/// SHA-256 over the document with every object's keys sorted, matching the
+/// `EMBEDDED_SPEC_CANONICAL_SHA256` build.rs bakes in. Key order and whitespace drop out;
+/// number *formatting* does not, so a spec that started writing `1.0` where the vendored
+/// copy has `1` would read as drift. The Exa spec has no such numbers today.
+fn canonical_sha256(value: &serde_json::Value) -> String {
+    let mut canonical = value.clone();
+    sort_json_object_keys(&mut canonical);
+    let bytes = serde_json::to_vec(&canonical).expect("serializing a parsed document cannot fail");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sort_json_object_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (_, child) in map.iter_mut() {
+                sort_json_object_keys(child);
+            }
+            map.sort_keys();
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_json_object_keys),
+        _ => {}
     }
 }
 
@@ -9194,11 +9223,6 @@ fn content_option_shape_issue(
             "search.contents.highlights",
             "highlights",
         ),
-        "answer" => body.get("userLocation").and_then(|value| {
-            (!(value.is_null() || value.is_string())).then(|| {
-                content_option_type_issue("userLocation", "user-location", "string or null", value)
-            })
-        }),
         _ => None,
     }
 }
@@ -9340,57 +9364,6 @@ fn validate_highlights_option_shape(
     )
 }
 
-/// JSON Schema integers are numeric values without a fractional part, including `1.0`.
-fn json_integer(value: &serde_json::Value) -> Option<f64> {
-    json_integer_text(value)?
-        .parse::<f64>()
-        .ok()
-        .filter(|number| number.is_finite())
-}
-
-fn json_unsigned_integer(value: &serde_json::Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| json_integer_text(value)?.parse().ok())
-}
-
-/// Inspect the exact decimal before any f64 conversion. serde_json's arbitrary_precision
-/// feature preserves fractions such as 9007199254740992.5 that would otherwise round away.
-fn json_integer_text(value: &serde_json::Value) -> Option<String> {
-    let raw = value.as_number()?.to_string();
-    let (mantissa, exponent) = match raw.split_once(['e', 'E']) {
-        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
-        None => (raw.as_str(), 0),
-    };
-    let negative = mantissa.starts_with('-');
-    let mantissa = mantissa.trim_start_matches('-');
-    let fraction_digits = mantissa
-        .split_once('.')
-        .map_or(0, |(_, fraction)| fraction.len());
-    let mut digits = mantissa.replace('.', "");
-    if digits.bytes().all(|byte| byte == b'0') {
-        return Some("0".to_string());
-    }
-    let scale = exponent.checked_sub(i32::try_from(fraction_digits).ok()?)?;
-    if scale < 0 {
-        let cut = digits.len().checked_sub(scale.unsigned_abs() as usize)?;
-        if !digits[cut..].bytes().all(|byte| byte == b'0') {
-            return None;
-        }
-        digits.truncate(cut);
-    } else {
-        // No finite upstream JSON number needs more zero expansion; avoid exponent-sized work.
-        if scale > 308 {
-            return None;
-        }
-        digits.extend(std::iter::repeat_n('0', scale as usize));
-    }
-    if negative {
-        digits.insert(0, '-');
-    }
-    Some(digits)
-}
-
 fn validate_positive_integer_field(
     value: Option<&serde_json::Value>,
     parent_field: &str,
@@ -9403,8 +9376,9 @@ fn validate_positive_integer_field(
     if value.is_null() {
         return None;
     }
-    let ok = json_integer(value)
-        .is_some_and(|number| number >= min as f64 && max.is_none_or(|max| number <= max as f64));
+    let ok = value
+        .as_u64()
+        .is_some_and(|number| number >= min && max.is_none_or(|max| number <= max));
     if ok {
         return None;
     }
@@ -9545,7 +9519,7 @@ fn validate_field_kind(
     }
     let (ok, expected): (bool, std::borrow::Cow<'static, str>) = match field.kind {
         FieldKind::Str => (value.is_string(), "string".into()),
-        FieldKind::Int => (json_integer(value).is_some(), "integer".into()),
+        FieldKind::Int => (value.is_i64() || value.is_u64(), "integer".into()),
         FieldKind::Num => (value.is_number(), "number".into()),
         FieldKind::Bool => (value.is_boolean(), "boolean".into()),
         FieldKind::StrArray => match field.item_template {

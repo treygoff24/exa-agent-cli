@@ -7,9 +7,10 @@ All notable changes to this project are documented here.
 ### Added
 
 - Batch create, list, get, cancel, and delete commands, plus early Agent run stop.
-  Batch wrappers are validated locally, completed-list filters survive pagination,
-  and commands add their required beta tokens. Batch and stop access remains subject
-  to Exa account entitlements.
+  Batch wrappers are validated locally over the merged body (`--requests`, `--body`,
+  `--set`, or a preset may supply `requests`), completed-list filters survive
+  pagination, and commands add their required beta tokens. Batch and stop access
+  remains subject to Exa account entitlements.
 - Answer model, system prompt, and country flags; the Polymarket Agent data source;
   monitor domain filters; Dynamic Highlights JSON and file input with beta and
   option-conflict checks.
@@ -20,22 +21,28 @@ All notable changes to this project are documented here.
 
 - Account feature-access failures now return `feature_not_enabled`, distinct from
   a rejected credential. This follows a live Batch API entitlement refusal.
-- Schema refresh compares parsed JSON rather than formatting-dependent byte hashes.
-  Integer validation preserves exact decimal input instead of rounding monetary values.
+- Schema refresh decides drift on canonical JSON (`embeddedCanonicalSha256` and
+  `liveCanonicalSha256`) rather than on formatting-dependent byte hashes;
+  `embeddedSpecSha256` stays as provenance for the vendored file.
 - `contents --text URL` and interleaved URL lists now treat `--text` as bare text
   retrieval, while retaining `--text full`, numeric caps, and explicit `--text=...`.
 - Recovery and pagination actions retain safe request scope, withhold private headers
   and filters, and stop offering a cursor after the pagination loop rejects it.
   Batch creation never auto-retries without a documented deduplication guarantee.
 - Auto-paginated NDJSON now honors `--output`, retains completed pages on later
-  failures, and avoids collecting the entire result set in memory. Intermediate
-  pages no longer offer redundant continuation commands.
+  failures, and avoids collecting the entire result set in memory. Pages are staged
+  in a sibling temp file, so an existing output file is never truncated before the
+  first page is written. Intermediate pages no longer offer redundant continuation
+  commands.
 - Completed Agent streams now offer resource follow-ups without copying their
   output again. Follow-up generation no longer clones whole retrieval responses.
 - Request previews now share header assembly with live requests, including custom
   headers, SSE Accept, idempotency keys, and the documented `Exa-Beta` header.
-- Doctor backups preserve original config permissions across undo and start private
-  before config bytes are written, independent of the shell's umask.
+  Beta tokens supplied through `--beta`, `--header 'Exa-Beta: …'`, or automatic
+  injection are folded into one `Exa-Beta` header with each token sent once, and
+  every beta gate accepts a token supplied by either flag.
+- Doctor config backups are always written `0600`, whatever the config's own mode
+  was; `--undo` restores the original mode recorded alongside the backup.
 - Output documentation now explains how to recover the complete stdout result after
   an output-file write failure without repeating a successful create.
 
@@ -43,6 +50,12 @@ All notable changes to this project are documented here.
 
 - A leading `@` in `contents --highlights` now selects a file. For a literal query
   such as `@openai roadmap`, use `--highlights '{"query":"@openai roadmap"}'`.
+- `agent runs cancel` now requires `--yes` for live calls, like `stop` and `delete`:
+  it discards the results the run has gathered.
+- Every cursor-paginated `list` rejects `--limit 0` locally as `invalid_value`
+  instead of forwarding it upstream.
+- `answer --user-location` is sent as the string upstream expects, and
+  `answer --text` is a boolean; `capabilities` now reports both kinds.
 
 ## 0.6.0 — 2026-08-11
 

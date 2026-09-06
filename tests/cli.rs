@@ -821,6 +821,58 @@ fn schema_refresh_check_reports_network_failure_instead_of_current() {
 }
 
 #[test]
+fn schema_refresh_ignores_formatting_but_detects_content_drift() {
+    let original: serde_json::Value =
+        serde_json::from_str(include_str!("../openapi/exa-openapi.json")).unwrap();
+    for changed in [false, true] {
+        let mut spec = original.clone();
+        let components = spec.as_object_mut().unwrap().remove("components").unwrap();
+        spec.as_object_mut()
+            .unwrap()
+            .insert("components".to_string(), components);
+        if changed {
+            spec["info"]["version"] = serde_json::json!("new-api-version");
+        }
+        let body = Box::leak(serde_json::to_vec(&spec).unwrap().into_boxed_slice());
+        let (base_url, server) = local_json_server(
+            |request| assert!(request.starts_with("GET /docs/exa-spec.json ")),
+            body,
+        );
+        let output = run(&[
+            "schema",
+            "refresh",
+            "--check",
+            "--base-url",
+            &base_url,
+            "--json",
+        ]);
+        server.join().unwrap();
+        assert_eq!(output.status.code(), Some(i32::from(changed)));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], if changed { "drift" } else { "current" });
+        assert_ne!(result["embeddedSpecSha256"], result["liveSpecSha256"]);
+        assert_eq!(result["comparison"], "parsed-json");
+    }
+}
+
+#[test]
+fn schema_refresh_rejects_a_non_json_document() {
+    let (base_url, server) = local_json_server(|_| {}, b"not-json");
+    let output = run(&[
+        "schema",
+        "refresh",
+        "--check",
+        "--base-url",
+        &base_url,
+        "--json",
+    ]);
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr_json(&output)["error"]["code"], "upstream_malformed");
+}
+
+#[test]
 fn robot_docs_commands_work_offline() {
     for (args, section) in [
         (vec!["robot-docs", "guide", "--compact"], "guide"),

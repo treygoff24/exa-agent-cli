@@ -8628,12 +8628,25 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                 },
             )?;
             let live_spec_sha256 = format!("{:x}", Sha256::digest(&response.body));
-            let current = live_spec_sha256 == registry::EMBEDDED_SPEC_SHA256;
+            // Vendoring normalizes object order and whitespace. Byte hashes remain useful
+            // provenance, but formatting differences do not mean the API contract drifted.
+            let live: serde_json::Value =
+                serde_json::from_slice(&response.body).map_err(|error| {
+                    CliError::Upstream(Diag::new(
+                        "upstream_malformed",
+                        format!("live OpenAPI document is not valid JSON: {error}"),
+                    ))
+                })?;
+            let embedded: serde_json::Value =
+                serde_json::from_str(include_str!("../openapi/exa-openapi.json"))
+                    .expect("build.rs validates the embedded spec");
+            let current = live == embedded;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_refresh.v1",
                     "ok": true,
                     "check": args.check,
+                    "comparison": "parsed-json",
                     "status": if current { "current" } else { "drift" },
                     "specUrl": spec_url,
                     "embeddedSpecSha256": registry::EMBEDDED_SPEC_SHA256,

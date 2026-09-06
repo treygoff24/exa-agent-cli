@@ -2167,7 +2167,9 @@ fn dispatch_admin_keys(
     match sub {
         AdminKeysCmd::Create(args) => dispatch_admin_keys_create(args, globals, pretty),
         AdminKeysCmd::List => dispatch_admin_keys_list(globals, pretty),
-        AdminKeysCmd::Get { key_id } => dispatch_admin_keys_get(key_id, globals, pretty),
+        AdminKeysCmd::Get { key_id } => {
+            dispatch_id_command(&["admin", "keys", "get"], key_id, globals, pretty)
+        }
         AdminKeysCmd::Update {
             key_id,
             name,
@@ -2283,20 +2285,6 @@ fn dispatch_admin_keys_list(globals: &GlobalArgs, pretty: bool) -> Result<i32, C
     with_typed_error_context(op, globals, || {
         let spec = build_typed_spec(op, &[], globals)?;
         dispatch_typed_command(spec, globals, pretty)
-    })
-}
-
-fn dispatch_admin_keys_get(
-    key_id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["admin", "keys", "get"])
-        .expect("admin keys get is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", key_id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
 
@@ -2563,11 +2551,17 @@ fn dispatch_agent(sub: &AgentCmd, globals: &GlobalArgs, pretty: bool) -> Result<
                 dispatch_agent_runs_create(args, globals, pretty, None, None)
             }
             AgentRunsCmd::List(pagination) => dispatch_agent_runs_list(pagination, globals, pretty),
-            AgentRunsCmd::Get { id } => dispatch_agent_runs_get(id, globals, pretty),
+            AgentRunsCmd::Get { id } => {
+                dispatch_id_command(&["agent", "runs", "get"], id, globals, pretty)
+            }
             AgentRunsCmd::Events(args) => dispatch_agent_runs_events(args, globals, pretty),
-            AgentRunsCmd::Cancel { id } => dispatch_agent_runs_cancel(id, globals, pretty),
+            AgentRunsCmd::Cancel { id } => {
+                dispatch_id_command(&["agent", "runs", "cancel"], id, globals, pretty)
+            }
             AgentRunsCmd::Stop { id } => dispatch_agent_runs_stop(id, globals, pretty),
-            AgentRunsCmd::Delete { id } => dispatch_agent_runs_delete(id, globals, pretty),
+            AgentRunsCmd::Delete { id } => {
+                dispatch_id_command(&["agent", "runs", "delete"], id, globals, pretty)
+            }
         },
     }
 }
@@ -2952,10 +2946,6 @@ fn dispatch_agent_runs_list(
     })
 }
 
-fn dispatch_agent_runs_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    dispatch_id_command(&["agent", "runs", "get"], id, globals, pretty)
-}
-
 fn dispatch_agent_runs_events(
     args: &AgentRunsEventsArgs,
     globals: &GlobalArgs,
@@ -3037,25 +3027,9 @@ fn agent_runs_events_headers(args: &AgentRunsEventsArgs) -> Vec<(String, String)
     headers
 }
 
-fn dispatch_agent_runs_cancel(
-    id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    dispatch_id_command(&["agent", "runs", "cancel"], id, globals, pretty)
-}
-
 fn dispatch_agent_runs_stop(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
     let globals = globals_with_required_beta(globals, AGENT_MAX_EFFORT_BETA)?;
     dispatch_id_command(&["agent", "runs", "stop"], id, &globals, pretty)
-}
-
-fn dispatch_agent_runs_delete(
-    id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    dispatch_id_command(&["agent", "runs", "delete"], id, globals, pretty)
 }
 
 /// Operations whose replay is not provably safe, so `--retry` never applies. The Exa spec
@@ -3233,7 +3207,7 @@ fn dispatch_monitor(sub: &MonitorCmd, globals: &GlobalArgs, pretty: bool) -> Res
     match sub {
         MonitorCmd::Create(args) => dispatch_monitor_create(args, globals, pretty),
         MonitorCmd::List(args) => dispatch_monitor_list(args, globals, pretty),
-        MonitorCmd::Get { id } => dispatch_monitor_get(id, globals, pretty),
+        MonitorCmd::Get { id } => dispatch_id_command(&["monitor", "get"], id, globals, pretty),
         MonitorCmd::Update {
             id,
             name,
@@ -3257,8 +3231,12 @@ fn dispatch_monitor(sub: &MonitorCmd, globals: &GlobalArgs, pretty: bool) -> Res
             globals,
             pretty,
         ),
-        MonitorCmd::Delete { id } => dispatch_monitor_delete(id, globals, pretty),
-        MonitorCmd::Trigger { id } => dispatch_monitor_trigger(id, globals, pretty),
+        MonitorCmd::Delete { id } => {
+            dispatch_id_command(&["monitor", "delete"], id, globals, pretty)
+        }
+        MonitorCmd::Trigger { id } => {
+            dispatch_id_command(&["monitor", "trigger"], id, globals, pretty)
+        }
         MonitorCmd::Batch(args) => dispatch_monitor_batch(args, globals, pretty),
         MonitorCmd::Runs { sub } => match sub {
             MonitorRunsCmd::List {
@@ -3658,10 +3636,6 @@ fn parse_metadata_kv(raw: &str) -> Result<(String, String), CliError> {
     Ok((key.to_string(), value.to_string()))
 }
 
-fn dispatch_monitor_get(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    dispatch_id_command(&["monitor", "get"], id, globals, pretty)
-}
-
 #[derive(Clone, Copy)]
 struct MonitorUpdateFields<'a> {
     name: Option<&'a str>,
@@ -3726,14 +3700,6 @@ fn build_monitor_update_spec(
         ));
     }
     Ok(spec)
-}
-
-fn dispatch_monitor_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    dispatch_id_command(&["monitor", "delete"], id, globals, pretty)
-}
-
-fn dispatch_monitor_trigger(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    dispatch_id_command(&["monitor", "trigger"], id, globals, pretty)
 }
 
 fn dispatch_monitor_batch(
@@ -3913,8 +3879,12 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
         WebsetsCmd::List(args) => dispatch_websets_list(args, globals, pretty),
         WebsetsCmd::Get(args) => dispatch_websets_get(args, globals, pretty),
         WebsetsCmd::Update { id } => dispatch_websets_update(id, globals, pretty),
-        WebsetsCmd::Delete { id } => dispatch_websets_delete(id, globals, pretty),
-        WebsetsCmd::Cancel { id } => dispatch_websets_cancel(id, globals, pretty),
+        WebsetsCmd::Delete { id } => {
+            dispatch_id_command(&["websets", "delete"], id, globals, pretty)
+        }
+        WebsetsCmd::Cancel { id } => {
+            dispatch_id_command(&["websets", "cancel"], id, globals, pretty)
+        }
         WebsetsCmd::Preview(args) => dispatch_websets_preview(args, globals, pretty),
         WebsetsCmd::Items { sub } => dispatch_websets_items(sub, globals, pretty),
         WebsetsCmd::Searches { sub } => dispatch_websets_searches(sub, globals, pretty),
@@ -4247,14 +4217,6 @@ fn dispatch_websets_update(id: &str, globals: &GlobalArgs, pretty: bool) -> Resu
     let op = registry::lookup_by_segments(&["websets", "update"])
         .expect("websets update is in registry");
     dispatch_id_command_with_spec(op, id, globals, pretty, build_websets_update_spec)
-}
-
-fn dispatch_websets_delete(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    dispatch_id_command(&["websets", "delete"], id, globals, pretty)
-}
-
-fn dispatch_websets_cancel(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    dispatch_id_command(&["websets", "cancel"], id, globals, pretty)
 }
 
 fn dispatch_websets_items(
@@ -6583,23 +6545,43 @@ fn execute_paginated_live<T: Transport>(
     );
     let output_path = ndjson.then_some(globals.output.as_deref()).flatten();
     // Pages land in a sibling temp file that is renamed over the target once at least one page
-    // is on disk, so a failure before then cannot destroy the file the caller already had. A
-    // path that names a device, FIFO, or socket has nothing to preserve and must not be
-    // replaced by a rename, so those are written in place.
-    let output_temp = output_path.and_then(|path| match std::fs::metadata(path) {
-        Ok(meta) if !meta.is_file() => None,
-        _ => Some(format!("{path}.tmp-{}", std::process::id())),
+    // is on disk, so a failure before then cannot destroy the file the caller already had. The
+    // target is the resolved file, so a symlinked `--output` keeps its link and the file behind
+    // it is what gets replaced. A device, FIFO, or socket has nothing to preserve and must not
+    // be replaced by a rename, so those are written in place.
+    let output_target = output_path.map(|path| {
+        std::fs::canonicalize(path)
+            .map(|resolved| resolved.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string())
     });
+    let existing_permissions = output_target
+        .as_deref()
+        .and_then(|target| std::fs::metadata(target).ok());
+    let output_temp = match (output_target.as_deref(), &existing_permissions) {
+        (Some(_), Some(meta)) if !meta.is_file() => None,
+        (Some(target), _) => Some(format!("{target}.tmp-{}", std::process::id())),
+        (None, _) => None,
+    };
     let mut output = output_path
         .map(|path| {
             // Creating the temp proves the directory is writable before any billable call.
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(output_temp.is_some())
-                .open(output_temp.as_deref().unwrap_or(path))
-                .map_err(|err| output_write_error(path, &err))
-                .map_err(|err| paginated_output_error(err, path, 0, None))
+            // `create_new` refuses to follow a planted symlink at the staging name.
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true);
+            match output_temp.as_deref() {
+                Some(temp) => options.create_new(true).open(temp),
+                None => options.create(true).truncate(false).open(path),
+            }
+            .and_then(|file| {
+                // The rename replaces the inode, so a 0600 output file must not come back
+                // with umask permissions.
+                if let (Some(_), Some(meta)) = (output_temp.as_deref(), &existing_permissions) {
+                    file.set_permissions(meta.permissions())?;
+                }
+                Ok(file)
+            })
+            .map_err(|err| output_write_error(path, &err))
+            .map_err(|err| paginated_output_error(err, path, 0, None))
         })
         .transpose()?;
     let mut cursor = pagination.cursor.clone();
@@ -6638,17 +6620,20 @@ fn execute_paginated_live<T: Transport>(
         let result = match result {
             Ok(result) => result,
             Err(err) => {
-                return Err(match output_path {
-                    Some(path) => {
-                        settle_output_temp(
+                return Err(match (output_path, output_target.as_deref()) {
+                    (Some(path), Some(target)) => {
+                        let staged = settle_output_temp(
                             output.take(),
                             output_temp.as_deref(),
-                            path,
+                            target,
                             output_pages,
                         );
-                        paginated_output_error(err, path, output_pages, cursor.as_deref())
+                        with_staged_output(
+                            paginated_output_error(err, path, output_pages, cursor.as_deref()),
+                            staged,
+                        )
                     }
-                    None => err,
+                    _ => err,
                 });
             }
         };
@@ -6731,12 +6716,15 @@ fn execute_paginated_live<T: Transport>(
                     // in the requested file and are described on stderr.
                     push_output_write_warning(&mut envelope, path, &err);
                     emit_ndjson(&envelope);
-                    settle_output_temp(output.take(), output_temp.as_deref(), path, output_pages);
-                    return Err(paginated_output_error(
-                        err,
-                        path,
+                    let staged = settle_output_temp(
+                        output.take(),
+                        output_temp.as_deref(),
+                        output_target.as_deref().unwrap_or(path),
                         output_pages,
-                        cursor.as_deref(),
+                    );
+                    return Err(with_staged_output(
+                        paginated_output_error(err, path, output_pages, cursor.as_deref()),
+                        staged,
                     ));
                 }
                 output_pages += 1;
@@ -6757,12 +6745,18 @@ fn execute_paginated_live<T: Transport>(
         if let (Some(path), Some(file)) = (output_path, output) {
             drop(file);
             if let Some(temp) = output_temp.as_deref() {
-                std::fs::rename(temp, path).map_err(|err| {
-                    paginated_output_error(
-                        output_write_error(path, &err),
-                        path,
-                        output_pages,
-                        last_has_more.then_some(last_next.as_deref()).flatten(),
+                let target = output_target.as_deref().unwrap_or(path);
+                std::fs::rename(temp, target).map_err(|err| {
+                    // Every page is safe in the temp file; say where rather than counting the
+                    // bytes of whatever the un-replaced target still holds.
+                    with_staged_output(
+                        paginated_output_error(
+                            output_write_error(path, &err),
+                            path,
+                            output_pages,
+                            last_has_more.then_some(last_next.as_deref()).flatten(),
+                        ),
+                        Some(temp.to_string()),
                     )
                 })?;
             }
@@ -6879,18 +6873,45 @@ fn page_envelope(
 
 /// Settle the sibling temp file on a failure path. Pages already written are the documented
 /// partial-output contract, so they are moved into place; a run that wrote nothing leaves the
-/// caller's pre-existing file exactly as it was and takes the temp with it. Best effort: the
-/// error that brought us here is the one worth reporting.
-fn settle_output_temp(file: Option<std::fs::File>, temp: Option<&str>, path: &str, pages: u32) {
+/// caller's pre-existing file exactly as it was and takes the temp with it. The error that
+/// brought us here is the one worth reporting, so a rename that fails is not an error of its
+/// own: the temp path comes back so the caller can name where the pages are.
+fn settle_output_temp(
+    file: Option<std::fs::File>,
+    temp: Option<&str>,
+    target: &str,
+    pages: u32,
+) -> Option<String> {
     drop(file);
-    let Some(temp) = temp else {
-        return;
+    let temp = temp?;
+    if pages == 0 {
+        let _ = std::fs::remove_file(temp);
+        return None;
+    }
+    std::fs::rename(temp, target)
+        .is_err()
+        .then(|| temp.to_string())
+}
+
+/// When pages are stranded in the staging file, point at it and count its bytes instead of the
+/// target's; `outputPath` keeps naming what the caller asked for.
+fn with_staged_output(mut err: CliError, staged: Option<String>) -> CliError {
+    let Some(staged) = staged else {
+        return err;
     };
-    let _ = if pages == 0 {
-        std::fs::remove_file(temp)
-    } else {
-        std::fs::rename(temp, path)
-    };
+    if let Some(details) = err
+        .diag_mut()
+        .details
+        .as_deref_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        details.insert(
+            "outputBytes".to_string(),
+            serde_json::json!(written_output_bytes(&staged)),
+        );
+        details.insert("stagedOutputPath".to_string(), serde_json::json!(staged));
+    }
+    err
 }
 
 fn paginated_output_error(

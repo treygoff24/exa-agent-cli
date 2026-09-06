@@ -267,6 +267,7 @@ One uniform model over endpoint-specific cursors.
 - Cursor-list commands expose `--limit`, `--cursor`, `--all`, `--max-pages`, `--page-delay`.
 - The envelope's `pagination` block carries `nextCursor`, `hasMore`, `autoPaginated`, `page`, `pageCount`.
 - `--all --json` → one accumulated envelope. `--all --ndjson` → one envelope per page (lower memory; preferred for agents).
+- `--all --ndjson --output FILE` streams pages into a sibling staging file and renames it over `FILE` (over the file a symlinked `FILE` points at, keeping its permissions) once the run ends, so a failure before the first page leaves an existing `FILE` untouched and creates nothing new. A failure after N ≥ 1 pages still moves those pages into `FILE` and reports `outputPartial: true`, `outputPages`, `outputBytes`, and `resumeCursor` in `error.details`; if that final rename itself fails, the pages stay in the staging file and `details.stagedOutputPath` names it.
 - `--max-pages N` caps `--all`; reaching the cap is success with `hasMore: true` and a `warnings[]` note.
 - Non-cursor endpoints reject `--all` with exit 1 and a `suggestedCommand` (search → `--num-results N (1..100)`; contents → `--chunk-size`).
 

@@ -32,8 +32,8 @@ All notable changes to this project are documented here.
 - Auto-paginated NDJSON now honors `--output`, retains completed pages on later
   failures, and avoids collecting the entire result set in memory. Pages are staged
   in a sibling temp file, so an existing output file is never truncated before the
-  first page is written. Intermediate pages no longer offer redundant continuation
-  commands.
+  first page is written; the file keeps its permissions and a symlinked path keeps
+  its link. Intermediate pages no longer offer redundant continuation commands.
 - Completed Agent streams now offer resource follow-ups without copying their
   output again. Follow-up generation no longer clones whole retrieval responses.
 - Request previews now share header assembly with live requests, including custom

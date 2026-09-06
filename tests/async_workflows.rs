@@ -684,3 +684,95 @@ fn keyed_batch_ambiguous_failure_still_records_list_recovery() {
     assert_eq!(record["command"], "batches create");
     assert_eq!(record["recoveryCommand"], suggestion);
 }
+
+/// The staging rename replaces the inode, so the file's own permissions and any symlink at the
+/// requested path have to be carried over deliberately.
+#[cfg(unix)]
+#[test]
+fn all_ndjson_output_keeps_file_mode_and_writes_through_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = temp_path("mode");
+    fs::create_dir_all(&directory).unwrap();
+    let target = directory.join("target.ndjson");
+    fs::write(&target, b"stale\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let link = directory.join("latest.ndjson");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let (base_url, server) = local_server(vec![
+        Reply::Json(r#"{"data":[{"id":"batch_1"}],"hasMore":true,"nextCursor":"cur2"}"#),
+        Reply::Json(r#"{"data":[{"id":"batch_2"}],"hasMore":false,"nextCursor":null}"#),
+    ]);
+    let mut args = paginated_args(&base_url);
+    args.extend(["--output".into(), link.to_string_lossy().into_owned()]);
+    let output = run_owned(&args);
+    server.join().expect("output pagination server");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    let meta = fs::metadata(&target).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    let pages = ndjson(&fs::read(&target).unwrap());
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[1]["data"]["data"][0]["id"], "batch_2");
+    let mut entries = directory_entries(&directory);
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["latest.ndjson".to_string(), "target.ndjson".to_string()]
+    );
+}
+
+/// A staging file that already exists at the sibling name is never opened through: a planted
+/// symlink there must not have its target truncated. The refusal happens before any request.
+#[cfg(unix)]
+#[test]
+fn all_ndjson_output_refuses_to_follow_a_planted_staging_symlink() {
+    let directory = temp_path("planted");
+    fs::create_dir_all(&directory).unwrap();
+    let victim = directory.join("victim.txt");
+    fs::write(&victim, b"keep me\n").unwrap();
+    let output_path = directory.join("pages.ndjson");
+    // The staging name is `<output>.tmp-<pid>`; the child's pid is unknown ahead of time, so
+    // plant links for a window of pids after our own and skip if the child landed outside it.
+    let own = std::process::id();
+    for pid in own..own + 4096 {
+        let _ = std::os::unix::fs::symlink(&victim, format!("{}.tmp-{pid}", output_path.display()));
+    }
+    let output = run_owned(&[
+        "batches".into(),
+        "list".into(),
+        "--all".into(),
+        "--ndjson".into(),
+        "--output".into(),
+        output_path.to_string_lossy().into_owned(),
+        "--retry".into(),
+        "0".into(),
+        "--base-url".into(),
+        "http://127.0.0.1:1".into(),
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    let victim_bytes = fs::read(&victim).unwrap();
+    let output_exists = output_path.exists();
+    fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(victim_bytes, b"keep me\n");
+    assert!(!output_exists);
+    let error = stderr_json(&output);
+    if error["error"]["code"] == "network_error" {
+        eprintln!("child pid fell outside the planted window; the open succeeded");
+        return;
+    }
+    assert_eq!(error["error"]["code"], "invalid_value", "{error}");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("File exists"));
+    assert_eq!(error["error"]["details"]["outputPartial"], false);
+    assert_eq!(error["error"]["details"]["outputBytes"], 0);
+}

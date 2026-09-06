@@ -526,6 +526,11 @@ fn integer_fields_reject_non_integer_json_numbers() {
         ]);
         assert_eq!(output.status.code(), Some(1), "numResults={value}");
         assert!(output.stdout.is_empty(), "numResults={value}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            error["error"]["code"], "invalid_field_type",
+            "numResults={value}"
+        );
     }
     let result = ok(&["search", "q", "--set", "numResults=10", "--dry-run"]);
     assert_eq!(result["data"]["request"]["body"]["numResults"], json!(10));

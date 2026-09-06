@@ -1173,7 +1173,9 @@ fn static_subcommands(parent: &str) -> &'static [&'static str] {
         "config profiles" => &["list", "show", "use", "create", "delete"],
         "preset" | "macro" => &["list", "show"],
         "agent" => &["run", "runs"],
-        "agent runs" => &["create", "list", "get", "events", "cancel", "delete"],
+        "agent runs" => &[
+            "create", "list", "get", "events", "cancel", "stop", "delete",
+        ],
         "research" => &["create", "list", "get"],
         _ => &[],
     }

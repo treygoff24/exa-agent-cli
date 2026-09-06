@@ -45,7 +45,7 @@ pub(crate) fn append_operation_next_actions(
             {
                 push_next_action(envelope,
                     "Download JSONL from this short-lived bearer URL; run batches get again after it expires. Redirect stdout to a new file to keep all rows.",
-                    format!("curl --fail --location --proto '=https' -- {}", shell_quote(url)),
+                    format!("curl --fail --location --proto '=https' --proto-redir '=https' -- {}", shell_quote(url)),
                 );
             }
         }

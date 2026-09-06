@@ -27,11 +27,78 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        <Self as Parser>::try_parse_from(normalize_export_format_flag(itr))
+        let mut args = normalize_export_format_flag(itr);
+        normalize_bare_contents_text(&mut args);
+        <Self as Parser>::try_parse_from(args)
     }
 
     pub fn try_parse() -> Result<Self, clap::Error> {
         Self::try_parse_from(std::env::args_os())
+    }
+}
+
+// Values of these global options are data, never command words or leaf flags.
+const VALUE_TAKING_GLOBALS: &[&str] = &[
+    "-o",
+    "--output",
+    "--format",
+    "--max-output-bytes",
+    "--correlation-id",
+    "--api-key",
+    "--service-key",
+    "--profile",
+    "--base-url",
+    "--header",
+    "--beta",
+    "--timeout",
+    "--connect-timeout",
+    "--retry",
+    "--idempotency-key",
+    "--input",
+    "--input-format",
+    "--set",
+    "--body",
+    "--preset",
+    "--trace",
+];
+
+fn normalize_bare_contents_text(args: &mut [OsString]) {
+    let mut contents = false;
+    let mut index = 1;
+    while index < args.len() {
+        let text = args[index].to_string_lossy();
+        if text == "--" {
+            return;
+        }
+        if VALUE_TAKING_GLOBALS.contains(&text.as_ref())
+            || (contents && matches!(text.as_ref(), "--summary-query" | "--chunk-size"))
+        {
+            index += 2;
+            continue;
+        }
+        if !contents {
+            if !text.starts_with('-') {
+                if text != "contents" {
+                    return;
+                }
+                contents = true;
+            }
+        } else if text == "--text" {
+            let url_follows = args.get(index + 1).is_some_and(|value| {
+                value
+                    .to_string_lossy()
+                    .split_once("://")
+                    .is_some_and(|(scheme, _)| {
+                        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+                    })
+            });
+            if url_follows {
+                // A URL cannot be a text cap. Make the bare value explicit so Clap leaves
+                // the following token positional; `--text full` and numeric caps stay valid.
+                args[index] = OsString::from("--text=");
+            }
+        }
+        index += 1;
     }
 }
 
@@ -50,35 +117,14 @@ where
     let mut abandoned = false;
     let mut index = 0usize;
     let mut previous_was_flag = false;
-    // Global options whose separate next token is a VALUE, not a command word. Mirrors the
-    // value-taking fields of `GlobalArgs`; boolean globals (--json, --raw, --yes, …) are
-    // deliberately absent so `--json websets exports create` still matches the command path.
-    const VALUE_TAKING_GLOBALS: &[&str] = &[
-        "-o",
-        "--output",
-        "--format",
-        "--max-output-bytes",
-        "--correlation-id",
-        "--api-key",
-        "--service-key",
-        "--profile",
-        "--base-url",
-        "--header",
-        "--beta",
-        "--timeout",
-        "--connect-timeout",
-        "--retry",
-        "--idempotency-key",
-        "--input",
-        "--input-format",
-        "--set",
-        "--body",
-        "--trace",
-    ];
     itr.into_iter()
         .map(Into::into)
         .map(|arg| {
             let text = arg.to_string_lossy();
+            if export_create && text == "--" {
+                export_format_consumed = true;
+                return arg;
+            }
             if !export_create {
                 let is_flag = text.starts_with('-');
                 let was_flag = previous_was_flag;

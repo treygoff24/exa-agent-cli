@@ -22,6 +22,8 @@ All notable changes to this project are documented here.
   a rejected credential. This follows a live Batch API entitlement refusal.
 - Schema refresh compares parsed JSON rather than formatting-dependent byte hashes.
   Integer validation preserves exact decimal input instead of rounding monetary values.
+- `contents --text URL` and interleaved URL lists now treat `--text` as bare text
+  retrieval, while retaining `--text full`, numeric caps, and explicit `--text=...`.
 - Recovery and pagination actions retain safe request scope, withhold private headers
   and filters, and stop offering a cursor after the pagination loop rejects it.
   Batch creation never auto-retries without a documented deduplication guarantee.

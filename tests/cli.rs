@@ -7477,6 +7477,55 @@ fn parse_websets_representative_nested() {
 }
 
 #[test]
+fn argument_normalizers_preserve_global_values_and_end_markers() {
+    let cli = exa_agent_cli::cli::Cli::try_parse_from([
+        "exa-agent",
+        "--preset",
+        "contents",
+        "websets",
+        "exports",
+        "create",
+        "ws_abc",
+        "--format",
+        "csv",
+    ])
+    .unwrap();
+    assert_eq!(cli.globals.preset.as_deref(), Some("contents"));
+    assert_eq!(
+        exa_agent_cli::cli::command_path(&cli.command),
+        "websets exports create"
+    );
+
+    let output = run_ok_json(&[
+        "websets",
+        "exports",
+        "create",
+        "--body",
+        r#"{"format":"csv"}"#,
+        "--dry-run",
+        "--",
+        "--format",
+    ]);
+    assert_eq!(
+        output["data"]["request"]["path"],
+        "/websets/v0/websets/--format/exports"
+    );
+    let cli = exa_agent_cli::cli::Cli::try_parse_from([
+        "exa-agent",
+        "contents",
+        "--",
+        "--text",
+        "https://exa.ai",
+    ])
+    .unwrap();
+    let exa_agent_cli::cli::Command::Contents(args) = cli.command else {
+        panic!("contents command")
+    };
+    assert!(args.text.is_none());
+    assert_eq!(args.urls, ["--text", "https://exa.ai"]);
+}
+
+#[test]
 fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
     let create = run_ok_json(&[
         "websets",

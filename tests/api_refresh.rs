@@ -605,3 +605,43 @@ fn integer_validation_never_rounds_fractional_monetary_input() {
         );
     }
 }
+
+#[test]
+fn bare_contents_text_does_not_consume_following_urls() {
+    for (args, urls) in [
+        (
+            vec!["contents", "--text", "https://exa.ai"],
+            vec!["https://exa.ai"],
+        ),
+        (
+            vec![
+                "contents",
+                "https://exa.ai",
+                "--text",
+                "https://example.com",
+            ],
+            vec!["https://exa.ai", "https://example.com"],
+        ),
+    ] {
+        let mut args = args;
+        args.push("--dry-run");
+        let result = ok(&args);
+        assert_eq!(result["data"]["request"]["body"]["urls"], json!(urls));
+        assert_eq!(result["data"]["request"]["body"]["text"], true);
+    }
+    for (cap, expected) in [
+        ("full", json!(true)),
+        ("10000", json!({"maxCharacters":10000})),
+    ] {
+        let result = ok(&["contents", "--text", cap, "https://exa.ai", "--dry-run"]);
+        assert_eq!(result["data"]["request"]["body"]["text"], expected);
+    }
+    let invalid = run(&[
+        "contents",
+        "https://exa.ai",
+        "--text=https://not-a-cap",
+        "--dry-run",
+    ]);
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(invalid.stdout.is_empty());
+}

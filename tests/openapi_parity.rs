@@ -94,14 +94,16 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
             .map(|field| top_level_segment(field.body_path))
             .collect();
         let positional_required = positional_required_allowlist(op.operation_id);
+        let merged_body_required = merged_body_required_allowlist(op.operation_id);
         for required in &shape.required {
             if required_fields.contains(required.as_str())
                 || positional_required.contains(&required.as_str())
+                || merged_body_required.contains(&required.as_str())
             {
                 continue;
             }
             failures.push(format!(
-                "{} OpenAPI required property `{}` is not covered by a required FieldDef or positional-source allowlist; required modeled top-level fields: {:?}",
+                "{} OpenAPI required property `{}` is not covered by a required FieldDef, a positional source, or a merged-body validator; required modeled top-level fields: {:?}",
                 op.operation_id, required, required_fields
             ));
         }
@@ -383,6 +385,19 @@ fn positional_required_allowlist(operation_id: &str) -> &'static [&'static str] 
         // sourced required body properties; never use this to silence a real miss.
         "answer" | "createAgentRun" | "search" => &["query"],
         "findSimilar" => &["url"],
+        _ => &[],
+    }
+}
+
+/// Required body properties enforced over the *merged* body rather than by a required FieldDef.
+/// A `required` FieldDef is checked before `--body`, `--set`, and presets merge, so marking one of
+/// these required would reject a request that legitimately supplies the property from another
+/// layer. Each entry must name an operation whose validator enforces presence after the merge;
+/// never use this to silence a property nothing checks.
+fn merged_body_required_allowlist(operation_id: &str) -> &'static [&'static str] {
+    match operation_id {
+        // `batches::validate_create_body` rejects a merged body without a non-empty `requests`.
+        "createBatch" => &["requests"],
         _ => &[],
     }
 }

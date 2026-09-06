@@ -8,21 +8,30 @@ use crate::error::{CliError, Diag};
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub(crate) const BETA_TOKEN: &str = "batches-2026-06-06";
+/// The Batch API beta opt-in. `tests/spec_drift.rs` pins it against `x-exa-beta-flag` in the
+/// vendored spec.
+pub const BETA_TOKEN: &str = "batches-2026-06-06";
+
+/// Routes a batch item may call, mirroring `BatchRequestItem.url` in the vendored spec.
+pub const ALLOWED_ITEM_URLS: [&str; 2] = ["/search", "/agent/runs"];
 
 pub(crate) fn dispatch(
     sub: &BatchesCmd,
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
-    let globals = super::globals_with_required_beta(globals, BETA_TOKEN);
+    let globals = super::globals_with_required_beta(globals, BETA_TOKEN)?;
     match sub {
         BatchesCmd::Create(args) => dispatch_create(args, &globals, pretty),
         BatchesCmd::List(args) => dispatch_list(args, &globals, pretty),
-        BatchesCmd::Get { id } => dispatch_id_command("get", id, &globals, pretty),
-        BatchesCmd::Cancel { id } => dispatch_id_command("cancel", id, &globals, pretty),
-        BatchesCmd::Delete { id } => dispatch_id_command("delete", id, &globals, pretty),
+        BatchesCmd::Get { id } => id_command("get", id, &globals, pretty),
+        BatchesCmd::Cancel { id } => id_command("cancel", id, &globals, pretty),
+        BatchesCmd::Delete { id } => id_command("delete", id, &globals, pretty),
     }
+}
+
+fn id_command(action: &str, id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
+    super::dispatch_id_command(&["batches", action], id, globals, pretty)
 }
 
 fn dispatch_create(
@@ -32,24 +41,14 @@ fn dispatch_create(
 ) -> Result<i32, CliError> {
     let op = crate::registry::lookup_by_segments(&["batches", "create"]).expect("batches create");
     super::with_typed_error_context(op, globals, || {
+        // No default here: `requests` is optional at the flag layer so `--body`, `--set`, and
+        // presets can supply it, and `validate_create_body` owns the required-presence error.
         let requests = args
             .requests
             .as_deref()
             .map(|raw| crate::request::read_json_value_arg(raw, "requests"))
-            .transpose()?;
-        let requests = requests
-            .or(if args.requests.is_none() {
-                globals
-                    .preset
-                    .as_deref()
-                    .map(|name| crate::presets::get_preset(name, "batches create"))
-                    .transpose()?
-                    .and_then(|preset| preset.body.get("requests").cloned())
-            } else {
-                None
-            })
-            .unwrap_or_else(|| Value::Array(Vec::new()))
-            .to_string();
+            .transpose()?
+            .map(|value| value.to_string());
         let metadata = args
             .metadata
             .as_deref()
@@ -58,7 +57,7 @@ fn dispatch_create(
             .map(|value| value.to_string());
         let spec = super::build_typed_spec(
             op,
-            &[("requests", Some(requests)), ("metadata", metadata)],
+            &[("requests", requests), ("metadata", metadata)],
             globals,
         )?;
         super::dispatch_typed_command(spec, globals, pretty)
@@ -73,13 +72,6 @@ fn dispatch_list(
     let op = crate::registry::lookup_by_segments(&["batches", "list"]).expect("batches list");
     super::with_typed_error_context(op, globals, || {
         super::validate_cursor_pagination(&args.pagination)?;
-        if args.pagination.limit == Some(0) {
-            return Err(CliError::Usage(
-                Diag::new("invalid_value", "batches list --limit must be at least 1")
-                    .with_details(serde_json::json!({ "field": "limit", "min": 1, "received": 0 }))
-                    .with_suggestion("exa-agent batches list --limit 100"),
-            ));
-        }
         let spec = super::build_typed_spec(op, &[], globals)?;
         let static_query = args
             .status
@@ -98,21 +90,6 @@ fn dispatch_list(
         } else {
             super::dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
         }
-    })
-}
-
-fn dispatch_id_command(
-    action: &str,
-    id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = crate::registry::lookup_by_segments(&["batches", action])
-        .expect("batch id command is in the registry");
-    super::with_typed_error_context(op, globals, || {
-        let spec = super::build_typed_spec(op, &[], globals)?;
-        let path = super::checked_substitute_path(op.api_path, &[("id", id)])?;
-        super::dispatch_typed_command_routed(spec, globals, pretty, Some(&path), &[], false, None)
     })
 }
 
@@ -231,13 +208,13 @@ fn validate_request_item(
     }
 
     let url = required_string(request.get("url"), index, "url")?;
-    if !matches!(url, "/search" | "/agent/runs") {
+    if !ALLOWED_ITEM_URLS.contains(&url) {
         return Err(batch_error(
             "invalid_value",
             format!("batch request item {index} url must be `/search` or `/agent/runs`"),
             serde_json::json!({
                 "field": format!("requests[{index}].url"),
-                "accepted": ["/search", "/agent/runs"],
+                "accepted": ALLOWED_ITEM_URLS,
                 "received": url,
             }),
         ));

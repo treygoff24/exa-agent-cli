@@ -70,6 +70,10 @@ pub struct RawExecuteParams<'a> {
     pub globals: &'a GlobalArgs,
     pub auth: RawAuth<'a>,
     pub request_id: String,
+    /// Suppress `--retry` for a request whose replay is not provably safe. The beta Batch API
+    /// documents no server-side idempotency, so batch creation carries this even when the user
+    /// supplied an `Idempotency-Key`.
+    pub no_auto_retry: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1744,8 +1748,21 @@ pub fn execute_raw<T: Transport>(
             globals,
             auth: RawAuth::Api(credential),
             request_id: new_request_id(),
+            no_auto_retry: raw_path_creates_batch(method, path),
         },
     )
+}
+
+/// Batch creation seen from the `raw` escape hatch, where the URL is the only statement of
+/// intent. Typed dispatch sets `no_auto_retry` from the operation id instead.
+pub fn raw_path_creates_batch(method: &str, path: &str) -> bool {
+    method.eq_ignore_ascii_case("POST")
+        && path
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .trim_matches('/')
+            == "batches"
 }
 
 /// True when the merged request body opts into upstream SSE (`stream: true`).
@@ -2162,6 +2179,56 @@ struct PreparedRawRequest {
     correlation_id: Option<String>,
 }
 
+fn push_beta_tokens(tokens: &mut Vec<String>, raw: &str) {
+    for token in raw.split(',') {
+        let token = token.trim();
+        if !token.is_empty() && !tokens.iter().any(|seen| seen == token) {
+            tokens.push(token.to_string());
+        }
+    }
+}
+
+/// Fold `--beta` and every user-supplied `Exa-Beta` header into a single header whose tokens are
+/// unique. `Exa-Beta` values are enums upstream, so a token repeated because the CLI injected a
+/// required opt-in the user already passed by hand is a request a strict gateway can reject.
+fn merge_beta_headers(headers: &mut Vec<(String, String)>, beta: Option<&str>) {
+    let user_supplied = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("Exa-Beta"));
+    if !user_supplied && beta.is_none() {
+        return;
+    }
+    let mut tokens = Vec::new();
+    for (name, value) in headers.iter() {
+        if name.eq_ignore_ascii_case("Exa-Beta") {
+            push_beta_tokens(&mut tokens, value);
+        }
+    }
+    if let Some(beta) = beta {
+        push_beta_tokens(&mut tokens, beta);
+    }
+    let merged = tokens.join(",");
+    if !user_supplied {
+        headers.push(("Exa-Beta".to_string(), merged));
+        return;
+    }
+    let mut seen = false;
+    headers.retain(|(name, _)| {
+        if !name.eq_ignore_ascii_case("Exa-Beta") {
+            return true;
+        }
+        let first = !seen;
+        seen = true;
+        first
+    });
+    if let Some((_, value)) = headers
+        .iter_mut()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Exa-Beta"))
+    {
+        *value = merged;
+    }
+}
+
 /// Explicit and feature headers shared by previews and requests. Authentication and HTTP
 /// stack defaults (Host, Content-Type, Content-Length, User-Agent) remain transport-owned.
 pub(crate) fn request_headers(
@@ -2172,19 +2239,7 @@ pub(crate) fn request_headers(
     if body_wants_stream(body) && !has_header(&headers, "Accept") {
         headers.push(("Accept".to_string(), "text/event-stream".to_string()));
     }
-    if let Some(beta) = &globals.beta {
-        if let Some((_, existing)) = headers
-            .iter_mut()
-            .find(|(name, _)| name.eq_ignore_ascii_case("Exa-Beta"))
-        {
-            if !existing.is_empty() && !beta.is_empty() {
-                existing.push(',');
-            }
-            existing.push_str(beta);
-        } else {
-            headers.push(("Exa-Beta".to_string(), beta.clone()));
-        }
-    }
+    merge_beta_headers(&mut headers, globals.beta.as_deref());
     if let Some(key) = &globals.idempotency_key {
         headers.push(("Idempotency-Key".to_string(), key.clone()));
     }
@@ -2253,18 +2308,10 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     };
 
     let payment_mode = !matches!(params.auth, RawAuth::Api(_));
-    // The beta Batch API does not document server-side idempotency. Forward an explicit
-    // key, but never treat it as proof that replaying a batch creation cannot double-bill.
-    let batch_create = method == "POST"
-        && params
-            .path
-            .split(['?', '#'])
-            .next()
-            .unwrap_or_default()
-            .trim_matches('/')
-            == "batches";
+    // `no_auto_retry` carries the caller's own statement that a replay is unsafe: forward an
+    // explicit key, but never treat it as proof that replaying cannot double-bill.
     let send_opts = SendOptions {
-        retry: if payment_mode || batch_create {
+        retry: if payment_mode || params.no_auto_retry {
             0
         } else {
             params.globals.retry
@@ -2775,6 +2822,7 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_pay".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap();
@@ -2805,6 +2853,7 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_stream".to_string(),
+                no_auto_retry: false,
             },
             &mut |_| Ok(()),
         )
@@ -2844,6 +2893,7 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_trace".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -2882,6 +2932,7 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_transport_trace".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -2955,6 +3006,7 @@ mod tests {
                     authorization: &authorization,
                 }),
                 request_id: "req_mpp_trace".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -2991,6 +3043,7 @@ mod tests {
                     authorization: &authorization,
                 }),
                 request_id: "req_mpp_402".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -3069,6 +3122,7 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_payment".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap();
@@ -3108,6 +3162,7 @@ mod tests {
                     signature: &signature,
                 }),
                 request_id: "req_payment_no_retry".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -3146,6 +3201,7 @@ mod tests {
                     authorization: &authorization,
                 }),
                 request_id: "req_mpp_idempotency_refusal".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -3181,6 +3237,7 @@ mod tests {
                 globals: &cli.globals,
                 auth: RawAuth::PaymentDiscovery,
                 request_id: "req_discovery_idempotency_refusal".to_string(),
+                no_auto_retry: false,
             },
         )
         .unwrap_err();
@@ -3216,6 +3273,7 @@ mod tests {
                 signature: &signature,
             }),
             request_id: "req_payment_retry_zero".to_string(),
+            no_auto_retry: false,
         })
         .unwrap();
 

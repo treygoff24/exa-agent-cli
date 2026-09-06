@@ -920,7 +920,19 @@ pub struct AnswerArgs {
     )]
     pub output_schema: Option<String>,
     /// Answer model; exa is the upstream default.
-    #[arg(long, value_parser = ["exa", "exa-pro", "exa-research", "exa-fast"])]
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+        crate::registry::lookup_by_command("answer")
+            .and_then(|op| {
+                op.fields
+                    .iter()
+                    .find(|field| field.flag == "model")
+                    .map(|field| crate::registry::field_enum_values(op, field))
+            })
+            .filter(|values| !values.is_empty())
+            .expect("answer model enum metadata")
+            .iter()
+            .copied(),
+    ))]
     pub model: Option<String>,
     /// Instructions guiding the answer, inline or read from @file.
     #[arg(long, value_name = "TEXT|@file")]
@@ -1170,7 +1182,7 @@ pub enum AgentRunsCmd {
     Get { id: String },
     /// GET /agent/runs/{id}/events.
     Events(AgentRunsEventsArgs),
-    /// POST /agent/runs/{id}/cancel.
+    /// Terminate a run and discard the results it has gathered (POST /agent/runs/{id}/cancel).
     Cancel { id: String },
     /// Complete a max-effort run early and retain gathered results (POST /agent/runs/{id}/stop).
     Stop { id: String },

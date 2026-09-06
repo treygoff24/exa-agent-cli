@@ -109,7 +109,7 @@ transparent built-in `ask` and `fetch` expansions.
 
 ## D13 — Parser: `clap` (derive), lean on its suggestion engine
 
-**Call.** Use `clap` v4 with the derive API. Use `ValueEnum` for fixed-set flags (`--type`, `--format`), `clap`'s arg-conflict rules for local validation, and its built-in suggestions for did-you-mean on flags and subcommands. There is no clap-specific skill; framework patterns come from the `rust-engineer` skill + clap docs via `ctx7`.
+**Call.** Use `clap` v4 with the derive API. Use `ValueEnum` for fixed-set flags (`--type`, `--format`), `clap`'s arg-conflict rules for local validation, and its built-in suggestions for did-you-mean on flags and subcommands. There is no clap-specific skill; framework patterns come from the `rust-engineer` skill + current clap docs.
 
 **Why.** clap's suggestion engine is the cheapest path to the intent-inference axiom; `ValueEnum` makes invalid-choice errors self-documenting.
 

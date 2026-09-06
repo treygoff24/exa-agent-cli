@@ -2,6 +2,9 @@
 //! Stdout carries data envelopes; stderr carries diagnostics and error envelopes (contracts §1).
 
 pub mod envelope;
+mod next_actions;
+
+pub(crate) use next_actions::{append_operation_next_actions, append_pagination_next_action};
 
 use std::io::{IsTerminal, Write};
 

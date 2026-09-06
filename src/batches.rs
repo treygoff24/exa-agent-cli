@@ -1,13 +1,120 @@
-//! Batch API request validation.
+//! Batch API commands and request validation.
 //!
 //! Batch item bodies intentionally remain open: `/search` and `/agent/runs` evolve faster than
 //! this wrapper, so only the Batch API's own invariants are enforced here.
 
+use crate::cli::{BatchesCmd, BatchesCreateArgs, BatchesListArgs, GlobalArgs};
 use crate::error::{CliError, Diag};
 use serde_json::Value;
 use std::collections::HashSet;
 
 pub(crate) const BETA_TOKEN: &str = "batches-2026-06-06";
+
+pub(crate) fn dispatch(
+    sub: &BatchesCmd,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let globals = super::globals_with_required_beta(globals, BETA_TOKEN);
+    match sub {
+        BatchesCmd::Create(args) => dispatch_create(args, &globals, pretty),
+        BatchesCmd::List(args) => dispatch_list(args, &globals, pretty),
+        BatchesCmd::Get { id } => dispatch_id_command("get", id, &globals, pretty),
+        BatchesCmd::Cancel { id } => dispatch_id_command("cancel", id, &globals, pretty),
+        BatchesCmd::Delete { id } => dispatch_id_command("delete", id, &globals, pretty),
+    }
+}
+
+fn dispatch_create(
+    args: &BatchesCreateArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = crate::registry::lookup_by_segments(&["batches", "create"]).expect("batches create");
+    super::with_typed_error_context(op, globals, || {
+        let requests = args
+            .requests
+            .as_deref()
+            .map(|raw| crate::request::read_json_value_arg(raw, "requests"))
+            .transpose()?;
+        let requests = requests
+            .or(if args.requests.is_none() {
+                globals
+                    .preset
+                    .as_deref()
+                    .map(|name| crate::presets::get_preset(name, "batches create"))
+                    .transpose()?
+                    .and_then(|preset| preset.body.get("requests").cloned())
+            } else {
+                None
+            })
+            .unwrap_or_else(|| Value::Array(Vec::new()))
+            .to_string();
+        let metadata = args
+            .metadata
+            .as_deref()
+            .map(|raw| crate::request::read_json_value_arg(raw, "metadata"))
+            .transpose()?
+            .map(|value| value.to_string());
+        let spec = super::build_typed_spec(
+            op,
+            &[("requests", Some(requests)), ("metadata", metadata)],
+            globals,
+        )?;
+        super::dispatch_typed_command(spec, globals, pretty)
+    })
+}
+
+fn dispatch_list(
+    args: &BatchesListArgs,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = crate::registry::lookup_by_segments(&["batches", "list"]).expect("batches list");
+    super::with_typed_error_context(op, globals, || {
+        super::validate_cursor_pagination(&args.pagination)?;
+        if args.pagination.limit == Some(0) {
+            return Err(CliError::Usage(
+                Diag::new("invalid_value", "batches list --limit must be at least 1")
+                    .with_details(serde_json::json!({ "field": "limit", "min": 1, "received": 0 }))
+                    .with_suggestion("exa-agent batches list --limit 100"),
+            ));
+        }
+        let spec = super::build_typed_spec(op, &[], globals)?;
+        let static_query = args
+            .status
+            .map(|status| vec![("status".to_string(), status.as_str().to_string())])
+            .unwrap_or_default();
+        let query = super::merge_static_and_pagination_query(&static_query, &args.pagination);
+        if args.pagination.all && !(globals.print_request || globals.dry_run) {
+            super::dispatch_paginated_typed_command(
+                spec,
+                globals,
+                pretty,
+                &args.pagination,
+                None,
+                &static_query,
+            )
+        } else {
+            super::dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
+        }
+    })
+}
+
+fn dispatch_id_command(
+    action: &str,
+    id: &str,
+    globals: &GlobalArgs,
+    pretty: bool,
+) -> Result<i32, CliError> {
+    let op = crate::registry::lookup_by_segments(&["batches", action])
+        .expect("batch id command is in the registry");
+    super::with_typed_error_context(op, globals, || {
+        let spec = super::build_typed_spec(op, &[], globals)?;
+        let path = super::checked_substitute_path(op.api_path, &[("id", id)])?;
+        super::dispatch_typed_command_routed(spec, globals, pretty, Some(&path), &[], false, None)
+    })
+}
 
 pub(crate) fn validate_create_body(body: &Value) -> Result<(), CliError> {
     let Some(requests) = body.get("requests") else {

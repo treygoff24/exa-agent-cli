@@ -26,15 +26,15 @@ use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime};
 
 use cli::{
     AdminCmd, AdminKeysCmd, AdminKeysCreateArgs, AgentCmd, AgentRunArgs, AgentRunsCmd,
-    AgentRunsEventsArgs, AnswerArgs, AuthCmd, BatchesCmd, BatchesCreateArgs, BatchesListArgs,
-    CapabilitiesArgs, Cli, Command, ConfigCmd, ConfigProfilesCmd, ContentsArgs, ContextArgs,
-    FetchArgs, GlobalArgs, GroupBy, MacroCmd, MonitorBatchArgs, MonitorCmd, MonitorCreateArgs,
-    MonitorListArgs, MonitorRunsCmd, PaginationArgs, PresetCmd, ResearchCmd, RobotDocsCmd,
-    SchemaCmd, SearchArgs, SimilarArgs, TeamCmd, WebsetEnrichmentFormat, WebsetExportFormat,
-    WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs, WebsetsExportsCmd, WebsetsGetArgs,
-    WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs,
-    WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs,
-    WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    AgentRunsEventsArgs, AnswerArgs, AuthCmd, CapabilitiesArgs, Cli, Command, ConfigCmd,
+    ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
+    MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
+    PaginationArgs, PresetCmd, ResearchCmd, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
+    TeamCmd, WebsetEnrichmentFormat, WebsetExportFormat, WebsetsCmd, WebsetsCreateArgs,
+    WebsetsEventsListArgs, WebsetsExportsCmd, WebsetsGetArgs, WebsetsImportsCmd, WebsetsListArgs,
+    WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs,
+    WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs,
+    WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -42,8 +42,8 @@ use output::envelope::{
     ErrorEnvelope, EventEnvelopeArgs, ResponseEnvelopeArgs,
 };
 use output::{
-    emit_ndjson, emit_raw, emit_stdout, resolve_mode, stdout_is_tty, write_ndjson,
-    write_stdout_value, OutputMode,
+    append_operation_next_actions, append_pagination_next_action, emit_ndjson, emit_raw,
+    emit_stdout, resolve_mode, stdout_is_tty, write_ndjson, write_stdout_value, OutputMode,
 };
 use request::RequestOverrides;
 use transport::{
@@ -1268,7 +1268,7 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Answer(args) => dispatch_answer(args, &cli.globals, pretty),
         Command::Context(args) => dispatch_context(args, &cli.globals, pretty),
         Command::Monitor { sub } => dispatch_monitor(sub, &cli.globals, pretty),
-        Command::Batches { sub } => dispatch_batches(sub, &cli.globals, pretty),
+        Command::Batches { sub } => batches::dispatch(sub, &cli.globals, pretty),
         Command::Websets { sub } => dispatch_websets(sub, &cli.globals, pretty),
         Command::Team { sub } => dispatch_team(sub.as_ref(), &cli.globals, pretty),
         Command::Admin { sub } => dispatch_admin(sub, &cli.globals, pretty),
@@ -3090,110 +3090,6 @@ fn globals_with_required_beta(globals: &GlobalArgs, required: &str) -> GlobalArg
         },
     );
     merged
-}
-
-fn dispatch_batches(sub: &BatchesCmd, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let globals = globals_with_required_beta(globals, batches::BETA_TOKEN);
-    match sub {
-        BatchesCmd::Create(args) => dispatch_batches_create(args, &globals, pretty),
-        BatchesCmd::List(args) => dispatch_batches_list(args, &globals, pretty),
-        BatchesCmd::Get { id } => dispatch_batch_id_command("get", id, &globals, pretty),
-        BatchesCmd::Cancel { id } => dispatch_batch_id_command("cancel", id, &globals, pretty),
-        BatchesCmd::Delete { id } => dispatch_batch_id_command("delete", id, &globals, pretty),
-    }
-}
-
-fn dispatch_batches_create(
-    args: &BatchesCreateArgs,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["batches", "create"]).expect("batches create");
-    with_typed_error_context(op, globals, || {
-        let requests = args
-            .requests
-            .as_deref()
-            .map(|raw| request::read_json_value_arg(raw, "requests"))
-            .transpose()?;
-        // Required registry fields are assembled before defaults. Seed this field from the
-        // preset only when no named value exists; explicit --body/--set still win below.
-        let requests = requests
-            .or(if args.requests.is_none() {
-                globals
-                    .preset
-                    .as_deref()
-                    .map(|name| presets::get_preset(name, "batches create"))
-                    .transpose()?
-                    .and_then(|preset| preset.body.get("requests").cloned())
-            } else {
-                None
-            })
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))
-            .to_string();
-        let metadata = args
-            .metadata
-            .as_deref()
-            .map(|raw| request::read_json_value_arg(raw, "metadata"))
-            .transpose()?
-            .map(|value| value.to_string());
-        let spec = build_typed_spec(
-            op,
-            &[("requests", Some(requests)), ("metadata", metadata)],
-            globals,
-        )?;
-        dispatch_typed_command(spec, globals, pretty)
-    })
-}
-
-fn dispatch_batches_list(
-    args: &BatchesListArgs,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["batches", "list"]).expect("batches list");
-    with_typed_error_context(op, globals, || {
-        validate_cursor_pagination(&args.pagination)?;
-        if args.pagination.limit == Some(0) {
-            return Err(CliError::Usage(
-                Diag::new("invalid_value", "batches list --limit must be at least 1")
-                    .with_details(serde_json::json!({ "field": "limit", "min": 1, "received": 0 }))
-                    .with_suggestion("exa-agent batches list --limit 100"),
-            ));
-        }
-        let spec = build_typed_spec(op, &[], globals)?;
-        let static_query = args
-            .status
-            .map(|status| vec![("status".to_string(), status.as_str().to_string())])
-            .unwrap_or_default();
-        let query = merge_static_and_pagination_query(&static_query, &args.pagination);
-        if args.pagination.all && !(globals.print_request || globals.dry_run) {
-            dispatch_paginated_typed_command(
-                spec,
-                globals,
-                pretty,
-                &args.pagination,
-                None,
-                &static_query,
-            )
-        } else {
-            dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
-        }
-    })
-}
-
-fn dispatch_batch_id_command(
-    action: &str,
-    id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["batches", action])
-        .expect("batch id command is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path = checked_substitute_path(op.api_path, &[("id", id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(&path), &[], false, None)
-    })
 }
 
 fn dispatch_research(
@@ -8114,293 +8010,6 @@ fn append_warning_next_actions(envelope: &mut serde_json::Value) {
     if !actions.is_empty() {
         envelope["nextActions"] = serde_json::Value::Array(actions);
     }
-}
-
-fn append_operation_next_actions(
-    envelope: &mut serde_json::Value,
-    operation: &registry::OperationDef,
-    webset_id: Option<&str>,
-    globals: &GlobalArgs,
-) -> Result<(), CliError> {
-    let Some(data) = envelope.get("data").cloned() else {
-        return Ok(());
-    };
-    match operation.command().as_str() {
-        "batches create" => {
-            if let Some(id) = data.get("id").and_then(serde_json::Value::as_str) {
-                push_resource_next_action(
-                    envelope,
-                    "Poll batch status and refresh its short-lived results URL",
-                    "batches get",
-                    &[id.to_string()],
-                    globals,
-                );
-            }
-        }
-        "batches get" => {
-            if let Some(url) = data
-                .get("resultsUrl")
-                .and_then(serde_json::Value::as_str)
-                .filter(|url| url.starts_with("https://"))
-            {
-                push_next_action(envelope,
-                    "Download JSONL from this short-lived bearer URL; run batches get again after it expires. Redirect stdout to a new file to keep all rows.",
-                    format!("curl --fail --location --proto '=https' -- {}", shell_quote(url)),
-                );
-            }
-        }
-        "agent runs create"
-        | "websets create"
-        | "monitor create"
-        | "websets monitors create"
-        | "websets webhooks create"
-        | "websets searches create"
-        | "websets enrichments create"
-        | "admin keys create" => {
-            if let Some(id) = data.get("id").and_then(serde_json::Value::as_str) {
-                let base = operation.command();
-                let base = base.strip_suffix(" create").expect("create command");
-                let Some(path) = envelope["operation"]["path"].as_str() else {
-                    return Ok(());
-                };
-                let Some(mut ids) = route_ids(operation.api_path, path) else {
-                    return Ok(());
-                };
-                ids.push(id.to_string());
-                push_resource_next_action(
-                    envelope,
-                    "Inspect the created resource",
-                    &format!("{base} get"),
-                    &ids,
-                    globals,
-                );
-                if base == "agent runs" {
-                    push_resource_next_action(
-                        envelope,
-                        "Follow run events",
-                        "agent runs events --stream",
-                        &ids,
-                        globals,
-                    );
-                } else if base == "websets" {
-                    push_resource_next_action(
-                        envelope,
-                        "Read all webset items",
-                        "websets items list --all",
-                        &ids,
-                        globals,
-                    );
-                }
-            }
-        }
-        "websets imports create" => {
-            if let Some(upload_url) = data.get("uploadUrl").and_then(serde_json::Value::as_str) {
-                envelope["nextActions"]
-                    .as_array_mut()
-                    .expect("response envelopes initialize nextActions as an array")
-                    .push(serde_json::json!({
-                        "description": "Upload your CSV file",
-                        "command": format!(
-                            "curl -X PUT --data-binary @your-file.csv -H 'Content-Type: text/csv' {}",
-                            shell_quote(upload_url)
-                        ),
-                    }));
-            } else {
-                // Without `uploadUrl` the create half-succeeded: there is nothing to upload to,
-                // so the caller must not read exit 0 as "import ready". `upstream_malformed` is
-                // an exit-5 error in the dictionary, never a warning on a success envelope.
-                let import_id = data.get("id").and_then(serde_json::Value::as_str);
-                let mut details = serde_json::json!({
-                    "field": "uploadUrl",
-                    "command": "websets imports create",
-                });
-                if let Some(import_id) = import_id {
-                    details["importId"] = serde_json::Value::String(import_id.to_string());
-                }
-                return Err(CliError::Upstream(
-                    Diag::new(
-                        "upstream_malformed",
-                        "websets imports create response did not include string `uploadUrl`; the upload step could not be prepared",
-                    )
-                    .with_details(details)
-                    .with_suggestion(format!(
-                        "exa-agent websets imports get {}",
-                        shell_quote(import_id.unwrap_or("<id>"))
-                    )),
-                ));
-            }
-        }
-        "websets exports create" => {
-            let Some(webset_id) = webset_id else {
-                return Ok(());
-            };
-            if let Some(export_id) = data.get("id").and_then(serde_json::Value::as_str) {
-                envelope["nextActions"]
-                    .as_array_mut()
-                    .expect("response envelopes initialize nextActions as an array")
-                    .push(serde_json::json!({
-                        "description": "Poll export status",
-                        "command": format!(
-                            "exa-agent websets exports get {} {}",
-                            shell_quote(webset_id),
-                            shell_quote(export_id)
-                        ),
-                    }));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn push_next_action(envelope: &mut serde_json::Value, description: &str, command: String) {
-    envelope["nextActions"]
-        .as_array_mut()
-        .expect("response envelopes initialize nextActions")
-        .push(serde_json::json!({ "description": description, "command": command }));
-}
-
-fn append_pagination_next_action(
-    envelope: &mut serde_json::Value,
-    op: &registry::OperationDef,
-    path: &str,
-    query: &[(String, String)],
-    globals: &GlobalArgs,
-) {
-    if matches!(op.pagination, registry::Pagination::None) {
-        return;
-    }
-    let data = &envelope["data"];
-    let Some(cursor) = next_cursor(data) else {
-        return;
-    };
-    if !has_more(data, Some(&cursor))
-        || query
-            .iter()
-            .any(|(key, value)| key == "cursor" && value == &cursor)
-    {
-        return;
-    }
-    let Some(ids) = route_ids(op.api_path, path) else {
-        return;
-    };
-    let mut args = vec!["exa-agent".to_string()];
-    args.extend(op.cli_path.iter().map(|part| part.to_string()));
-    for (key, value) in query {
-        let flag = match key.as_str() {
-            "cursor" => continue,
-            "limit" | "status" | "name" | "search" | "successful" => key.as_str(),
-            "sourceId" => "source-id",
-            "websetId" => "webset-id",
-            "types" => "type",
-            "createdBefore" => "created-before",
-            "createdAfter" => "created-after",
-            "eventType" => "event-type",
-            _ => {
-                if let Some(key) = key
-                    .strip_prefix("metadata[")
-                    .and_then(|key| key.strip_suffix(']'))
-                {
-                    args.push(format!("--metadata={key}={value}"));
-                    continue;
-                }
-                // Do not manufacture a continuation that silently loses an unknown filter.
-                return;
-            }
-        };
-        args.push(format!("--{flag}={value}"));
-    }
-    args.push(format!("--cursor={cursor}"));
-    args.push("--json".to_string());
-    append_followup_context(&mut args, globals);
-    if !ids.is_empty() {
-        args.push("--".to_string());
-        args.extend(ids);
-    }
-    push_next_action(
-        envelope,
-        "Read the next page (same filters)",
-        args.iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-}
-
-fn push_resource_next_action(
-    envelope: &mut serde_json::Value,
-    description: &str,
-    command: &str,
-    ids: &[String],
-    globals: &GlobalArgs,
-) {
-    let mut args = vec!["exa-agent".to_string()];
-    args.extend(command.split_whitespace().map(str::to_string));
-    args.push("--json".to_string());
-    append_followup_context(&mut args, globals);
-    args.push("--".to_string());
-    args.extend_from_slice(ids);
-    push_next_action(
-        envelope,
-        description,
-        args.iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-}
-
-fn append_followup_context(args: &mut Vec<String>, globals: &GlobalArgs) {
-    if let Some(profile) = &globals.profile {
-        args.push(format!("--profile={profile}"));
-    }
-    if let Some(base) = globals
-        .base_url
-        .as_deref()
-        .filter(|base| transport::is_safe_suggestion_base_url_origin(base))
-    {
-        args.push(format!("--base-url={base}"));
-    }
-    if let Some(beta) = &globals.beta {
-        args.push(format!("--beta={beta}"));
-    }
-    // Caller headers passed managed-secret validation before dispatch; reuse only non-secrets.
-    if let Ok(headers) = parse_user_headers(&globals.headers) {
-        args.extend(
-            headers
-                .iter()
-                .filter(|(name, _)| !redaction::is_secret_name(name))
-                .map(|(name, value)| format!("--header={name}: {value}")),
-        );
-    }
-}
-
-/// Reverse our path-segment encoding, not a URL form decoder (`+` is a literal plus).
-fn route_ids(template: &str, path: &str) -> Option<Vec<String>> {
-    let template: Vec<_> = template.split('/').collect();
-    let path: Vec<_> = path.split('/').collect();
-    if template.len() != path.len() {
-        return None;
-    }
-    template
-        .iter()
-        .zip(path)
-        .filter(|(segment, _)| segment.starts_with('{') && segment.ends_with('}'))
-        .map(|(_, value)| {
-            let mut bytes = Vec::new();
-            let mut input = value.bytes();
-            while let Some(byte) = input.next() {
-                bytes.push(if byte == b'%' {
-                    let high = (input.next()? as char).to_digit(16)?;
-                    let low = (input.next()? as char).to_digit(16)?;
-                    (high * 16 + low) as u8
-                } else {
-                    byte
-                });
-            }
-            String::from_utf8(bytes).ok()
-        })
-        .collect()
 }
 
 fn append_contents_status_warnings(

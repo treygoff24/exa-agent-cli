@@ -92,7 +92,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 12 | interrupted | SIGINT / stream interrupted |
 | 13 | billing | 402; the Exa account is out of credits (key is valid, command was fine) |
 
-`error.code` is the finer-grained signal — 34 codes map onto these 14 exit categories (e.g. `not_authenticated` and `reauth_required` both map to exit `2`, so you can branch "set a key" vs "rotate the key"). The full `error.code` dictionary is in `capabilities --json`; if this file and `capabilities` disagree, trust `capabilities` — it is generated from the code.
+`error.code` is the finer-grained signal: 35 codes map onto these 14 exit categories. For exit `2`, `not_authenticated` means set a key, `reauth_required` means Exa rejected the credential, and `feature_not_enabled` means request access from Exa rather than rotating the key. The full dictionary is in `capabilities --json`; trust its generated values if this file disagrees.
 
 **Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** Challenge-evidenced raw payment 402 is checked first and is `payment_required` / exit `2`; otherwise a bare 402, or any 4xx body carrying `NO_MORE_CREDITS`, means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane.
 

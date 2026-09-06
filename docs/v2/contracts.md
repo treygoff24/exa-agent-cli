@@ -163,6 +163,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `broadcast_scope_refused` | usage (1) | false | a broad/destructive scope was refused without an explicit `--all`/opt-in. |
 | `not_authenticated` | auth (2) | false | no credential resolved locally; `details.checked` lists the ladder rungs tried. |
 | `reauth_required` | auth (2) | false | a credential was sent but upstream rejected it (401/403 — revoked/expired/wrong scope). |
+| `feature_not_enabled` | auth (2) | false | HTTP 403 with `FEATURE_DISABLED`: request feature access from Exa; rotating a valid key does not enable the feature. |
 | `payment_required` | auth (2) | false | a raw payment discovery/pass-through request received a challenge-evidenced 402. This classification wins before any credit-body sniffing; safe challenge metadata may be surfaced and payment secrets are never echoed. |
 | `key_scope_mismatch` | auth (2) | false | an api key was presented where a service key is required, or vice versa (D4). |
 | `config_parse_error` | config (3) | false | config TOML failed to parse. |

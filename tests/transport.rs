@@ -533,6 +533,33 @@ fn credit_sniff_does_not_swallow_ordinary_4xx() {
     assert_eq!(err.diag().code, "reauth_required");
 }
 
+#[test]
+fn disabled_feature_is_not_a_request_to_rotate_valid_credentials() {
+    let body = br#"{"error":"The batch endpoint is not enabled for your team. Contact support to request access.","tag":"FEATURE_DISABLED"}"#;
+    let err = classify_http_status(403, body, &[]);
+    assert!(matches!(err, CliError::Auth(_)));
+    assert_eq!(err.diag().code, "feature_not_enabled");
+    assert!(!err.diag().retryable);
+    assert_eq!(err.diag().http_status, Some(403));
+    assert_eq!(
+        err.diag().details.as_ref().unwrap()["upstream"]["tag"],
+        "FEATURE_DISABLED"
+    );
+    for (status, body) in [
+        (401, body.as_slice()),
+        (403, br#"{"tag":"INVALID_API_KEY"}"#.as_slice()),
+    ] {
+        assert_eq!(
+            classify_http_status(status, body, &[]).diag().code,
+            "reauth_required"
+        );
+    }
+    assert_eq!(
+        classify_http_status(500, body, &[]).diag().code,
+        "upstream_error"
+    );
+}
+
 /// A 402 must not be retried. `should_retry` is private, so this asserts through the public
 /// send path: one canned 402 and one recorded request means no retry happened.
 #[test]

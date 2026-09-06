@@ -269,6 +269,10 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
             ),
         ),
         (
+            "feature_not_enabled",
+            spec(2, "auth", false, "the team lacks access to this API feature; request enablement from Exa, not a new API key"),
+        ),
+        (
             "payment_required",
             spec(
                 2,

@@ -1239,7 +1239,18 @@ fn classify_http_status_with_payment_mode(
     match status {
         402 => insufficient_credits_error(status, body),
         401 | 403 => {
-            let mut diag = upstream_error_diag("reauth_required", status, body);
+            let feature_disabled = status == 403
+                && serde_json::from_slice::<Value>(body)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("tag").and_then(Value::as_str) == Some("FEATURE_DISABLED")
+                    });
+            let code = if feature_disabled {
+                "feature_not_enabled"
+            } else {
+                "reauth_required"
+            };
+            let mut diag = upstream_error_diag(code, status, body);
             diag.http_status = Some(status);
             diag.retryable = false;
             CliError::Auth(diag)

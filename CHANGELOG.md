@@ -18,6 +18,8 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Account feature-access failures now return `feature_not_enabled`, distinct from
+  a rejected credential. This follows a live Batch API entitlement refusal.
 - Request previews now share header assembly with live requests, including custom
   headers, SSE Accept, idempotency keys, and the documented `Exa-Beta` header.
 - Doctor backups preserve original config permissions across undo and start private

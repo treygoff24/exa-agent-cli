@@ -1,0 +1,55 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "batches create",
+  "operation": {
+    "method": "POST",
+    "path": "/batches",
+    "operationId": "createBatch",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "POST",
+      "path": "/batches",
+      "query": [],
+      "body": {
+        "requests": [
+          {
+            "customId": "row-1",
+            "method": "POST",
+            "url": "/search",
+            "body": {
+              "query": "AI news"
+            }
+          }
+        ]
+      },
+      "headers": [
+        {
+          "name": "Exa-Beta",
+          "value": "batches-2026-06-06"
+        }
+      ]
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:4f2b64d958c1d85e00a9923adc30412185d55c1bd62861aa250d49c2d993a4a6",
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false
+}

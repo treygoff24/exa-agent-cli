@@ -253,6 +253,20 @@ pub enum GroupBy {
     Month,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum BatchListStatus {
+    Completed,
+}
+
+impl BatchListStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+        }
+    }
+}
+
 /// Universal flags, inherited by every subcommand (`global = true`).
 #[derive(Args, Clone)]
 #[command(next_help_heading = "Global options")]
@@ -525,6 +539,12 @@ pub enum Command {
         #[command(subcommand)]
         sub: AgentCmd,
     },
+    /// Asynchronous Batch API (/batches). Enterprise beta.
+    #[command(visible_alias = "batch")]
+    Batches {
+        #[command(subcommand)]
+        sub: BatchesCmd,
+    },
     /// Retired Research API; use `search --type deep-reasoning`.
     Research {
         #[command(subcommand)]
@@ -633,10 +653,10 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub text: Option<String>,
-    /// Return query-aware highlights. Bare/default caps at 800 chars/result; N overrides the cap.
+    /// Return query-aware highlights. Bare/default caps at 800 chars/result; use N or JSON options.
     #[arg(
         long,
-        value_name = "N",
+        value_name = "N|JSON|@file",
         num_args = 0..=1,
         default_missing_value = "",
         allow_negative_numbers = true
@@ -758,7 +778,7 @@ pub struct ContentsArgs {
         num_args = 1
     )]
     pub summary_query: Option<String>,
-    /// Return highlights, optionally guided by a custom query or JSON options object.
+    /// Return highlights, optionally guided by a custom query or JSON options (inline or @file).
     #[arg(
         long,
         help = crate::registry::field_input_help("contents", "highlights").expect("contents highlights metadata"),
@@ -839,7 +859,7 @@ impl SimilarArgs {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct AnswerArgs {
     #[arg(value_name = crate::registry::field_value_name("answer", "question").expect("answer question metadata"))]
     pub question: String,
@@ -853,6 +873,15 @@ pub struct AnswerArgs {
         value_name = crate::registry::field_value_name("answer", "output-schema").expect("answer output-schema metadata")
     )]
     pub output_schema: Option<String>,
+    /// Answer model; exa is the upstream default.
+    #[arg(long, value_parser = ["exa", "exa-pro", "exa-research", "exa-fast"])]
+    pub model: Option<String>,
+    /// Instructions guiding the answer, inline or read from @file.
+    #[arg(long, value_name = "TEXT|@file")]
+    pub system_prompt: Option<String>,
+    /// Two-letter ISO country code, e.g. US.
+    #[arg(long, value_name = "COUNTRY")]
+    pub user_location: Option<String>,
 }
 
 impl AnswerArgs {
@@ -861,6 +890,13 @@ impl AnswerArgs {
             ("question", Some(self.question.clone())),
             ("text", bool_flag(self.text)),
             ("stream", bool_flag(self.stream)),
+            ("model", self.model.clone()),
+            (
+                "user-location",
+                self.user_location
+                    .as_ref()
+                    .map(|value| serde_json::json!(value).to_string()),
+            ),
         ]
     }
 }
@@ -911,6 +947,10 @@ pub enum MonitorCmd {
         status: Option<String>,
         #[arg(long)]
         webhook_url: Option<String>,
+        #[arg(long, value_name = "DOMAIN")]
+        include_domain: Vec<String>,
+        #[arg(long, value_name = "DOMAIN")]
+        exclude_domain: Vec<String>,
     },
     /// DELETE /monitors/{id}.
     Delete { id: String },
@@ -937,6 +977,12 @@ pub struct MonitorCreateArgs {
     pub webhook_url: Option<String>,
     #[arg(long)]
     pub secret_output: Option<String>,
+    /// Restrict the monitor's searches to these domains.
+    #[arg(long, value_name = "DOMAIN")]
+    pub include_domain: Vec<String>,
+    /// Exclude these domains from the monitor's searches.
+    #[arg(long, value_name = "DOMAIN")]
+    pub exclude_domain: Vec<String>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -957,6 +1003,39 @@ pub struct MonitorBatchArgs {
     /// Required with live `dry_run:false` and `action=delete` (pass `delete`).
     #[arg(long)]
     pub confirm: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BatchesCmd {
+    /// Submit asynchronous /search or /agent/runs requests (POST /batches).
+    Create(BatchesCreateArgs),
+    /// List batches, optionally filtering to completed batches (GET /batches).
+    List(BatchesListArgs),
+    /// Get batch status and a fresh short-lived results URL (GET /batches/{id}).
+    Get { id: String },
+    /// Cancel in-progress work without deleting its record (POST /batches/{id}/cancel).
+    Cancel { id: String },
+    /// Soft-delete a terminal batch (DELETE /batches/{id}).
+    Delete { id: String },
+}
+
+#[derive(Args, Debug)]
+pub struct BatchesCreateArgs {
+    /// JSON array of batch request items; accepts inline JSON or `@file`.
+    #[arg(long, value_name = "JSON|@file")]
+    pub requests: Option<String>,
+    /// String-valued metadata object; accepts inline JSON or `@file`.
+    #[arg(long, value_name = "JSON|@file")]
+    pub metadata: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct BatchesListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
+    /// Filter to completed batches. No other status is supported upstream.
+    #[arg(long, value_enum, ignore_case = true)]
+    pub status: Option<BatchListStatus>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1047,6 +1126,8 @@ pub enum AgentRunsCmd {
     Events(AgentRunsEventsArgs),
     /// POST /agent/runs/{id}/cancel.
     Cancel { id: String },
+    /// Complete a max-effort run early and retain gathered results (POST /agent/runs/{id}/stop).
+    Stop { id: String },
     /// DELETE /agent/runs/{id}.
     Delete { id: String },
 }
@@ -1791,8 +1872,16 @@ pub fn command_path(command: &Command) -> String {
                 AgentRunsCmd::Get { .. } => "agent runs get".to_string(),
                 AgentRunsCmd::Events(_) => "agent runs events".to_string(),
                 AgentRunsCmd::Cancel { .. } => "agent runs cancel".to_string(),
+                AgentRunsCmd::Stop { .. } => "agent runs stop".to_string(),
                 AgentRunsCmd::Delete { .. } => "agent runs delete".to_string(),
             },
+        },
+        Command::Batches { sub } => match sub {
+            BatchesCmd::Create(_) => "batches create".to_string(),
+            BatchesCmd::List(_) => "batches list".to_string(),
+            BatchesCmd::Get { .. } => "batches get".to_string(),
+            BatchesCmd::Cancel { .. } => "batches cancel".to_string(),
+            BatchesCmd::Delete { .. } => "batches delete".to_string(),
         },
         Command::Research { sub } => match sub {
             ResearchCmd::Create(_) => "research create".to_string(),

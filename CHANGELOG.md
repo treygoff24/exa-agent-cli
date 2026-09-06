@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Added
+
+- Batch create, list, get, cancel, and delete commands, plus early Agent run stop.
+  Batch wrappers are validated locally, completed-list filters survive pagination,
+  and commands add their required beta tokens. Batch and stop access remains subject
+  to Exa account entitlements.
+- Answer model, system prompt, and country flags; the Polymarket Agent data source;
+  monitor domain filters; Dynamic Highlights JSON and file input with beta and
+  option-conflict checks.
+- Follow-up commands for created resources and remaining pages. Continuations retain
+  filters and explicit profile/beta settings without copying API keys or output paths.
+
+### Fixed
+
+- Request previews now share header assembly with live requests, including custom
+  headers, SSE Accept, idempotency keys, and the documented `Exa-Beta` header.
+- Doctor backups preserve original config permissions across undo and start private
+  before config bytes are written, independent of the shell's umask.
+- Output documentation now explains how to recover the complete stdout result after
+  an output-file write failure without repeating a successful create.
+
 ## 0.6.0 — 2026-08-11
 
 ### Added

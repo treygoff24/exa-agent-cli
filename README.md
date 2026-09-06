@@ -63,6 +63,10 @@ exa-agent search "rust async runtimes" --num-results 5
 
 # Cited answer
 exa-agent answer "what changed in the EU AI Act in 2025?"
+exa-agent answer "Recent fusion energy milestones" --model exa-pro --system-prompt "Use primary sources" --user-location US
+
+# Share a highlights budget across results (beta)
+exa-agent search "fusion energy" --highlights '{"dynamic":true,"verbosity":"medium"}' --beta dynamic-highlights-2026-08-28
 
 # Page contents
 exa-agent contents https://exa.ai https://docs.exa.ai --text
@@ -100,7 +104,7 @@ exa-agent schema --help         # embedded API/CLI schema
 exa-agent doctor                # offline health checks (add --online for a live probe)
 ```
 
-`capabilities` lists all 67 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
+`capabilities` lists all 73 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
 
 For a hard local-only boundary, set `EXA_AGENT_NO_NETWORK` to any value (including empty).
 Its presence enables the guard; unsetting it is the only off state. Live typed, raw,
@@ -113,13 +117,33 @@ commands still work.
 ### Command surface
 
 - **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream).
-- **Agent runs** — `agent runs create|get|list|events|cancel|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/beta `max` effort.
+- **Agent runs** — `agent runs create|get|list|events|cancel|stop|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/beta `max` effort.
+- **Batches** — `batches create|list|get|cancel|delete` (alias `batch`) runs `/search` and `/agent/runs` requests asynchronously. Typed batch commands add the required beta token. Access depends on your team's Batch API entitlement.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
 - **Websets** — the full tree: websets, searches, items, enrichments, exports, monitors and their runs, imports, webhooks and their delivery attempts, and events.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.
+
+### Asynchronous batches
+
+```sh
+exa-agent batches create --requests '[{"customId":"news","method":"POST","url":"/search","body":{"query":"fusion energy"}}]' --dry-run --print-request
+exa-agent batches list --status completed --limit 100 --all
+exa-agent batches get batch_abc123
+exa-agent batches cancel batch_abc123 --yes
+```
+
+`--requests` and `--metadata` accept inline JSON or `@file`; `--body` and `--set`
+override them. Each request needs a unique `customId` and an object body, with
+streaming disabled. `batches get` returns a fresh, short-lived `resultsUrl` and
+a credential-free download command in `nextActions`. Treat that URL as a bearer
+credential; fetch it directly without sending your Exa API key.
+
+`agent runs stop ID --yes` completes a max-effort run early with the results it
+has gathered. It differs from cancellation and still incurs accrued usage.
+The stop command adds the required beta token automatically.
 
 ### Presets and macros
 

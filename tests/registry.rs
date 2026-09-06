@@ -13,6 +13,7 @@ fn registry_idempotency_matches_contract_create_list() {
     let expected = [
         "create-api-key",
         "createAgentRun",
+        "createBatch",
         "createMonitor",
         "imports-create",
         "monitors-create",

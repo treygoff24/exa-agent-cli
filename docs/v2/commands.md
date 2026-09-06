@@ -441,11 +441,12 @@ exa-agent agent runs get    ID
 exa-agent agent runs events ID --limit N --cursor TOKEN          # JSON pages
 exa-agent agent runs events ID --stream --last-event-id ID       # SSE replay
 exa-agent agent runs cancel ID
+exa-agent agent runs stop   ID --yes                            # max effort: finish early with accrued results
 exa-agent agent runs delete ID --yes
 ```
 
 Guards / notes:
-- Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --since ...` (D7, contracts §7).
+- Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --limit 10` (D7, contracts §7).
 - `--data-source` count > 5 → exit 1.
 - Typed `--data-source` values are case-insensitive and sent with canonical spelling; invalid values exit 1 with the accepted set. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; explicit `--body`/`--set` values pass through unchanged.
 - `--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. `effort max` requires both an explicit budget cap and `--beta agent-max-effort-2026-07-27` (comma-separated beta tokens are accepted; the CLI never invents the beta header).

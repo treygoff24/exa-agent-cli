@@ -16,6 +16,39 @@ struct BodyShape {
 }
 
 #[test]
+fn every_vendored_api_operation_has_a_typed_command() {
+    let registry_ids: BTreeSet<_> = registry::REGISTRY
+        .iter()
+        .map(|op| op.operation_id)
+        .collect();
+    for spec in load_specs() {
+        let mut operations = BTreeSet::new();
+        for methods in spec.value["paths"]
+            .as_object()
+            .expect("OpenAPI paths")
+            .values()
+        {
+            for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
+                if let Some(operation) = methods.get(method) {
+                    operations.insert(operation["operationId"].as_str().expect("operationId"));
+                }
+            }
+        }
+        assert!(
+            !operations.is_empty(),
+            "{} has no API operations",
+            spec.name
+        );
+        let missing: Vec<_> = operations.difference(&registry_ids).collect();
+        assert!(
+            missing.is_empty(),
+            "{} operations missing typed commands: {missing:?}",
+            spec.name
+        );
+    }
+}
+
+#[test]
 fn modeled_registry_fields_match_openapi_request_bodies() {
     let specs = load_specs();
     let mut checked = Vec::new();

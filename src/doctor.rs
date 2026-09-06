@@ -5,6 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use serde::Serialize;
 
 use crate::auth::{self, CredentialNamespace};
@@ -1027,7 +1030,15 @@ fn backup_config(config_path: &Path) -> Result<PathBuf, String> {
             config_path.display()
         )
     })?;
-    write_atomic(&backup, &bytes)?;
+    let permissions = fs::metadata(config_path)
+        .map_err(|error| {
+            format!(
+                "failed to inspect config {} permissions: {error}",
+                config_path.display()
+            )
+        })?
+        .permissions();
+    write_atomic_with_permissions(&backup, &bytes, Some(permissions))?;
     let marker = latest_backup_marker(config_path);
     write_atomic(&marker, backup.display().to_string().as_bytes())?;
     cleanup_old_backups(config_path, &backup, &marker)?;
@@ -1154,6 +1165,14 @@ fn restore_backup(backup: &Path, config_path: &Path) -> Result<(), String> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_atomic_with_permissions(path, bytes, None)
+}
+
+fn write_atomic_with_permissions(
+    path: &Path,
+    bytes: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
@@ -1170,13 +1189,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::process::id(),
         nanos
     ));
-    let mut file = fs::File::create(&tmp)
+    let mut open_options = fs::OpenOptions::new();
+    open_options.write(true).create_new(true);
+    #[cfg(unix)]
+    open_options.mode(0o600);
+    let mut file = open_options
+        .open(&tmp)
         .map_err(|error| format!("failed to create {}: {error}", tmp.display()))?;
     file.write_all(bytes)
         .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
     file.sync_all()
         .map_err(|error| format!("failed to sync {}: {error}", tmp.display()))?;
-    if path.exists() {
+    if let Some(permissions) = permissions {
+        fs::set_permissions(&tmp, permissions)
+            .map_err(|error| format!("failed to set temporary file permissions: {error}"))?;
+    } else if path.exists() {
         let permissions = fs::metadata(path)
             .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?
             .permissions();

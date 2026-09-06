@@ -1,0 +1,53 @@
+{
+  "schema": "exa.cli.response.v1",
+  "ok": true,
+  "command": "batches list",
+  "operation": {
+    "method": "GET",
+    "path": "/batches",
+    "operationId": "listBatches",
+    "source": "exa-spec.json",
+    "sourceVersion": "2.0.0"
+  },
+  "request": {
+    "requestId": "req_dry_run",
+    "profile": "default",
+    "redacted": true
+  },
+  "count": null,
+  "data": {
+    "request": {
+      "method": "GET",
+      "path": "/batches",
+      "query": [
+        {
+          "name": "status",
+          "value": "completed"
+        },
+        {
+          "name": "limit",
+          "value": "101"
+        }
+      ],
+      "body": null,
+      "headers": [
+        {
+          "name": "Exa-Beta",
+          "value": "batches-2026-06-06"
+        }
+      ]
+    },
+    "dryRun": true
+  },
+  "dataHash": "sha256:08f7ac987502b3c09514d7ddfeec1bef3d2a4fe0cf9dc8ec7ac267ba7c2f06b0",
+  "costDollars": {
+    "total": 0.0
+  },
+  "nextActions": [],
+  "warnings": [],
+  "diagnostics": {
+    "durationMs": 0,
+    "retries": 0
+  },
+  "dataTruncated": false
+}

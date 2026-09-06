@@ -2151,6 +2151,34 @@ struct PreparedRawRequest {
     correlation_id: Option<String>,
 }
 
+/// Non-auth headers shared by request previews and the wire path.
+pub(crate) fn request_headers(
+    globals: &GlobalArgs,
+    body: &serde_json::Value,
+) -> Result<Vec<(String, String)>, CliError> {
+    let mut headers = parse_user_headers(&globals.headers)?;
+    if body_wants_stream(body) && !has_header(&headers, "Accept") {
+        headers.push(("Accept".to_string(), "text/event-stream".to_string()));
+    }
+    if let Some(beta) = &globals.beta {
+        if let Some((_, existing)) = headers
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Exa-Beta"))
+        {
+            if !existing.is_empty() && !beta.is_empty() {
+                existing.push(',');
+            }
+            existing.push_str(beta);
+        } else {
+            headers.push(("Exa-Beta".to_string(), beta.clone()));
+        }
+    }
+    if let Some(key) = &globals.idempotency_key {
+        headers.push(("Idempotency-Key".to_string(), key.clone()));
+    }
+    Ok(headers)
+}
+
 fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawRequest, CliError> {
     let cfg = Config::load()?;
     let method = params.method.to_ascii_uppercase();
@@ -2168,18 +2196,9 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     };
     let url = build_url(&base_url, params.path, &query)?;
 
-    let mut headers = parse_user_headers(&params.globals.headers)?;
-    if body_wants_stream(&params.body) && !has_header(&headers, "Accept") {
-        headers.push(("Accept".to_string(), "text/event-stream".to_string()));
-    }
-    if let Some(beta) = &params.globals.beta {
-        headers.push(("x-exa-beta".to_string(), beta.clone()));
-    }
+    let mut headers = request_headers(params.globals, &params.body)?;
     let (profile, idempotency_key) = match params.auth {
         RawAuth::Api(credential) => {
-            if let Some(key) = &params.globals.idempotency_key {
-                headers.push(("Idempotency-Key".to_string(), key.clone()));
-            }
             inject_auth_headers(&mut headers, &credential.secret);
             (
                 credential.profile.clone(),

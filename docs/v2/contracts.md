@@ -219,7 +219,7 @@ This is a deliberate small-integer scheme, **not** sysexits — it is the publis
 ## 7. Retry & idempotency (transport-layer rule — D7)
 
 - `--retry N` (default 2) auto-retries **only**: idempotent GETs, network failures (exit-4 class), HTTP 429 (honoring `Retry-After` when present, `--retry-after` default on), and 5xx.
-- **Never** auto-retry a non-idempotent create-POST unless `--idempotency-key KEY` is supplied — i.e. anything that mints a billable async run *or* a resource whose duplicate creation is harmful. The authoritative list is the registry's `idempotency_sensitive` set; a Phase-1 test asserts this prose list equals it exactly. Affected: `agent runs create`, `websets create`, `websets searches create`, `websets enrichments create`, `websets imports create`, `websets exports create`, `websets monitors create`, `websets webhooks create`, `monitor create`, `admin keys create`. (`research create` was removed in 0.5.0 with the Research API's upstream retirement.)
+- **Never** auto-retry a non-idempotent create-POST unless `--idempotency-key KEY` is supplied — i.e. anything that mints a billable async run *or* a resource whose duplicate creation is harmful. The authoritative list is the registry's `idempotency_sensitive` set; a Phase-1 test asserts this prose list equals it exactly. Affected: `batches create`, `agent runs create`, `websets create`, `websets searches create`, `websets enrichments create`, `websets imports create`, `websets exports create`, `websets monitors create`, `websets webhooks create`, `monitor create`, `admin keys create`. (`research create` was removed in 0.5.0 with the Research API's upstream retirement.)
 - **The key must reach the server, or "keyed" means nothing.** When `--idempotency-key KEY` is supplied for an `idempotency_sensitive` op, transport **injects it upstream as an `Idempotency-Key: KEY` header** at the auth chokepoint (architecture §5) — that header, honored by Exa for server-side dedup, is the *only* thing that makes a keyed auto-retry non-double-billing. The local flag and the upstream header are the same value. ⚠️ Whether Exa honors a client idempotency-key header on create-POSTs is a **carry-over validation** (decisions.md): if it does not, keyed auto-retry is disabled and `--idempotency-key` becomes a no-op the recovery path still uses for the pending-run record.
 - Ambiguous create failure (request sent, no confirmed response): exit non-zero, write a **pending-run record** (append-only JSONL under the state dir), and set `suggestedCommand` to the exact recovery (`exa-agent agent runs list --limit 10` for Agent runs, or re-issue with `--idempotency-key` where listing is not the right recovery).
 - The pending-run record is an **agent-facing recovery contract** — agents parse it, so its shape is frozen. Schema `exa.cli.pending_run.v1`, one JSON object per line: `{ "schema": "exa.cli.pending_run.v1", "requestId": "...", "command": "agent runs create", "operationId": "createAgentRun", "apiPath": "/agent/runs", "idempotencyKey": null, "attemptedAt": "<SOURCE_DATE_EPOCH-aware epoch seconds>", "recoveryCommand": "exa-agent agent runs list --limit 10" }`. Golden-pinned (§14).
@@ -307,7 +307,7 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   "supportsRawBody": true,
   "supportsPrintRequest": true,
   "defaults": { "maxOutputBytes": 49152 },
-  "commandCount": 67,
+  "commandCount": 73,
   "commands": [
     {
       "path": "agent runs create",

@@ -158,6 +158,9 @@ fn assert_confirmation_required(output: &Output, command: &str) -> serde_json::V
 
 fn destructive_refusal_args(command: &str) -> Option<Vec<&'static str>> {
     Some(match command {
+        "agent runs stop" => vec!["agent", "runs", "stop", "run_abc123"],
+        "batches cancel" => vec!["batches", "cancel", "batch_abc123"],
+        "batches delete" => vec!["batches", "delete", "batch_abc123"],
         "agent runs delete" => vec!["agent", "runs", "delete", "agent_run_abc", "--compact"],
         "monitor delete" => vec!["monitor", "delete", "mon_abc", "--compact"],
         "websets cancel" => vec!["websets", "cancel", "ws_abc", "--compact"],
@@ -1462,9 +1465,9 @@ fn doctor_fix_backs_up_formats_and_undo_restores_latest_config() {
     );
     let report: serde_json::Value = serde_json::from_slice(&fixed.stdout).unwrap();
     assert_eq!(report["status"], "healthy");
-    assert!(report["backupPath"]
-        .as_str()
-        .is_some_and(|path| PathBuf::from(path).exists()));
+    let backup_path = PathBuf::from(report["backupPath"].as_str().unwrap());
+    assert!(backup_path.exists());
+    assert_eq!(fs::metadata(&backup_path).unwrap().mode() & 0o777, 0o644);
     assert!(report["actions"]
         .as_array()
         .unwrap()
@@ -1500,6 +1503,17 @@ fn doctor_fix_backs_up_formats_and_undo_restores_latest_config() {
     assert_eq!(undo_report["actions"][0]["status"], "restored");
     assert_eq!(fs::read_to_string(&config).unwrap(), original);
     assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o644);
+
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let private_fix = run_with_env(&["doctor", "--fix", "--compact"], &envs);
+    assert!(private_fix.status.success());
+    let private_report: serde_json::Value = serde_json::from_slice(&private_fix.stdout).unwrap();
+    let private_backup = PathBuf::from(private_report["backupPath"].as_str().unwrap());
+    assert_eq!(fs::metadata(private_backup).unwrap().mode() & 0o777, 0o600);
+
+    let private_undo = run_with_env(&["doctor", "--undo", "--compact"], &envs);
+    assert!(private_undo.status.success());
+    assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o600);
 }
 
 #[cfg(unix)]
@@ -5806,7 +5820,7 @@ fn agent_runs_create_supports_budgeted_beta_max_effort() {
     assert_eq!(body["budget"]["maxCostDollars"], 20.0);
     assert_eq!(
         create["data"]["request"]["headers"],
-        serde_json::json!([{"name":"x-exa-beta","value":"other,agent-max-effort-2026-07-27"}])
+        serde_json::json!([{"name":"Exa-Beta","value":"other,agent-max-effort-2026-07-27"}])
     );
 
     let body_set_precedence = run_ok_json(&[

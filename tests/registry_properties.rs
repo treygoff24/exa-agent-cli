@@ -11,8 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-// Wave 1 removes retired Research; Wave 2 exports raise this from 65 to 67.
-const EXPECTED_OP_COUNT: usize = 67;
+// Wave 1 removes retired Research; Wave 2 exports raise this to 67; Batch/stop raise it to 73.
+const EXPECTED_OP_COUNT: usize = 73;
 const MANIFEST: &str = "tests/request_corpus/manifest.toml";
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +36,7 @@ enum ConstraintKind {
 }
 
 const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
+    ("answer", "model", ConstraintKind::Enum),
     ("createAgentRun", "effort", ConstraintKind::Enum),
     ("createAgentRun", "max-cost-dollars", ConstraintKind::Range),
     ("findSimilar", "category", ConstraintKind::Enum),
@@ -57,7 +58,7 @@ const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
 ];
 
 #[test]
-fn registry_has_67_ops_and_manifest_covers_all() {
+fn registry_has_expected_ops_and_manifest_covers_all() {
     let manifest = load_manifest();
     assert_eq!(registry::REGISTRY.len(), EXPECTED_OP_COUNT);
 

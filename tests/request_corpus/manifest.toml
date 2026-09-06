@@ -5,6 +5,9 @@
 [ops.cancelAgentRun]
 argv = ["agent", "runs", "cancel", "run_abc123"]
 
+[ops.stopAgentRun]
+argv = ["agent", "runs", "stop", "run_abc123"]
+
 [ops.createAgentRun]
 argv = ["agent", "runs", "create", "Research AI regulations", "--effort", "low"]
 
@@ -19,6 +22,21 @@ argv = ["agent", "runs", "get", "run_abc123"]
 
 [ops.listAgentRuns]
 argv = ["agent", "runs", "list", "--limit", "5"]
+
+[ops.createBatch]
+argv = ["batches", "create", "--requests", "[{\"customId\":\"row-1\",\"method\":\"POST\",\"url\":\"/search\",\"body\":{\"query\":\"AI news\"}}]"]
+
+[ops.listBatches]
+argv = ["batches", "list", "--limit", "101", "--status", "completed"]
+
+[ops.getBatch]
+argv = ["batches", "get", "batch_abc123"]
+
+[ops.cancelBatch]
+argv = ["batches", "cancel", "batch_abc123"]
+
+[ops.deleteBatch]
+argv = ["batches", "delete", "batch_abc123"]
 
 [ops.answer]
 argv = ["answer", "What is Exa?", "--text"]

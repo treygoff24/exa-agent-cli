@@ -17,6 +17,7 @@ pub const AGENT_DATA_SOURCE_PROVIDERS: &[&str] = &[
     "affiliate",
     "particle",
     "jinko",
+    "polymarket",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,6 +14,12 @@
 cli_path = "agent runs cancel"
 namespace = "api"
 
+[operations."stopAgentRun"]
+cli_path = "agent runs stop"
+namespace = "api"
+dangerous = true
+confirm = "yes"
+
 [operations."createAgentRun"]
 cli_path = "agent runs create"
 namespace = "api"
@@ -39,6 +45,51 @@ namespace = "api"
 cli_path = "agent runs list"
 namespace = "api"
 cursor = "cursor"
+
+[operations."createBatch"]
+cli_path = "batches create"
+namespace = "api"
+idempotency_sensitive = true
+
+[[operations."createBatch".fields]]
+flag = "requests"
+body_path = "requests"
+kind = "json"
+required = true
+input_kind = "flag"
+input_name = "--requests"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
+
+[[operations."createBatch".fields]]
+flag = "metadata"
+body_path = "metadata"
+kind = "json"
+input_kind = "flag"
+input_name = "--metadata"
+value_name = "JSON|@file"
+arity = { min = 1, max = 1 }
+
+[operations."listBatches"]
+cli_path = "batches list"
+namespace = "api"
+cursor = "nextCursor"
+
+[operations."getBatch"]
+cli_path = "batches get"
+namespace = "api"
+
+[operations."cancelBatch"]
+cli_path = "batches cancel"
+namespace = "api"
+dangerous = true
+confirm = "yes"
+
+[operations."deleteBatch"]
+cli_path = "batches delete"
+namespace = "api"
+dangerous = true
+confirm = "yes"
 
 [operations."answer"]
 cli_path = "answer"
@@ -89,6 +140,26 @@ cli_path = "monitor delete"
 namespace = "api"
 dangerous = true
 confirm = "yes"
+
+[[operations."createMonitor".fields]]
+flag = "include-domain"
+body_path = "search.includeDomains"
+kind = "str_array"
+
+[[operations."createMonitor".fields]]
+flag = "exclude-domain"
+body_path = "search.excludeDomains"
+kind = "str_array"
+
+[[operations."updateMonitor".fields]]
+flag = "include-domain"
+body_path = "search.includeDomains"
+kind = "str_array"
+
+[[operations."updateMonitor".fields]]
+flag = "exclude-domain"
+body_path = "search.excludeDomains"
+kind = "str_array"
 
 [operations."getMonitor"]
 cli_path = "monitor get"
@@ -493,6 +564,22 @@ arity = { min = 0, max = 0 }
 flag = "stream"
 body_path = "stream"
 kind = "bool"
+
+[[operations."answer".fields]]
+flag = "model"
+body_path = "model"
+kind = "str"
+enum_values = ["exa", "exa-pro", "exa-research", "exa-fast"]
+
+[[operations."answer".fields]]
+flag = "system-prompt"
+body_path = "systemPrompt"
+kind = "str"
+
+[[operations."answer".fields]]
+flag = "user-location"
+body_path = "userLocation"
+kind = "json"
 
 [[operations."answer".fields]]
 flag = "output-schema"

@@ -243,6 +243,46 @@ fn all_ndjson_output_streams_pages_to_file_and_confirms_once() {
 }
 
 #[test]
+fn first_page_failure_preserves_existing_output_and_capped_success_exposes_recovery() {
+    let output_path = temp_path("existing-pages").join("pages.ndjson");
+    fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    fs::write(&output_path, "previous result\n").unwrap();
+    let (base_url, server) = local_server(vec![Reply::Drop]);
+    let mut args = paginated_args(&base_url);
+    args.extend([
+        "--output".into(),
+        output_path.to_string_lossy().into_owned(),
+    ]);
+    let output = run_owned(&args);
+    server.join().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "previous result\n"
+    );
+
+    let (base_url, server) = local_server(vec![Reply::Json(
+        r#"{"data":[{"id":"new-result"}],"hasMore":true,"nextCursor":"next-page"}"#,
+    )]);
+    let mut args = paginated_args(&base_url);
+    args.extend([
+        "--output".into(),
+        output_path.to_string_lossy().into_owned(),
+        "--max-pages".into(),
+        "1".into(),
+    ]);
+    let output = run_owned(&args);
+    server.join().unwrap();
+    let confirmation = stdout_json(&output);
+    assert_eq!(confirmation["pagination"]["nextCursor"], "next-page");
+    assert!(!confirmation["nextActions"].as_array().unwrap().is_empty());
+    let pages = ndjson(&fs::read(&output_path).unwrap());
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0]["data"]["data"][0]["id"], "new-result");
+    assert_eq!(confirmation["nextActions"], pages[0]["nextActions"]);
+}
+
+#[test]
 fn all_ndjson_output_open_failure_stops_before_network() {
     let output_path = temp_path("missing-parent").join("pages.ndjson");
     let output = run_owned(&[

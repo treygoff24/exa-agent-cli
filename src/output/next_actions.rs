@@ -208,6 +208,7 @@ pub(crate) fn append_pagination_next_action(
                     continue;
                 }
                 // Do not manufacture a continuation that silently loses an unknown filter.
+                warn_followup_context(envelope);
                 return;
             }
         };

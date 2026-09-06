@@ -1591,7 +1591,7 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
     let Some(raw) = body.get("numResults") else {
         return Ok(());
     };
-    if matches!(raw.as_u64(), Some(1..=100)) {
+    if json_integer(raw).is_some_and(|value| (1.0..=100.0).contains(&value)) {
         return Ok(());
     }
 
@@ -1599,7 +1599,7 @@ fn validate_search_num_results_body(body: &serde_json::Value, query: &str) -> Re
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    if !raw.is_null() && raw.as_i64().is_none() && raw.as_u64().is_none() {
+    if !raw.is_null() && json_integer(raw).is_none() {
         return Err(CliError::Usage(
             Diag::new(
                 "invalid_field_type",
@@ -2080,14 +2080,8 @@ fn validate_context_tokens_num(body: &serde_json::Value) -> Result<(), CliError>
     {
         return Ok(());
     }
-    if let Some(n) = value.as_i64() {
-        if (50..=100_000).contains(&n) {
-            return Ok(());
-        }
-        return Err(context_tokens_invalid_value(value.clone(), true));
-    }
-    if let Some(n) = value.as_u64() {
-        if (50..=100_000).contains(&n) {
+    if let Some(n) = json_integer(value) {
+        if (50.0..=100_000.0).contains(&n) {
             return Ok(());
         }
         return Err(context_tokens_invalid_value(value.clone(), true));
@@ -2400,7 +2394,7 @@ fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(
         )));
     };
     if let Some(value) = obj.get("rateLimit") {
-        if value.as_u64().is_none_or(|rate| rate > u32::MAX as u64) {
+        if json_integer(value).is_none_or(|rate| !(0.0..=u32::MAX as f64).contains(&rate)) {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("{command} rateLimit must be a non-negative integer"),
@@ -2408,7 +2402,12 @@ fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(
         }
     }
     if let Some(value) = obj.get("budgetCents") {
-        if !(value.is_null() || value.as_u64().is_some()) {
+        // Preserve the u64 bound; its floating equivalent needs an exclusive 2^64 limit.
+        if !(value.is_null()
+            || value.as_u64().is_some()
+            || json_integer(value)
+                .is_some_and(|budget| (0.0..18_446_744_073_709_551_616.0).contains(&budget)))
+        {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("{command} budgetCents must be a non-negative integer or null"),
@@ -6553,7 +6552,13 @@ fn execute_paginated_live<T: Transport>(
     let output_path = ndjson.then_some(globals.output.as_deref()).flatten();
     let mut output = output_path
         .map(|path| {
-            create_output_file(path)
+            // Check writability now, but retain existing data until the first page succeeds.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(|err| output_write_error(path, &err))
                 .map(std::io::BufWriter::new)
                 .map_err(|err| paginated_output_error(err, path, 0, None))
         })
@@ -6566,6 +6571,7 @@ fn execute_paginated_live<T: Transport>(
     let mut total_cost_dollars = 0.0f64;
     let mut page = 0u32;
     let mut output_pages = 0u32;
+    let mut output_summary = None;
 
     let (mut last_data, last_next, last_has_more) = loop {
         page += 1;
@@ -6658,8 +6664,20 @@ fn execute_paginated_live<T: Transport>(
             if output_path.is_none() {
                 apply_output_ceiling(&mut envelope, globals.max_output_bytes);
             }
+            if output_path.is_some() && (!more || reached_cap) {
+                output_summary = Some((
+                    envelope["nextActions"].clone(),
+                    envelope["warnings"].clone(),
+                ));
+            }
             if let (Some(path), Some(output)) = (output_path, &mut output) {
-                if let Err(err) = write_ndjson(output, &envelope) {
+                let write_result = (|| -> std::io::Result<()> {
+                    if output_pages == 0 && output.get_ref().metadata()?.is_file() {
+                        output.get_ref().set_len(0)?;
+                    }
+                    write_ndjson(output, &envelope)
+                })();
+                if let Err(err) = write_result {
                     let err = output_write_error(path, &err);
                     // The page request succeeded. Preserve that page on stdout under the same
                     // nonzero-exit convention as other --output failures; earlier pages remain
@@ -6699,11 +6717,23 @@ fn execute_paginated_live<T: Transport>(
                 )
             })?;
             drop(output);
-            emit_ndjson(&output_file_confirmation(
-                &command,
-                path,
-                written_output_bytes(path),
-            ));
+            let mut confirmation =
+                output_file_confirmation(&command, path, written_output_bytes(path));
+            if let Some((actions, warnings)) = output_summary {
+                confirmation["nextActions"] = actions;
+                confirmation["warnings"] = warnings;
+            }
+            set_pagination(
+                &mut confirmation,
+                PageInfo {
+                    cursor: pagination.cursor.as_deref(),
+                    next_cursor: last_next.as_deref(),
+                    has_more: last_has_more,
+                    page,
+                    page_count: page,
+                },
+            );
+            emit_ndjson(&confirmation);
         }
     } else {
         if let Some(obj) = last_data.as_object_mut() {
@@ -9302,6 +9332,13 @@ fn validate_highlights_option_shape(
     )
 }
 
+/// JSON Schema integers are numeric values without a fractional part, including `1.0`.
+fn json_integer(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && number.fract() == 0.0)
+}
+
 fn validate_positive_integer_field(
     value: Option<&serde_json::Value>,
     parent_field: &str,
@@ -9314,9 +9351,8 @@ fn validate_positive_integer_field(
     if value.is_null() {
         return None;
     }
-    let ok = value
-        .as_u64()
-        .is_some_and(|number| number >= min && max.is_none_or(|max| number <= max));
+    let ok = json_integer(value)
+        .is_some_and(|number| number >= min as f64 && max.is_none_or(|max| number <= max as f64));
     if ok {
         return None;
     }
@@ -9457,7 +9493,7 @@ fn validate_field_kind(
     }
     let (ok, expected): (bool, std::borrow::Cow<'static, str>) = match field.kind {
         FieldKind::Str => (value.is_string(), "string".into()),
-        FieldKind::Int => (value.is_i64() || value.is_u64(), "integer".into()),
+        FieldKind::Int => (json_integer(value).is_some(), "integer".into()),
         FieldKind::Num => (value.is_number(), "number".into()),
         FieldKind::Bool => (value.is_boolean(), "boolean".into()),
         FieldKind::StrArray => match field.item_template {

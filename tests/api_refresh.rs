@@ -513,3 +513,55 @@ fn highlights_help_exposes_file_options_and_literal_at_queries_still_work_as_jso
         "@openai roadmap"
     );
 }
+
+#[test]
+fn json_integer_fields_accept_integral_numbers_but_not_fractions() {
+    for (command, body) in [
+        (vec!["search", "q"], json!({"numResults":2.0})),
+        (
+            vec!["similar", "https://example.com"],
+            json!({"numResults":2.0}),
+        ),
+        (vec!["context", "q"], json!({"tokensNum":100.0})),
+        (
+            vec!["contents", "https://example.com"],
+            json!({"highlights":{"highlightsPerUrl":1.0,"maxCharacters":100.0}}),
+        ),
+        (
+            vec!["admin", "keys", "update", "key_abc123"],
+            json!({"rateLimit":2.0,"budgetCents":10.0}),
+        ),
+    ] {
+        let encoded = body.to_string();
+        let mut args = command;
+        args.extend(["--body", &encoded, "--dry-run"]);
+        let result = ok(&args);
+        for (field, expected) in body.as_object().unwrap() {
+            assert_eq!(&result["data"]["request"]["body"][field], expected);
+        }
+    }
+    for body in [json!({"numResults":1.5}), json!({"numResults":101.0})] {
+        let body = body.to_string();
+        let output = run(&["search", "q", "--body", &body, "--dry-run"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
+    for body in [
+        json!({"rateLimit":4294967296.0}),
+        json!({"budgetCents":-1.0}),
+        json!({"budgetCents":18446744073709551616.0}),
+    ] {
+        let encoded = body.to_string();
+        let output = run(&[
+            "admin",
+            "keys",
+            "update",
+            "key_abc123",
+            "--body",
+            &encoded,
+            "--dry-run",
+        ]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
+}

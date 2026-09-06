@@ -39,7 +39,7 @@ musl-set = []
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 thiserror = "2"
 # Keep the lockfile below the 1.85 MSRV; newer 0.3 releases require Rust 1.88.
 time = { version = "=0.3.45", features = ["parsing"] }

@@ -2394,7 +2394,7 @@ fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(
         )));
     };
     if let Some(value) = obj.get("rateLimit") {
-        if json_integer(value).is_none_or(|rate| !(0.0..=u32::MAX as f64).contains(&rate)) {
+        if json_unsigned_integer(value).is_none_or(|rate| rate > u32::MAX as u64) {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("{command} rateLimit must be a non-negative integer"),
@@ -2402,12 +2402,7 @@ fn validate_admin_keys_body(body: &serde_json::Value, command: &str) -> Result<(
         }
     }
     if let Some(value) = obj.get("budgetCents") {
-        // Preserve the u64 bound; its floating equivalent needs an exclusive 2^64 limit.
-        if !(value.is_null()
-            || value.as_u64().is_some()
-            || json_integer(value)
-                .is_some_and(|budget| (0.0..18_446_744_073_709_551_616.0).contains(&budget)))
-        {
+        if !(value.is_null() || json_unsigned_integer(value).is_some()) {
             return Err(CliError::Usage(Diag::new(
                 "invalid_value",
                 format!("{command} budgetCents must be a non-negative integer or null"),
@@ -9334,9 +9329,53 @@ fn validate_highlights_option_shape(
 
 /// JSON Schema integers are numeric values without a fractional part, including `1.0`.
 fn json_integer(value: &serde_json::Value) -> Option<f64> {
+    json_integer_text(value)?
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+}
+
+fn json_unsigned_integer(value: &serde_json::Value) -> Option<u64> {
     value
-        .as_f64()
-        .filter(|number| number.is_finite() && number.fract() == 0.0)
+        .as_u64()
+        .or_else(|| json_integer_text(value)?.parse().ok())
+}
+
+/// Inspect the exact decimal before any f64 conversion. serde_json's arbitrary_precision
+/// feature preserves fractions such as 9007199254740992.5 that would otherwise round away.
+fn json_integer_text(value: &serde_json::Value) -> Option<String> {
+    let raw = value.as_number()?.to_string();
+    let (mantissa, exponent) = match raw.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+        None => (raw.as_str(), 0),
+    };
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.trim_start_matches('-');
+    let fraction_digits = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let mut digits = mantissa.replace('.', "");
+    if digits.bytes().all(|byte| byte == b'0') {
+        return Some("0".to_string());
+    }
+    let scale = exponent.checked_sub(i32::try_from(fraction_digits).ok()?)?;
+    if scale < 0 {
+        let cut = digits.len().checked_sub(scale.unsigned_abs() as usize)?;
+        if !digits[cut..].bytes().all(|byte| byte == b'0') {
+            return None;
+        }
+        digits.truncate(cut);
+    } else {
+        // No finite upstream JSON number needs more zero expansion; avoid exponent-sized work.
+        if scale > 308 {
+            return None;
+        }
+        digits.extend(std::iter::repeat_n('0', scale as usize));
+    }
+    if negative {
+        digits.insert(0, '-');
+    }
+    Some(digits)
 }
 
 fn validate_positive_integer_field(

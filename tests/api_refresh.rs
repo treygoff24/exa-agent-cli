@@ -565,3 +565,43 @@ fn json_integer_fields_accept_integral_numbers_but_not_fractions() {
         assert!(output.stdout.is_empty());
     }
 }
+
+#[test]
+fn integer_validation_never_rounds_fractional_monetary_input() {
+    for number in [
+        "9007199254740992.5",
+        "9007199254740991.5",
+        "4503599627370495.75",
+        "1.0000000000000001",
+    ] {
+        let body = format!(r#"{{"budgetCents":{number}}}"#);
+        let output = run(&[
+            "admin",
+            "keys",
+            "update",
+            "key_abc123",
+            "--body",
+            &body,
+            "--dry-run",
+        ]);
+        assert_eq!(output.status.code(), Some(1), "{body}");
+        assert!(output.stdout.is_empty());
+    }
+    for number in ["1.0", "1e3", "100.000", "10e-1", "18446744073709551615.0"] {
+        let body = format!(r#"{{"budgetCents":{number}}}"#);
+        let result = ok(&[
+            "admin",
+            "keys",
+            "update",
+            "key_abc123",
+            "--body",
+            &body,
+            "--dry-run",
+        ]);
+        let expected: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            result["data"]["request"]["body"]["budgetCents"],
+            expected["budgetCents"]
+        );
+    }
+}

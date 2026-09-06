@@ -43,8 +43,8 @@ use output::envelope::{
 };
 use output::{
     append_operation_next_actions, append_pagination_next_action, emit_ndjson, emit_raw,
-    emit_stdout, resolve_mode, scoped_recovery_command, stdout_is_tty, write_ndjson,
-    write_stdout_value, OutputMode,
+    emit_stdout, push_create_followups, resolve_mode, scoped_recovery_command, stdout_is_tty,
+    write_ndjson, write_stdout_value, OutputMode, RunState,
 };
 use request::RequestOverrides;
 use transport::{
@@ -5827,6 +5827,16 @@ fn shell_join(args: &[String]) -> String {
         .join(" ")
 }
 
+/// Join a command the way a person would type it: quote only the tokens a shell would otherwise
+/// interpret. Generated follow-ups are read far more often than they are pasted, and blanket
+/// quoting made them noisy and inconsistent with the warning-driven suggestions beside them.
+fn shell_join_readable(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote_readable(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `outputSchema` is a JSON Schema object upstream. Accepting `[1]` or `"x"` here only defers
 /// the rejection to a paid round-trip with an opaque upstream message.
 const SEARCH_SCHEMA_EXAMPLE: &str =
@@ -5862,6 +5872,19 @@ fn shell_quote(arg: &str) -> String {
         return "''".to_string();
     }
     format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// Every byte in this set is inert in every shell word position, so a token built only from them
+/// cannot start a command, expand a variable, glob, or redirect.
+fn shell_quote_readable(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:=@%+,-".contains(&byte))
+    {
+        return arg.to_string();
+    }
+    shell_quote(arg)
 }
 
 fn query_preview(query: &[(String, String)]) -> Vec<serde_json::Value> {
@@ -6545,16 +6568,23 @@ fn execute_paginated_live<T: Transport>(
         OutputMode::Ndjson
     );
     let output_path = ndjson.then_some(globals.output.as_deref()).flatten();
+    // Pages land in a sibling temp file that is renamed over the target once at least one page
+    // is on disk, so a failure before then cannot destroy the file the caller already had. A
+    // path that names a device, FIFO, or socket has nothing to preserve and must not be
+    // replaced by a rename, so those are written in place.
+    let output_temp = output_path.and_then(|path| match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => None,
+        _ => Some(format!("{path}.tmp-{}", std::process::id())),
+    });
     let mut output = output_path
         .map(|path| {
-            // Check writability now, but retain existing data until the first page succeeds.
+            // Creating the temp proves the directory is writable before any billable call.
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
-                .truncate(false)
-                .open(path)
+                .truncate(output_temp.is_some())
+                .open(output_temp.as_deref().unwrap_or(path))
                 .map_err(|err| output_write_error(path, &err))
-                .map(std::io::BufWriter::new)
                 .map_err(|err| paginated_output_error(err, path, 0, None))
         })
         .transpose()?;
@@ -6589,11 +6619,24 @@ fn execute_paginated_live<T: Transport>(
                 auth: RawAuth::Api(credential),
                 request_id,
             },
-        )
-        .map_err(|err| match output_path {
-            Some(path) => paginated_output_error(err, path, output_pages, cursor.as_deref()),
-            None => err,
-        })?;
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                return Err(match output_path {
+                    Some(path) => {
+                        settle_output_temp(
+                            output.take(),
+                            output_temp.as_deref(),
+                            path,
+                            output_pages,
+                        );
+                        paginated_output_error(err, path, output_pages, cursor.as_deref())
+                    }
+                    None => err,
+                });
+            }
+        };
         total_retries = total_retries.saturating_add(result.retries);
         total_duration_ms = total_duration_ms.saturating_add(result.duration_ms);
         let data = transport::parse_response_data(&result.response.body);
@@ -6665,20 +6708,15 @@ fn execute_paginated_live<T: Transport>(
                     envelope["warnings"].clone(),
                 ));
             }
-            if let (Some(path), Some(output)) = (output_path, &mut output) {
-                let write_result = (|| -> std::io::Result<()> {
-                    if output_pages == 0 && output.get_ref().metadata()?.is_file() {
-                        output.get_ref().set_len(0)?;
-                    }
-                    write_ndjson(output, &envelope)
-                })();
-                if let Err(err) = write_result {
+            if let (Some(path), Some(file)) = (output_path, &mut output) {
+                if let Err(err) = write_ndjson(file, &envelope) {
                     let err = output_write_error(path, &err);
                     // The page request succeeded. Preserve that page on stdout under the same
                     // nonzero-exit convention as other --output failures; earlier pages remain
                     // in the requested file and are described on stderr.
                     push_output_write_warning(&mut envelope, path, &err);
                     emit_ndjson(&envelope);
+                    settle_output_temp(output.take(), output_temp.as_deref(), path, output_pages);
                     return Err(paginated_output_error(
                         err,
                         path,
@@ -6701,17 +6739,18 @@ fn execute_paginated_live<T: Transport>(
     };
 
     if ndjson {
-        if let (Some(path), Some(mut output)) = (output_path, output) {
-            use std::io::Write;
-            output.flush().map_err(|err| {
-                paginated_output_error(
-                    output_write_error(path, &err),
-                    path,
-                    output_pages,
-                    last_has_more.then_some(last_next.as_deref()).flatten(),
-                )
-            })?;
-            drop(output);
+        if let (Some(path), Some(file)) = (output_path, output) {
+            drop(file);
+            if let Some(temp) = output_temp.as_deref() {
+                std::fs::rename(temp, path).map_err(|err| {
+                    paginated_output_error(
+                        output_write_error(path, &err),
+                        path,
+                        output_pages,
+                        last_has_more.then_some(last_next.as_deref()).flatten(),
+                    )
+                })?;
+            }
             let mut confirmation =
                 output_file_confirmation(&command, path, written_output_bytes(path));
             if let Some((actions, warnings)) = output_summary {
@@ -6823,6 +6862,22 @@ fn page_envelope(
     envelope
 }
 
+/// Settle the sibling temp file on a failure path. Pages already written are the documented
+/// partial-output contract, so they are moved into place; a run that wrote nothing leaves the
+/// caller's pre-existing file exactly as it was and takes the temp with it. Best effort: the
+/// error that brought us here is the one worth reporting.
+fn settle_output_temp(file: Option<std::fs::File>, temp: Option<&str>, path: &str, pages: u32) {
+    drop(file);
+    let Some(temp) = temp else {
+        return;
+    };
+    let _ = if pages == 0 {
+        std::fs::remove_file(temp)
+    } else {
+        std::fs::rename(temp, path)
+    };
+}
+
 fn paginated_output_error(
     mut err: CliError,
     path: &str,
@@ -6840,9 +6895,15 @@ fn paginated_output_error(
         details.insert("outputPath".to_string(), serde_json::json!(path));
         details.insert("outputPartial".to_string(), serde_json::json!(pages > 0));
         details.insert("outputPages".to_string(), serde_json::json!(pages));
+        // Zero pages means nothing of ours reached `path`; reporting the size of whatever was
+        // already there would read as "we wrote that".
         details.insert(
             "outputBytes".to_string(),
-            serde_json::json!(written_output_bytes(path)),
+            serde_json::json!(if pages > 0 {
+                written_output_bytes(path)
+            } else {
+                0
+            }),
         );
         if let Some(cursor) = resume_cursor {
             details.insert("resumeCursor".to_string(), serde_json::json!(cursor));
@@ -7368,7 +7429,7 @@ fn execute_streaming_live<T: Transport>(
         let answer_outcome = answer_stream.then(|| transport::answer_outcome(&envelope["data"]));
         attach_content_metadata(&mut envelope, answer_outcome, answer_stream.then(Vec::new));
         append_warning_next_actions(&mut envelope);
-        append_stream_terminal_next_actions(&mut envelope, operation, globals)?;
+        append_stream_terminal_next_actions(&mut envelope, operation, globals);
         if let Some(path) = output_path {
             write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
             drop(out);
@@ -7414,7 +7475,7 @@ fn execute_streaming_live<T: Transport>(
     let answer_outcome = answer_stream.then(|| transport::answer_outcome(&terminal["data"]));
     attach_content_metadata(&mut terminal, answer_outcome, answer_stream.then(Vec::new));
     append_warning_next_actions(&mut terminal);
-    append_stream_terminal_next_actions(&mut terminal, operation, globals)?;
+    append_stream_terminal_next_actions(&mut terminal, operation, globals);
     let last_event_id = last_frame_event_id(&frames);
     if let Some(path) = output_path {
         write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
@@ -7432,39 +7493,33 @@ fn append_stream_terminal_next_actions(
     envelope: &mut serde_json::Value,
     operation: Option<&registry::OperationDef>,
     globals: &GlobalArgs,
-) -> Result<(), CliError> {
+) {
     let Some(operation) = operation.filter(|op| op.operation_id == "createAgentRun") else {
-        return Ok(());
+        return;
+    };
+    // The terminal event is the last COMPLETED one, not the last one carrying an id: upstream
+    // may trail a `usage` event after it, and matching on id alone silenced both follow-ups.
+    let completed = |event: &serde_json::Value| {
+        event.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+            && event
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
     };
     let data = &envelope["data"];
     let final_event = if data.is_object() {
-        Some(data)
+        Some(data).filter(|event| completed(event))
     } else {
-        data.as_array().and_then(|events| {
-            events.iter().rev().find(|event| {
-                event
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some()
-            })
-        })
+        data.as_array()
+            .and_then(|events| events.iter().rev().find(|event| completed(event)))
     };
     let Some(id) = final_event
-        .filter(|event| {
-            event.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-        })
         .and_then(|event| event.get("id").and_then(serde_json::Value::as_str))
         .map(str::to_string)
     else {
-        return Ok(());
+        return;
     };
-
-    // Operation follow-up generation reads data.id. Keep the terminal payload unchanged while
-    // presenting only the final Agent ID (not another copy of its output) to that generator.
-    let original = std::mem::replace(&mut envelope["data"], serde_json::json!({"id": id}));
-    let result = append_operation_next_actions(envelope, operation, None, globals);
-    envelope["data"] = original;
-    result
+    push_create_followups(envelope, operation, &id, globals, RunState::Completed);
 }
 
 fn search_sse_recovery_error(err: CliError, request_body: &serde_json::Value) -> CliError {
@@ -8193,8 +8248,14 @@ fn append_warning_next_actions(envelope: &mut serde_json::Value) {
             }))
         })
         .collect();
-    if !actions.is_empty() {
-        envelope["nextActions"] = serde_json::Value::Array(actions);
+    if actions.is_empty() {
+        return;
+    }
+    // Append: this generator runs before the pagination and create generators today, and
+    // assigning here would silently drop their follow-ups if that order ever changed.
+    match envelope["nextActions"].as_array_mut() {
+        Some(existing) => existing.extend(actions),
+        None => envelope["nextActions"] = serde_json::Value::Array(actions),
     }
 }
 
@@ -10905,6 +10966,60 @@ mod tests {
     use std::collections::BTreeSet;
 
     static PENDING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn warning_follow_ups_coexist_with_create_follow_ups_in_either_order() {
+        let operation =
+            registry::lookup_by_command("websets create").expect("websets create is registered");
+        let globals = parse_globals(&[]);
+        let envelope = || {
+            serde_json::json!({
+                "operation": { "path": "/websets/v0/websets" },
+                "nextActions": [],
+                "warnings": [{
+                    "code": "url_failed",
+                    "message": "one URL failed",
+                    "suggestedCommand": "exa-agent contents 'https://exa.ai' --fresh --json",
+                }],
+                "data": { "id": "ws_1" },
+            })
+        };
+        let descriptions = |envelope: &serde_json::Value| -> Vec<String> {
+            let mut found: Vec<String> = envelope["nextActions"]
+                .as_array()
+                .expect("nextActions array")
+                .iter()
+                .map(|action| {
+                    action["description"]
+                        .as_str()
+                        .expect("description")
+                        .to_string()
+                })
+                .collect();
+            found.sort();
+            found
+        };
+
+        let mut warning_first = envelope();
+        append_warning_next_actions(&mut warning_first);
+        append_operation_next_actions(&mut warning_first, operation, None, &globals)
+            .expect("create follow-ups");
+
+        // The generators run in this order today. Neither may own `nextActions` outright, or a
+        // future reorder would silently drop the other's follow-ups.
+        let mut create_first = envelope();
+        append_operation_next_actions(&mut create_first, operation, None, &globals)
+            .expect("create follow-ups");
+        append_warning_next_actions(&mut create_first);
+
+        let expected = [
+            "Inspect the created resource",
+            "Read all webset items",
+            "Recover missing upstream content",
+        ];
+        assert_eq!(descriptions(&warning_first), expected);
+        assert_eq!(descriptions(&create_first), expected);
+    }
 
     static GENERIC_DEPRECATED_OP: OperationDef = OperationDef {
         cli_path: &["old"],

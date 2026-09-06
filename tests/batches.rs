@@ -323,11 +323,8 @@ fn live_create_sends_merged_beta_and_adds_poll_action() {
     server.join().expect("batch create server");
     let value = stdout_json(&output);
     let action = value["nextActions"][0]["command"].as_str().unwrap();
-    assert!(
-        action.starts_with("'exa-agent' 'batches' 'get' "),
-        "{action}"
-    );
-    assert!(action.ends_with(" '--' 'batch_abc'"), "{action}");
+    assert!(action.starts_with("exa-agent batches get "), "{action}");
+    assert!(action.ends_with(" -- batch_abc"), "{action}");
     assert!(action.contains("--beta=caller-token,batches-2026-06-06"));
     assert!(!action.contains("test-key-abcdef12"));
 }

@@ -52,6 +52,18 @@ fn temp_path(label: &str) -> PathBuf {
     ))
 }
 
+/// The temp file the paginated writer stages pages in is an implementation detail; if one
+/// survives a run, the writer leaked it.
+fn directory_entries(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .expect("output directory")
+        .map(|entry| entry.expect("directory entry").file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 fn stdout_json(output: &Output) -> Value {
     assert!(
         output.status.success(),
@@ -240,6 +252,31 @@ fn all_ndjson_output_streams_pages_to_file_and_confirms_once() {
     assert_eq!(pages[0]["data"]["data"][0]["id"], "batch_1");
     assert_eq!(pages[1]["data"]["data"][0]["id"], "batch_2");
     assert_eq!(pages[0]["nextActions"], serde_json::json!([]));
+    assert_eq!(
+        directory_entries(output_path.parent().unwrap()),
+        vec!["pages.ndjson".to_string()]
+    );
+}
+
+#[test]
+fn first_page_failure_creates_neither_output_file_nor_temp() {
+    let directory = temp_path("absent-pages");
+    fs::create_dir_all(&directory).unwrap();
+    let output_path = directory.join("pages.ndjson");
+    let (base_url, server) = local_server(vec![Reply::Drop]);
+    let mut args = paginated_args(&base_url);
+    args.extend([
+        "--output".into(),
+        output_path.to_string_lossy().into_owned(),
+    ]);
+    let output = run_owned(&args);
+    server.join().expect("first page failure server");
+    assert!(!output.status.success());
+    assert_eq!(directory_entries(&directory), Vec::<String>::new());
+    let details = &stderr_json(&output)["error"]["details"];
+    assert_eq!(details["outputPartial"], false);
+    assert_eq!(details["outputPages"], 0);
+    assert_eq!(details["outputBytes"], 0);
 }
 
 #[test]
@@ -260,6 +297,12 @@ fn first_page_failure_preserves_existing_output_and_capped_success_exposes_recov
         fs::read_to_string(&output_path).unwrap(),
         "previous result\n"
     );
+    assert_eq!(
+        directory_entries(output_path.parent().unwrap()),
+        vec!["pages.ndjson".to_string()]
+    );
+    // The pre-existing file is not ours to claim credit for.
+    assert_eq!(stderr_json(&output)["error"]["details"]["outputBytes"], 0);
 
     let (base_url, server) = local_server(vec![Reply::Json(
         r#"{"data":[{"id":"new-result"}],"hasMore":true,"nextCursor":"next-page"}"#,
@@ -280,6 +323,14 @@ fn first_page_failure_preserves_existing_output_and_capped_success_exposes_recov
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0]["data"]["data"][0]["id"], "new-result");
     assert_eq!(confirmation["nextActions"], pages[0]["nextActions"]);
+    assert!(pages[0]["nextActions"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("--cursor=next-page"));
+    assert_eq!(
+        directory_entries(output_path.parent().unwrap()),
+        vec!["pages.ndjson".to_string()]
+    );
 }
 
 #[test]
@@ -349,6 +400,10 @@ fn all_ndjson_output_discloses_saved_pages_when_later_request_fails() {
     assert_eq!(details["outputPages"], 1);
     assert_eq!(details["resumeCursor"], "cur2");
     assert!(details["outputBytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        directory_entries(output_path.parent().unwrap()),
+        vec!["pages.ndjson".to_string()]
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -409,12 +464,55 @@ data: [DONE]
     server.join().expect("agent stream server");
     let terminal = stdout_json(&output);
     let actions = terminal["nextActions"].as_array().unwrap();
-    assert_eq!(actions.len(), 2);
-    for action in actions {
-        let command = action["command"].as_str().unwrap();
-        assert!(command.contains("agent_run_final"), "{command}");
-        assert!(!command.contains("agent_run_initial"), "{command}");
-    }
+    // Only "Inspect the created resource": a run that already reported `completed` has no
+    // remaining events, so `agent runs events --stream` would be dead advice.
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(actions[0]["description"], "Inspect the created resource");
+    let command = actions[0]["command"].as_str().unwrap();
+    assert!(command.contains("agent_run_final"), "{command}");
+    assert!(!command.contains("agent_run_initial"), "{command}");
+    assert!(!command.contains("--stream"), "{command}");
+
+    // Upstream may emit a `usage` event after the terminal one. Selecting the last event that
+    // merely carries an id (rather than the last completed one) silenced the follow-up.
+    let trailing_usage = r#"id: evt-created
+event: agent_run.created
+data: {"id":"agent_run_initial","status":"running"}
+
+id: evt-completed
+event: agent_run.completed
+data: {"id":"agent_run_final","status":"completed","output":{"text":"done"}}
+
+id: evt-usage
+event: agent_run.usage
+data: {"id":"usage_1","tokens":42}
+
+data: [DONE]
+
+"#;
+    let (base_url, server) = local_server(vec![Reply::Sse(trailing_usage)]);
+    let output = run_owned(&[
+        "agent".into(),
+        "runs".into(),
+        "create".into(),
+        "finish the research".into(),
+        "--stream".into(),
+        "--json".into(),
+        "--retry".into(),
+        "0".into(),
+        "--base-url".into(),
+        base_url,
+        "--api-key".into(),
+        "test-key-abcdef12".into(),
+        "--compact".into(),
+    ]);
+    server.join().expect("trailing usage stream server");
+    let terminal = stdout_json(&output);
+    let actions = terminal["nextActions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let command = actions[0]["command"].as_str().unwrap();
+    assert!(command.contains("agent_run_final"), "{command}");
+    assert!(!command.contains("usage_1"), "{command}");
 
     let incomplete = r#"id: evt-running
 event: agent_run.running

@@ -5,7 +5,8 @@ pub mod envelope;
 mod next_actions;
 
 pub(crate) use next_actions::{
-    append_operation_next_actions, append_pagination_next_action, scoped_recovery_command,
+    append_operation_next_actions, append_pagination_next_action, push_create_followups,
+    scoped_recovery_command, RunState,
 };
 
 use std::io::{IsTerminal, Write};

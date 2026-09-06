@@ -58,39 +58,7 @@ pub(crate) fn append_operation_next_actions(
         | "websets enrichments create"
         | "admin keys create" => {
             if let Some(id) = id.as_deref() {
-                let base = operation.command();
-                let base = base.strip_suffix(" create").expect("create command");
-                let Some(path) = envelope["operation"]["path"].as_str() else {
-                    return Ok(());
-                };
-                let Some(mut ids) = route_ids(operation.api_path, path) else {
-                    return Ok(());
-                };
-                ids.push(id.to_string());
-                push_resource_next_action(
-                    envelope,
-                    "Inspect the created resource",
-                    &format!("{base} get"),
-                    &ids,
-                    globals,
-                );
-                if base == "agent runs" {
-                    push_resource_next_action(
-                        envelope,
-                        "Follow run events",
-                        "agent runs events --stream",
-                        &ids,
-                        globals,
-                    );
-                } else if base == "websets" {
-                    push_resource_next_action(
-                        envelope,
-                        "Read all webset items",
-                        "websets items list --all",
-                        &ids,
-                        globals,
-                    );
-                }
+                push_create_followups(envelope, operation, id, globals, RunState::Started);
             }
         }
         "websets imports create" => {
@@ -147,6 +115,61 @@ pub(crate) fn append_operation_next_actions(
         _ => {}
     }
     Ok(())
+}
+
+/// Whether the created run is still producing events. A run that already reached its terminal
+/// event cannot be followed, so the stream follow-up is offered only to callers who created a
+/// run without `--stream`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunState {
+    Started,
+    Completed,
+}
+
+/// Follow-ups for a `… create` response, taking the new resource id directly so the streaming
+/// terminal path (whose `data` is the event list, not the resource) can reuse it.
+pub(crate) fn push_create_followups(
+    envelope: &mut serde_json::Value,
+    operation: &registry::OperationDef,
+    id: &str,
+    globals: &GlobalArgs,
+    state: RunState,
+) {
+    let command = operation.command();
+    let base = command.strip_suffix(" create").expect("create command");
+    let Some(path) = envelope["operation"]["path"].as_str() else {
+        return;
+    };
+    let Some(mut ids) = route_ids(operation.api_path, path) else {
+        return;
+    };
+    ids.push(id.to_string());
+    push_resource_next_action(
+        envelope,
+        "Inspect the created resource",
+        &format!("{base} get"),
+        &ids,
+        globals,
+    );
+    if base == "agent runs" {
+        if state == RunState::Started {
+            push_resource_next_action(
+                envelope,
+                "Follow run events",
+                "agent runs events --stream",
+                &ids,
+                globals,
+            );
+        }
+    } else if base == "websets" {
+        push_resource_next_action(
+            envelope,
+            "Read all webset items",
+            "websets items list --all",
+            &ids,
+            globals,
+        );
+    }
 }
 
 fn push_next_action(envelope: &mut serde_json::Value, description: &str, command: String) {
@@ -227,10 +250,7 @@ pub(crate) fn append_pagination_next_action(
     push_next_action(
         envelope,
         "Read the next page (same filters)",
-        args.iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" "),
+        crate::shell_join_readable(&args),
     );
 }
 
@@ -250,14 +270,7 @@ fn push_resource_next_action(
     }
     args.push("--".to_string());
     args.extend_from_slice(ids);
-    push_next_action(
-        envelope,
-        description,
-        args.iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
+    push_next_action(envelope, description, crate::shell_join_readable(&args));
 }
 
 fn append_followup_context(args: &mut Vec<String>, globals: &GlobalArgs) -> bool {

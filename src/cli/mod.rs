@@ -37,68 +37,28 @@ impl Cli {
     }
 }
 
-// Values of these global options are data, never command words or leaf flags.
-const VALUE_TAKING_GLOBALS: &[&str] = &[
-    "-o",
-    "--output",
-    "--format",
-    "--max-output-bytes",
-    "--correlation-id",
-    "--api-key",
-    "--service-key",
-    "--profile",
-    "--base-url",
-    "--header",
-    "--beta",
-    "--timeout",
-    "--connect-timeout",
-    "--retry",
-    "--idempotency-key",
-    "--input",
-    "--input-format",
-    "--set",
-    "--body",
-    "--preset",
-    "--trace",
-];
-
+/// Clap parses `--text` (optional value) greedily, so `contents --text https://exa.ai` would
+/// swallow the URL as the text cap. No `--text` value on any command can be a URL — the value
+/// parser accepts only an empty value, `full`, or an integer — so rewriting the flag to its
+/// explicit-empty spelling is always the right reading, and Clap then leaves the URL positional.
 fn normalize_bare_contents_text(args: &mut [OsString]) {
-    let mut contents = false;
-    let mut index = 1;
-    while index < args.len() {
-        let text = args[index].to_string_lossy();
-        if text == "--" {
-            return;
+    for index in 1..args.len() {
+        match args[index].to_string_lossy().as_ref() {
+            "--" => return,
+            "--text" => {}
+            _ => continue,
         }
-        if VALUE_TAKING_GLOBALS.contains(&text.as_ref())
-            || (contents && matches!(text.as_ref(), "--summary-query" | "--chunk-size"))
-        {
-            index += 2;
-            continue;
+        let url_follows = args.get(index + 1).is_some_and(|value| {
+            value
+                .to_string_lossy()
+                .split_once("://")
+                .is_some_and(|(scheme, _)| {
+                    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+                })
+        });
+        if url_follows {
+            args[index] = OsString::from("--text=");
         }
-        if !contents {
-            if !text.starts_with('-') {
-                if text != "contents" {
-                    return;
-                }
-                contents = true;
-            }
-        } else if text == "--text" {
-            let url_follows = args.get(index + 1).is_some_and(|value| {
-                value
-                    .to_string_lossy()
-                    .split_once("://")
-                    .is_some_and(|(scheme, _)| {
-                        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-                    })
-            });
-            if url_follows {
-                // A URL cannot be a text cap. Make the bare value explicit so Clap leaves
-                // the following token positional; `--text full` and numeric caps stay valid.
-                args[index] = OsString::from("--text=");
-            }
-        }
-        index += 1;
     }
 }
 
@@ -107,6 +67,31 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    // Values of these global options are data, never command words or leaf flags. The scan for
+    // `websets exports create` must skip each one's value or a value like `websets` advances it.
+    const VALUE_TAKING_GLOBALS: &[&str] = &[
+        "-o",
+        "--output",
+        "--format",
+        "--max-output-bytes",
+        "--correlation-id",
+        "--api-key",
+        "--service-key",
+        "--profile",
+        "--base-url",
+        "--header",
+        "--beta",
+        "--timeout",
+        "--connect-timeout",
+        "--retry",
+        "--idempotency-key",
+        "--input",
+        "--input-format",
+        "--set",
+        "--body",
+        "--preset",
+        "--trace",
+    ];
     let mut export_create = false;
     let mut export_format_value_pending = false;
     let mut export_format_consumed = false;

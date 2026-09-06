@@ -7523,6 +7523,27 @@ fn argument_normalizers_preserve_global_values_and_end_markers() {
     };
     assert!(args.text.is_none());
     assert_eq!(args.urls, ["--text", "https://exa.ai"]);
+
+    // The rewrite is keyed on `--text` followed by an http(s) token, not on the command word,
+    // so every command whose `--text` takes an optional cap frees a URL that follows it.
+    let similar = run_ok_json(&["similar", "--text", "https://exa.ai", "--dry-run"]);
+    assert_eq!(similar["data"]["request"]["body"]["url"], "https://exa.ai");
+    assert!(similar["data"]["request"]["body"]["contents"]["text"].is_object());
+
+    // A value-taking global before the command no longer has to be understood by the rewrite.
+    let with_global = run_ok_json(&[
+        "--correlation-id",
+        "contents",
+        "contents",
+        "--text",
+        "https://exa.ai",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        with_global["data"]["request"]["body"]["urls"],
+        serde_json::json!(["https://exa.ai"])
+    );
+    assert_eq!(with_global["data"]["request"]["body"]["text"], true);
 }
 
 #[test]
@@ -8497,7 +8518,7 @@ fn websets_exports_preview_and_live_next_action() {
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         live["nextActions"][0]["command"],
-        format!("'exa-agent' 'websets' 'exports' 'get' '--json' '--base-url={base_url}' '--' 'ws/abc' 'export/123'")
+        format!("exa-agent websets exports get --json --base-url={base_url} -- ws/abc export/123")
     );
 }
 

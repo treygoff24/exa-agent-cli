@@ -91,6 +91,11 @@ Before running any mutation for real, preview the exact upstream request it will
 exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
 ```
 
+Previews show the method, path, query, body, and explicit or feature-specific headers.
+Credentials and HTTP-stack defaults such as `Content-Type`, `Host`, and `User-Agent`
+are omitted. Only non-secret values belong in `--header`; custom headers are not
+copied into automatic follow-up commands.
+
 `--dry-run --print-request` still performs the same local body validation as a live call. If the body is invalid (unknown field, out-of-range value, missing required field, or malformed `--body`/`--set`), the command exits `1` without printing a request; when the body is valid it prints the exact request body and exits `0` without sending it.
 
 ### Discovering the surface (offline, no key, no network)
@@ -140,6 +145,10 @@ override them. Each request needs a unique `customId` and an object body, with
 streaming disabled. `batches get` returns a fresh, short-lived `resultsUrl` and
 a credential-free download command in `nextActions`. Treat that URL as a bearer
 credential; fetch it directly without sending your Exa API key.
+
+Batch creation is never automatically retried, even with `--idempotency-key`:
+Exa does not document deduplication for this beta. An ambiguous failure records
+the request and points to a scoped batch listing instead of risking a duplicate.
 
 `agent runs stop ID --yes` completes a max-effort run early with the results it
 has gathered. It differs from cancellation and still incurs accrued usage.

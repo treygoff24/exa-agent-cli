@@ -251,3 +251,16 @@ fn chunked_contents_dry_run_includes_shared_headers() {
     assert_eq!(headers["exa-beta"], "contents-beta");
     assert_eq!(headers["idempotency-key"], "idem-request-1");
 }
+
+#[test]
+fn session_credentials_cannot_be_echoed_through_custom_headers() {
+    for name in ["Cookie", "Set-Cookie", "X-Session", "X-Session-Id"] {
+        let header = format!("{name}: private-session-value");
+        let output = command(&["search", "q", "--header", &header, "--dry-run"]);
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        assert!(output.stdout.is_empty(), "{name}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_flag_combination");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-session-value"));
+    }
+}

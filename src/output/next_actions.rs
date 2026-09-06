@@ -10,12 +10,25 @@ pub(crate) fn append_operation_next_actions(
     webset_id: Option<&str>,
     globals: &GlobalArgs,
 ) -> Result<(), CliError> {
-    let Some(data) = envelope.get("data").cloned() else {
+    let Some(data) = envelope.get("data") else {
         return Ok(());
     };
+    // Follow-ups need only these handles, not a second copy of potentially large page text.
+    let id = data
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let upload_url = data
+        .get("uploadUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let results_url = data
+        .get("resultsUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     match operation.command().as_str() {
         "batches create" => {
-            if let Some(id) = data.get("id").and_then(serde_json::Value::as_str) {
+            if let Some(id) = id.as_deref() {
                 push_resource_next_action(
                     envelope,
                     "Poll batch status and refresh its short-lived results URL",
@@ -26,9 +39,8 @@ pub(crate) fn append_operation_next_actions(
             }
         }
         "batches get" => {
-            if let Some(url) = data
-                .get("resultsUrl")
-                .and_then(serde_json::Value::as_str)
+            if let Some(url) = results_url
+                .as_deref()
                 .filter(|url| url.starts_with("https://"))
             {
                 push_next_action(envelope,
@@ -45,7 +57,7 @@ pub(crate) fn append_operation_next_actions(
         | "websets searches create"
         | "websets enrichments create"
         | "admin keys create" => {
-            if let Some(id) = data.get("id").and_then(serde_json::Value::as_str) {
+            if let Some(id) = id.as_deref() {
                 let base = operation.command();
                 let base = base.strip_suffix(" create").expect("create command");
                 let Some(path) = envelope["operation"]["path"].as_str() else {
@@ -82,7 +94,7 @@ pub(crate) fn append_operation_next_actions(
             }
         }
         "websets imports create" => {
-            if let Some(upload_url) = data.get("uploadUrl").and_then(serde_json::Value::as_str) {
+            if let Some(upload_url) = upload_url.as_deref() {
                 envelope["nextActions"]
                     .as_array_mut()
                     .expect("response envelopes initialize nextActions as an array")
@@ -97,7 +109,7 @@ pub(crate) fn append_operation_next_actions(
                 // Without `uploadUrl` the create half-succeeded: there is nothing to upload to,
                 // so the caller must not read exit 0 as "import ready". `upstream_malformed` is
                 // an exit-5 error in the dictionary, never a warning on a success envelope.
-                let import_id = data.get("id").and_then(serde_json::Value::as_str);
+                let import_id = id.as_deref();
                 let mut details = serde_json::json!({
                     "field": "uploadUrl",
                     "command": "websets imports create",
@@ -122,18 +134,14 @@ pub(crate) fn append_operation_next_actions(
             let Some(webset_id) = webset_id else {
                 return Ok(());
             };
-            if let Some(export_id) = data.get("id").and_then(serde_json::Value::as_str) {
-                envelope["nextActions"]
-                    .as_array_mut()
-                    .expect("response envelopes initialize nextActions as an array")
-                    .push(serde_json::json!({
-                        "description": "Poll export status",
-                        "command": format!(
-                            "exa-agent websets exports get {} {}",
-                            shell_quote(webset_id),
-                            shell_quote(export_id)
-                        ),
-                    }));
+            if let Some(export_id) = id.as_deref() {
+                push_resource_next_action(
+                    envelope,
+                    "Poll export status",
+                    "websets exports get",
+                    &[webset_id.to_string(), export_id.to_string()],
+                    globals,
+                );
             }
         }
         _ => {}
@@ -155,7 +163,10 @@ pub(crate) fn append_pagination_next_action(
     query: &[(String, String)],
     globals: &GlobalArgs,
 ) {
-    if matches!(op.pagination, registry::Pagination::None) {
+    // The pagination driver may stop an unsafe cursor even when upstream still says more.
+    if matches!(op.pagination, registry::Pagination::None)
+        || envelope["pagination"]["hasMore"].as_bool() == Some(false)
+    {
         return;
     }
     let data = &envelope["data"];
@@ -175,6 +186,10 @@ pub(crate) fn append_pagination_next_action(
     let mut args = vec!["exa-agent".to_string()];
     args.extend(op.cli_path.iter().map(|part| part.to_string()));
     for (key, value) in query {
+        if redaction::is_secret_name(key) {
+            warn_followup_context(envelope);
+            return;
+        }
         let flag = match key.as_str() {
             "cursor" => continue,
             "limit" | "status" | "name" | "search" | "successful" => key.as_str(),
@@ -200,7 +215,10 @@ pub(crate) fn append_pagination_next_action(
     }
     args.push(format!("--cursor={cursor}"));
     args.push("--json".to_string());
-    append_followup_context(&mut args, globals);
+    if !append_followup_context(&mut args, globals) {
+        warn_followup_context(envelope);
+        return;
+    }
     if !ids.is_empty() {
         args.push("--".to_string());
         args.extend(ids);
@@ -225,7 +243,10 @@ fn push_resource_next_action(
     let mut args = vec!["exa-agent".to_string()];
     args.extend(command.split_whitespace().map(str::to_string));
     args.push("--json".to_string());
-    append_followup_context(&mut args, globals);
+    if !append_followup_context(&mut args, globals) {
+        warn_followup_context(envelope);
+        return;
+    }
     args.push("--".to_string());
     args.extend_from_slice(ids);
     push_next_action(
@@ -238,7 +259,26 @@ fn push_resource_next_action(
     );
 }
 
-fn append_followup_context(args: &mut Vec<String>, globals: &GlobalArgs) {
+fn append_followup_context(args: &mut Vec<String>, globals: &GlobalArgs) -> bool {
+    // Arbitrary caller headers can be proxy credentials even without a secret-looking name.
+    // Only public media-negotiation headers are safe to omit; each follow-up chooses its own
+    // media mode. In particular this covers the Accept header added by our SSE path.
+    let Ok(headers) = parse_user_headers(&globals.headers) else {
+        return false;
+    };
+    if headers.iter().any(|(name, value)| {
+        !(name.eq_ignore_ascii_case("Accept")
+            && matches!(value.as_str(), "application/json" | "text/event-stream"))
+    }) {
+        return false;
+    }
+    if globals
+        .base_url
+        .as_deref()
+        .is_some_and(|base| !transport::is_safe_suggestion_base_url_origin(base))
+    {
+        return false;
+    }
     if let Some(profile) = &globals.profile {
         args.push(format!("--profile={profile}"));
     }
@@ -252,14 +292,36 @@ fn append_followup_context(args: &mut Vec<String>, globals: &GlobalArgs) {
     if let Some(beta) = &globals.beta {
         args.push(format!("--beta={beta}"));
     }
-    // Caller headers passed managed-secret validation before dispatch; reuse only non-secrets.
-    if let Ok(headers) = parse_user_headers(&globals.headers) {
-        args.extend(
-            headers
-                .iter()
-                .filter(|(name, _)| !redaction::is_secret_name(name))
-                .map(|(name, value)| format!("--header={name}: {value}")),
-        );
+    true
+}
+
+/// Scope an error's recovery command without exposing caller credentials or changing hosts.
+pub(crate) fn scoped_recovery_command(base: &str, globals: &GlobalArgs) -> Option<String> {
+    let mut context = Vec::new();
+    if !append_followup_context(&mut context, globals) {
+        return None;
+    }
+    if context.is_empty() {
+        return Some(base.to_string());
+    }
+    Some(format!(
+        "exa-agent {} {}",
+        crate::shell_join(&context),
+        base.strip_prefix("exa-agent ")?
+    ))
+}
+
+fn warn_followup_context(envelope: &mut serde_json::Value) {
+    if let Some(warnings) = envelope["warnings"].as_array_mut() {
+        if !warnings
+            .iter()
+            .any(|warning| warning["code"] == "followup_context_required")
+        {
+            warnings.push(serde_json::json!({
+                "code": "followup_context_required",
+                "message": "A follow-up requires routing, headers, or filters that cannot safely be echoed. Preserve the original request context when resuming with the returned resource ID or cursor.",
+            }));
+        }
     }
 }
 

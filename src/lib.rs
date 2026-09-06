@@ -43,7 +43,8 @@ use output::envelope::{
 };
 use output::{
     append_operation_next_actions, append_pagination_next_action, emit_ndjson, emit_raw,
-    emit_stdout, resolve_mode, stdout_is_tty, write_ndjson, write_stdout_value, OutputMode,
+    emit_stdout, resolve_mode, scoped_recovery_command, stdout_is_tty, write_ndjson,
+    write_stdout_value, OutputMode,
 };
 use request::RequestOverrides;
 use transport::{
@@ -6096,6 +6097,7 @@ fn build_typed_spec(
         request::deep_merge(&mut body, spec.body);
         spec.body = body;
     }
+    validate_content_options(op, &spec.body)?;
     validate_highlights_beta(op, &spec.body, globals)?;
     Ok(spec)
 }
@@ -6548,13 +6550,22 @@ fn execute_paginated_live<T: Transport>(
         ),
         OutputMode::Ndjson
     );
+    let output_path = ndjson.then_some(globals.output.as_deref()).flatten();
+    let mut output = output_path
+        .map(|path| {
+            create_output_file(path)
+                .map(std::io::BufWriter::new)
+                .map_err(|err| paginated_output_error(err, path, 0, None))
+        })
+        .transpose()?;
     let mut cursor = pagination.cursor.clone();
-    let mut all_items = Vec::new();
+    let mut all_items = (!ndjson).then(Vec::new);
     let mut first_request_id = String::new();
     let mut total_retries = 0u32;
     let mut total_duration_ms = 0u64;
     let mut total_cost_dollars = 0.0f64;
     let mut page = 0u32;
+    let mut output_pages = 0u32;
 
     let (mut last_data, last_next, last_has_more) = loop {
         page += 1;
@@ -6577,7 +6588,11 @@ fn execute_paginated_live<T: Transport>(
                 auth: RawAuth::Api(credential),
                 request_id,
             },
-        )?;
+        )
+        .map_err(|err| match output_path {
+            Some(path) => paginated_output_error(err, path, output_pages, cursor.as_deref()),
+            None => err,
+        })?;
         total_retries = total_retries.saturating_add(result.retries);
         total_duration_ms = total_duration_ms.saturating_add(result.duration_ms);
         let data = transport::parse_response_data(&result.response.body);
@@ -6612,9 +6627,11 @@ fn execute_paginated_live<T: Transport>(
             more = false;
         }
 
-        all_items.extend(primary_items(&data));
+        if let Some(all_items) = &mut all_items {
+            all_items.extend(primary_items(&data));
+        }
         if ndjson {
-            emit_ndjson(&page_envelope(
+            let mut envelope = page_envelope(
                 spec.op,
                 &result,
                 data.clone(),
@@ -6626,9 +6643,40 @@ fn execute_paginated_live<T: Transport>(
                     page,
                     page_count: page,
                 },
-                globals,
-                &query,
-            ));
+            );
+            if reached_cap {
+                append_pagination_next_action(
+                    &mut envelope,
+                    spec.op,
+                    &result.path,
+                    &query,
+                    globals,
+                );
+            }
+            // Continuation generation needs the page's data/cursor. Apply the ceiling only
+            // after the action is built; an explicit --output already supersedes auto-spill.
+            if output_path.is_none() {
+                apply_output_ceiling(&mut envelope, globals.max_output_bytes);
+            }
+            if let (Some(path), Some(output)) = (output_path, &mut output) {
+                if let Err(err) = write_ndjson(output, &envelope) {
+                    let err = output_write_error(path, &err);
+                    // The page request succeeded. Preserve that page on stdout under the same
+                    // nonzero-exit convention as other --output failures; earlier pages remain
+                    // in the requested file and are described on stderr.
+                    push_output_write_warning(&mut envelope, path, &err);
+                    emit_ndjson(&envelope);
+                    return Err(paginated_output_error(
+                        err,
+                        path,
+                        output_pages,
+                        cursor.as_deref(),
+                    ));
+                }
+                output_pages += 1;
+            } else {
+                emit_ndjson(&envelope);
+            }
         }
         if !more || reached_cap {
             break (data, next, more);
@@ -6639,9 +6687,30 @@ fn execute_paginated_live<T: Transport>(
         }
     };
 
-    if !ndjson {
+    if ndjson {
+        if let (Some(path), Some(mut output)) = (output_path, output) {
+            use std::io::Write;
+            output.flush().map_err(|err| {
+                paginated_output_error(
+                    output_write_error(path, &err),
+                    path,
+                    output_pages,
+                    last_has_more.then_some(last_next.as_deref()).flatten(),
+                )
+            })?;
+            drop(output);
+            emit_ndjson(&output_file_confirmation(
+                &command,
+                path,
+                written_output_bytes(path),
+            ));
+        }
+    } else {
         if let Some(obj) = last_data.as_object_mut() {
-            obj.insert("data".to_string(), serde_json::Value::Array(all_items));
+            obj.insert(
+                "data".to_string(),
+                serde_json::Value::Array(all_items.expect("JSON pagination collects items")),
+            );
         }
         let count = last_data
             .get("data")
@@ -6707,8 +6776,6 @@ fn page_envelope(
     data: serde_json::Value,
     warnings: &[serde_json::Value],
     page: PageInfo<'_>,
-    globals: &GlobalArgs,
-    query: &[(String, String)],
 ) -> serde_json::Value {
     let count = transport::primary_count(&data);
     let hash = transport::data_hash(&data);
@@ -6728,12 +6795,36 @@ fn page_envelope(
         warnings,
     });
     set_pagination(&mut envelope, page);
-    append_pagination_next_action(&mut envelope, op, &result.path, query, globals);
-    // A single oversized NDJSON page (e.g. `contents --text --all --ndjson` over long pages)
-    // must be ceiling-checked too, not just the final aggregated envelope — otherwise the
-    // per-page stream path bypasses `--max-output-bytes` entirely.
-    apply_output_ceiling(&mut envelope, globals.max_output_bytes);
     envelope
+}
+
+fn paginated_output_error(
+    mut err: CliError,
+    path: &str,
+    pages: u32,
+    resume_cursor: Option<&str>,
+) -> CliError {
+    let diag = err.diag_mut();
+    let mut details = diag
+        .details
+        .take()
+        .map(|value| *value)
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(details) = details.as_object_mut() {
+        details.insert("outputPath".to_string(), serde_json::json!(path));
+        details.insert("outputPartial".to_string(), serde_json::json!(pages > 0));
+        details.insert("outputPages".to_string(), serde_json::json!(pages));
+        details.insert(
+            "outputBytes".to_string(),
+            serde_json::json!(written_output_bytes(path)),
+        );
+        if let Some(cursor) = resume_cursor {
+            details.insert("resumeCursor".to_string(), serde_json::json!(cursor));
+        }
+    }
+    diag.details = Some(Box::new(details));
+    err
 }
 
 fn set_pagination(envelope: &mut serde_json::Value, page: PageInfo<'_>) {
@@ -7252,6 +7343,7 @@ fn execute_streaming_live<T: Transport>(
         let answer_outcome = answer_stream.then(|| transport::answer_outcome(&envelope["data"]));
         attach_content_metadata(&mut envelope, answer_outcome, answer_stream.then(Vec::new));
         append_warning_next_actions(&mut envelope);
+        append_stream_terminal_next_actions(&mut envelope, operation, globals)?;
         if let Some(path) = output_path {
             write_stream_terminal(&mut out, &envelope, ndjson, false, pretty, None)?;
             drop(out);
@@ -7297,6 +7389,7 @@ fn execute_streaming_live<T: Transport>(
     let answer_outcome = answer_stream.then(|| transport::answer_outcome(&terminal["data"]));
     attach_content_metadata(&mut terminal, answer_outcome, answer_stream.then(Vec::new));
     append_warning_next_actions(&mut terminal);
+    append_stream_terminal_next_actions(&mut terminal, operation, globals)?;
     let last_event_id = last_frame_event_id(&frames);
     if let Some(path) = output_path {
         write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
@@ -7308,6 +7401,45 @@ fn execute_streaming_live<T: Transport>(
         write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
     }
     Ok(0)
+}
+
+fn append_stream_terminal_next_actions(
+    envelope: &mut serde_json::Value,
+    operation: Option<&registry::OperationDef>,
+    globals: &GlobalArgs,
+) -> Result<(), CliError> {
+    let Some(operation) = operation.filter(|op| op.operation_id == "createAgentRun") else {
+        return Ok(());
+    };
+    let data = &envelope["data"];
+    let final_event = if data.is_object() {
+        Some(data)
+    } else {
+        data.as_array().and_then(|events| {
+            events.iter().rev().find(|event| {
+                event
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            })
+        })
+    };
+    let Some(id) = final_event
+        .filter(|event| {
+            event.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+        })
+        .and_then(|event| event.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+
+    // Operation follow-up generation reads data.id. Keep the terminal payload unchanged while
+    // presenting only the final Agent ID (not another copy of its output) to that generator.
+    let original = std::mem::replace(&mut envelope["data"], serde_json::json!({"id": id}));
+    let result = append_operation_next_actions(envelope, operation, None, globals);
+    envelope["data"] = original;
+    result
 }
 
 fn search_sse_recovery_error(err: CliError, request_body: &serde_json::Value) -> CliError {
@@ -7439,7 +7571,11 @@ fn maybe_record_pending_run_on_create_failure(
         return err;
     }
 
-    let suggested = pending_recovery_command(spec.op, webset_id, body);
+    let recovery = pending_recovery_command(spec.op, webset_id, body);
+    let (suggested, recovery_context_required) = match scoped_recovery_command(&recovery, globals) {
+        Some(scoped) => (scoped, false),
+        None => (format!("exa-agent {} --help", spec.op.command()), true),
+    };
     let pending_path = pending::pending_runs_path();
     let record = pending::PendingRunRecord::for_operation(
         spec.op,
@@ -7449,7 +7585,14 @@ fn maybe_record_pending_run_on_create_failure(
     );
     let write_result = pending::append_pending_run(&pending_path, &record);
 
-    attach_pending_run_details(err, suggested, path, &pending_path, write_result)
+    attach_pending_run_details(
+        err,
+        suggested,
+        recovery_context_required,
+        path,
+        &pending_path,
+        write_result,
+    )
 }
 
 fn should_write_pending_run(
@@ -7459,7 +7602,7 @@ fn should_write_pending_run(
 ) -> bool {
     spec.op.idempotency_sensitive
         && spec.op.method == registry::Method::Post
-        && globals.idempotency_key.is_none()
+        && (globals.idempotency_key.is_none() || spec.op.operation_id == "createBatch")
         && matches!(
             err,
             CliError::Network(_) | CliError::Upstream(_) | CliError::RateLimit(_)
@@ -7491,6 +7634,7 @@ fn pending_recovery_command(
 fn attach_pending_run_details(
     err: CliError,
     suggested: String,
+    recovery_context_required: bool,
     route_path: &str,
     pending_path: &std::path::Path,
     write_result: std::io::Result<()>,
@@ -7498,6 +7642,7 @@ fn attach_pending_run_details(
     fn update(
         mut diag: Diag,
         suggested: String,
+        recovery_context_required: bool,
         route_path: &str,
         pending_path: &std::path::Path,
         write_result: std::io::Result<()>,
@@ -7519,6 +7664,19 @@ fn attach_pending_run_details(
                 "pendingRunApiPath".to_string(),
                 serde_json::Value::String(route_path.to_string()),
             );
+            obj.insert(
+                "recoveryContextRequired".to_string(),
+                serde_json::Value::Bool(recovery_context_required),
+            );
+            if recovery_context_required {
+                obj.insert(
+                    "recoveryNote".to_string(),
+                    serde_json::Value::String(
+                        "Restore the original request context before checking whether the create succeeded; do not retry against the default profile or host."
+                            .to_string(),
+                    ),
+                );
+            }
             match write_result {
                 Ok(()) => {
                     obj.insert(
@@ -7546,6 +7704,7 @@ fn attach_pending_run_details(
         CliError::Network(diag) => CliError::Network(update(
             diag,
             suggested,
+            recovery_context_required,
             route_path,
             pending_path,
             write_result,
@@ -7553,6 +7712,7 @@ fn attach_pending_run_details(
         CliError::Upstream(diag) => CliError::Upstream(update(
             diag,
             suggested,
+            recovery_context_required,
             route_path,
             pending_path,
             write_result,
@@ -7560,6 +7720,7 @@ fn attach_pending_run_details(
         CliError::RateLimit(diag) => CliError::RateLimit(update(
             diag,
             suggested,
+            recovery_context_required,
             route_path,
             pending_path,
             write_result,
@@ -8487,6 +8648,7 @@ fn dispatch_robot_docs(
                     "Agent --max-cost-dollars maps budget.maxCostDollars and is valid only with omitted/auto/max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; stopReason budget_reached emits a warning.",
                     "Use agent runs stop ID --yes to finish a max-effort run early with gathered results. Unlike cancellation, stop returns partial work and charges accrued usage; the command adds its required beta token.",
                     "Batches create accepts --requests JSON|@file and --metadata JSON|@file; requests need unique customId values, POST, /search or /agent/runs, and nonstreaming object bodies. Batch commands add their required beta token; cancel/delete require --yes.",
+                    "Batch creation never auto-retries, even with an idempotency key: Exa does not document deduplication for this beta. Ambiguous creates retain scoped recovery; recoveryContextRequired means restore the original private context before investigating or retrying.",
                     "Use batches list --status completed --all to discover finished batches, then batches get ID for a fresh resultsUrl and download nextAction. Download the short-lived bearer URL directly without your Exa API key.",
                     "Monitor create/update accept repeated --include-domain and --exclude-domain flags. Use --set search.contents.highlights for monitor highlight options.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
@@ -8500,7 +8662,7 @@ fn dispatch_robot_docs(
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
                     "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
-                    "--ndjson emits one object per result for list-shaped data and a final summary envelope; non-list commands fall back to compact JSON.",
+                    "For --all lists, --ndjson streams page envelopes; add -o FILE to save all pages with a small stdout confirmation. On later failure, error.details reports outputPath, outputPages, and resumeCursor when available. Other list-shaped NDJSON emits result items plus a summary; non-list commands fall back to compact JSON.",
                     "Use nextActions to inspect created resources and continue paginated lists. Pagination continuations preserve filters, cursors, and explicit profile/beta settings without copying credentials or overwriting your output file.",
                     "If --output fails after an operation succeeds, save the full stdout result carrying output_write_failed despite the nonzero exit. Do not repeat a billable create just to fix the output path.",
                     "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
@@ -9110,6 +9272,16 @@ fn validate_highlights_option_shape(
     }
 
     if let Some(issue) = validate_positive_integer_field(
+        object.get("highlightsPerUrl"),
+        field,
+        "highlightsPerUrl",
+        flag,
+        1,
+        None,
+    ) {
+        return Some(issue);
+    }
+    if let Some(issue) = validate_positive_integer_field(
         object.get("numSentences"),
         field,
         "numSentences",
@@ -9254,7 +9426,7 @@ fn registry_validation_error(outcome: ValidateInputOutcome) -> CliError {
     // Fail closed: only dictionary members may escape as `error.code`; anything the
     // validator invents later still surfaces in `details.issue`.
     let code = match issue {
-        "missing_required_field" => "missing_required_argument",
+        "missing_required_field" | "missing_required_argument" => "missing_required_argument",
         "invalid_field_type" => "invalid_field_type",
         "invalid_flag_combination" => "invalid_flag_combination",
         _ => "invalid_value",

@@ -1201,13 +1201,13 @@ fn write_atomic_with_permissions(
     file.sync_all()
         .map_err(|error| format!("failed to sync {}: {error}", tmp.display()))?;
     if let Some(permissions) = permissions {
-        fs::set_permissions(&tmp, permissions)
+        file.set_permissions(permissions)
             .map_err(|error| format!("failed to set temporary file permissions: {error}"))?;
     } else if path.exists() {
         let permissions = fs::metadata(path)
             .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?
             .permissions();
-        fs::set_permissions(&tmp, permissions)
+        file.set_permissions(permissions)
             .map_err(|error| format!("failed to preserve permissions: {error}"))?;
     }
     fs::rename(&tmp, path).map_err(|error| format!("failed to install {}: {error}", path.display()))

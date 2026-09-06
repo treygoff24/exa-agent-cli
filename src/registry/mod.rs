@@ -51,7 +51,7 @@ pub enum Namespace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pagination {
     None,
-    /// Cursor-paginated list; the field carries the upstream nextCursor key (contracts §10).
+    /// Cursor-paginated list; the field names the request's cursor query parameter.
     Cursor(&'static str),
 }
 
@@ -163,7 +163,7 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
     let name = field.input_name?;
     if command == "contents" && flag == "highlights" {
         return Some(
-            "Return highlights, optionally using a query or inline JSON options object."
+            "Return highlights, optionally using a query or JSON options (inline or @file)."
                 .to_string(),
         );
     }

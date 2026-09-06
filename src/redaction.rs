@@ -6,6 +6,12 @@ pub const REDACTED: &str = "<redacted>";
 
 pub fn is_secret_name(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
+    if matches!(
+        n.as_str(),
+        "cookie" | "set-cookie" | "x-session" | "x-session-id"
+    ) {
+        return true;
+    }
     if matches!(n.as_str(), "tokensnum" | "tokens_num" | "tokens-num") {
         return false;
     }

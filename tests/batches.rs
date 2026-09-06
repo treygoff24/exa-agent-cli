@@ -532,7 +532,7 @@ fn batch_create_ambiguous_failure_suggests_listing() {
     assert_eq!(error["error"]["details"]["pendingRunWritten"], true);
     assert_eq!(
         error["error"]["suggestedCommand"],
-        "exa-agent batches list --limit 10"
+        format!("exa-agent '--base-url=http://{address}' '--beta=batches-2026-06-06' batches list --limit 10")
     );
     let record: Value = serde_json::from_str(
         fs::read_to_string(&pending_path)
@@ -545,7 +545,7 @@ fn batch_create_ambiguous_failure_suggests_listing() {
     assert_eq!(record["command"], "batches create");
     assert_eq!(
         record["recoveryCommand"],
-        "exa-agent batches list --limit 10"
+        error["error"]["suggestedCommand"]
     );
 }
 
@@ -596,6 +596,25 @@ fn schema_validation_checks_batch_wrapper_not_just_json_field_types() {
         ]);
         assert_eq!(stdout_json(&output)["valid"], valid);
     }
+}
+
+#[test]
+fn batch_missing_fields_and_cursor_metadata_are_actionable() {
+    let output = run(&[
+        "batches",
+        "create",
+        "--requests",
+        r#"[{"customId":"a","url":"/search","body":{}}]"#,
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&output)["error"]["code"],
+        "missing_required_argument"
+    );
+    let output = run(&["capabilities", "batches", "list", "--json"]);
+    let value = stdout_json(&output);
+    assert_eq!(value["command"]["pagination"]["cursorField"], "cursor");
 }
 
 #[test]

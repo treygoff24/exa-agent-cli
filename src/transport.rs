@@ -2162,7 +2162,8 @@ struct PreparedRawRequest {
     correlation_id: Option<String>,
 }
 
-/// Non-auth headers shared by request previews and the wire path.
+/// Explicit and feature headers shared by previews and requests. Authentication and HTTP
+/// stack defaults (Host, Content-Type, Content-Length, User-Agent) remain transport-owned.
 pub(crate) fn request_headers(
     globals: &GlobalArgs,
     body: &serde_json::Value,
@@ -2252,8 +2253,18 @@ fn prepare_raw_request(params: &RawExecuteParams<'_>) -> Result<PreparedRawReque
     };
 
     let payment_mode = !matches!(params.auth, RawAuth::Api(_));
+    // The beta Batch API does not document server-side idempotency. Forward an explicit
+    // key, but never treat it as proof that replaying a batch creation cannot double-bill.
+    let batch_create = method == "POST"
+        && params
+            .path
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .trim_matches('/')
+            == "batches";
     let send_opts = SendOptions {
-        retry: if payment_mode {
+        retry: if payment_mode || batch_create {
             0
         } else {
             params.globals.retry

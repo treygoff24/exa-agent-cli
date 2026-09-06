@@ -7307,7 +7307,12 @@ fn monitor_create_raw_is_rejected_for_secret_safety() {
     assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
 }
 
-fn assert_pending_record(path: &std::path::Path, command: &str, api_path: &str) {
+fn assert_pending_record(
+    path: &std::path::Path,
+    command: &str,
+    api_path: &str,
+    base_url: Option<&str>,
+) {
     let raw = fs::read_to_string(path).expect("pending run file");
     let lines: Vec<_> = raw.lines().collect();
     assert_eq!(lines.len(), 1);
@@ -7320,7 +7325,11 @@ fn assert_pending_record(path: &std::path::Path, command: &str, api_path: &str) 
         .is_some_and(|request_id| request_id.starts_with("req_")));
     assert_eq!(
         record["recoveryCommand"],
-        format!("exa-agent {command} --idempotency-key <stable-key>")
+        match base_url {
+            Some(base) =>
+                format!("exa-agent '--base-url={base}' {command} --idempotency-key <stable-key>"),
+            None => format!("exa-agent {command} --idempotency-key <stable-key>"),
+        }
     );
 }
 
@@ -7349,7 +7358,12 @@ fn monitor_create_ambiguous_failure_records_pending_run() {
     assert!(!output.status.success());
     let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
-    assert_pending_record(&pending_path, "monitor create", "/monitors");
+    assert_pending_record(
+        &pending_path,
+        "monitor create",
+        "/monitors",
+        Some(&base_url),
+    );
 }
 
 #[test]
@@ -8367,7 +8381,7 @@ fn websets_exports_preview_and_live_next_action() {
         "--format".into(),
         "csv".into(),
         "--base-url".into(),
-        base_url,
+        base_url.clone(),
         "--api-key".into(),
         "test-key-abcdef12".into(),
         "--compact".into(),
@@ -8382,7 +8396,7 @@ fn websets_exports_preview_and_live_next_action() {
     let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         live["nextActions"][0]["command"],
-        "exa-agent websets exports get 'ws/abc' 'export/123'"
+        format!("'exa-agent' 'websets' 'exports' 'get' '--json' '--base-url={base_url}' '--' 'ws/abc' 'export/123'")
     );
 }
 
@@ -9217,6 +9231,7 @@ fn websets_webhooks_create_ambiguous_failure_records_pending_run() {
         &pending_path,
         "websets webhooks create",
         "/websets/v0/webhooks",
+        Some(&base_url),
     );
 }
 
@@ -9813,7 +9828,7 @@ fn admin_keys_create_safety_edges() {
     assert!(!output.status.success());
     let stderr: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(stderr["error"]["details"]["pendingRunWritten"], true);
-    assert_pending_record(&pending_path, "admin keys create", "/api-keys");
+    assert_pending_record(&pending_path, "admin keys create", "/api-keys", None);
     // The reservation is rolled back when the request never succeeds.
     assert!(!secret_path.exists());
 }

@@ -102,7 +102,9 @@ Dispatch-level body validation runs before credential resolution and network I/O
 
 - Destructive operations (deletes, cancels) refuse to run without `--yes` and exit `9` otherwise.
 - Create-POSTs never auto-retry without `--idempotency-key` — retrying a create on a post-send timeout can double-bill. An ambiguous create failure writes a local pending-run record and the error names the exact recovery command.
+- Batch creation never auto-retries, even with a key: the beta API has no documented deduplication guarantee. Ambiguous batch failures retain recovery information with or without a key.
 - `--dry-run --print-request` works on every mutation: it builds and prints the exact request body without sending it.
+- Preview headers show explicit and feature-specific values, not credentials or HTTP-stack defaults. Custom caller headers are not copied into automatic follow-ups; `followup_context_required` means preserve the original context manually.
 - `--header` cannot override managed auth or payment headers (`Authorization`, payment namespaces, or other secret headers) — refused at exit `1`.
 - Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` are limited to exact nonstreaming `raw POST /search` or `/contents` on the default host; payment values are stdin-only and never combined with API/service credentials. Successful signed raw payment responses redact exact submitted payment credential echoes before any output. JSON-envelope mode adds top-level `payment: { kind: "receipt", headers: [...] }` receipt metadata after `dataTruncated`; under `--raw`, no envelope or `payment` metadata is added and output is exact except those echoes are replaced with `<redacted>`.
 

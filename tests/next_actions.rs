@@ -20,6 +20,10 @@ fn temporary() -> std::path::PathBuf {
 }
 
 fn run(args: &[&str], offline: bool) -> Value {
+    serde_json::from_slice(&run_output(args, offline)).unwrap()
+}
+
+fn run_output(args: &[&str], offline: bool) -> Vec<u8> {
     let directory = temporary();
     std::fs::write(directory.join("config.toml"), "[profiles.audit]\n").unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
@@ -47,54 +51,62 @@ fn run(args: &[&str], offline: bool) -> Value {
         "{args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).unwrap()
+    output.stdout
 }
 
 fn server(response: Value) -> (String, std::thread::JoinHandle<String>) {
+    server_pages(vec![response])
+}
+
+fn server_pages(responses: Vec<Value>) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();
     let handle = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut socket = loop {
-            match listener.accept() {
-                Ok((socket, _)) => break socket,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(10))
+        let mut requests = String::new();
+        for response in responses {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(error) => panic!("accept loopback request: {error}"),
                 }
-                Err(error) => panic!("accept loopback request: {error}"),
-            }
-        };
-        socket
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut request = Vec::new();
-        loop {
-            let mut buffer = [0; 4096];
-            let count = socket.read(&mut buffer).unwrap();
-            assert_ne!(count, 0, "incomplete HTTP request");
-            request.extend_from_slice(&buffer[..count]);
-            if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                if request.len() >= end + 4 + length {
-                    break;
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let count = socket.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "incomplete HTTP request");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
                 }
             }
+            let body = response.to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            requests.push_str(&String::from_utf8(request).unwrap());
         }
-        let body = response.to_string();
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        String::from_utf8(request).unwrap()
+        requests
     });
     (url, handle)
 }
@@ -260,4 +272,140 @@ fn pagination_followups_preserve_scope_without_credentials_or_output_overwrite()
         assert_eq!(std::fs::read(&output_path).unwrap(), saved);
         std::fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn continuations_do_not_drop_private_routing_or_echo_secret_filters() {
+    for private_filter in [false, true] {
+        let (url, handle) = server(json!({"data":[],"hasMore":true,"nextCursor":"next-page"}));
+        let base = if private_filter {
+            url
+        } else {
+            format!("{url}/private-proxy")
+        };
+        let mut args = vec![
+            "monitor",
+            "list",
+            "--base-url",
+            &base,
+            "--api-key",
+            "fixture-secret",
+            "--json",
+        ];
+        if private_filter {
+            args.extend(["--metadata", "api_key=private-filter-value"]);
+        }
+        let response = run(&args, false);
+        handle.join().unwrap();
+        assert!(
+            response["nextActions"].as_array().unwrap().is_empty(),
+            "unsafe follow-up: {response}"
+        );
+        assert!(response["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "followup_context_required"));
+        assert!(!response.to_string().contains("private-filter-value"));
+    }
+}
+
+#[test]
+fn caller_headers_are_not_copied_into_success_followups() {
+    let (url, handle) = server(json!({"id":"run_created","status":"running"}));
+    let response = run(
+        &[
+            "agent",
+            "runs",
+            "create",
+            "q",
+            "--base-url",
+            &url,
+            "--api-key",
+            "fixture-secret",
+            "--header",
+            "X-Context: private-context-value",
+            "--json",
+        ],
+        false,
+    );
+    let request = handle.join().unwrap();
+    assert!(
+        request.contains("private-context-value"),
+        "caller header must still reach its chosen endpoint"
+    );
+    assert!(response["nextActions"].as_array().unwrap().is_empty());
+    assert!(response["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "followup_context_required"));
+    assert!(!response.to_string().contains("private-context-value"));
+}
+
+fn assert_repeated_cursor_stops_without_a_continuation(ndjson: bool) {
+    let (url, handle) = server_pages(vec![
+        json!({"data":[{"id":"item1"}],"hasMore":true,"nextCursor":"samecursor"}),
+        json!({"data":[{"id":"item2"}],"hasMore":true,"nextCursor":"samecursor"}),
+    ]);
+    let output = run_output(
+        &[
+            "websets",
+            "items",
+            "list",
+            "ws1",
+            "--all",
+            "--limit",
+            "1",
+            "--cursor",
+            "originalcursor",
+            "--base-url",
+            &url,
+            "--api-key",
+            "fixture-secret",
+            if ndjson { "--ndjson" } else { "--json" },
+        ],
+        false,
+    );
+    let requests = handle.join().unwrap();
+    assert_eq!(
+        requests
+            .matches("GET /websets/v0/websets/ws1/items?")
+            .count(),
+        2
+    );
+    assert!(requests.contains("cursor=originalcursor"));
+    assert!(requests.contains("cursor=samecursor"));
+    let envelopes: Vec<Value> = if ndjson {
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    } else {
+        vec![serde_json::from_slice(&output).unwrap()]
+    };
+    assert_eq!(envelopes.len(), if ndjson { 2 } else { 1 });
+    let terminal = envelopes.last().unwrap();
+    assert_eq!(terminal["pagination"]["hasMore"], false);
+    assert_eq!(terminal["pagination"]["pageCount"], 2);
+    assert!(terminal["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "pagination_repeated_cursor"));
+    assert!(
+        terminal["nextActions"].as_array().unwrap().is_empty(),
+        "unsafe continuation: {terminal}"
+    );
+}
+
+#[test]
+fn aggregated_repeated_cursor_does_not_offer_the_rejected_cursor_again() {
+    assert_repeated_cursor_stops_without_a_continuation(false);
+}
+
+#[test]
+fn ndjson_repeated_cursor_does_not_offer_the_rejected_cursor_again() {
+    assert_repeated_cursor_stops_without_a_continuation(true);
 }

@@ -560,6 +560,44 @@ fn disabled_feature_is_not_a_request_to_rotate_valid_credentials() {
     );
 }
 
+#[test]
+fn batch_create_never_automatically_replays_an_unconfirmed_request() {
+    let globals = parse_globals(&["--idempotency-key", "batch-request-1", "--retry", "2"]);
+    let credential = auth::resolve_api_credential(
+        &CredentialInput {
+            explicit: Some("test-key-abcdef12".into()),
+            ..Default::default()
+        },
+        &NoopKeyring,
+    )
+    .unwrap();
+    for path in ["/batches", "batches", "/batches/", "/batches?trace=1"] {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(503, r#"{"error":"temporarily unavailable"}"#);
+        fake.push_ok_json(200, r#"{"id":"duplicate-batch"}"#);
+        let result = execute_raw(
+            &fake,
+            "POST",
+            path,
+            &[],
+            serde_json::json!({"requests":[]}),
+            &globals,
+            &credential,
+        );
+        assert!(
+            result.is_err(),
+            "{path}: an undocumented idempotency key must not authorize replay"
+        );
+        let requests = fake.recorded_requests();
+        assert_eq!(requests.len(), 1, "{path}");
+        assert!(requests[0]
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("Idempotency-Key")
+                && value == "batch-request-1"));
+    }
+}
+
 /// A 402 must not be retried. `should_retry` is private, so this asserts through the public
 /// send path: one canned 402 and one recorded request means no retry happened.
 #[test]

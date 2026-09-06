@@ -472,3 +472,44 @@ fn highlights_beta_features_require_explicit_opt_in_before_dispatch() {
         }
     }
 }
+
+#[test]
+fn highlights_validate_shape_before_beta_and_check_deprecated_integer_options() {
+    let output = run(&[
+        "search",
+        "q",
+        "--highlights",
+        r#"{"dynamic":"yes"}"#,
+        "--dry-run",
+    ]);
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "invalid_field_type");
+    assert!(!error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("requires --beta"));
+    for value in [json!("not-an-integer"), json!(0), json!(1), Value::Null] {
+        let body = json!({"query":"q","contents":{"highlights":{"highlightsPerUrl":value}}});
+        let result = validate("search", &body);
+        assert_eq!(result["valid"], value == json!(1) || value.is_null());
+    }
+}
+
+#[test]
+fn highlights_help_exposes_file_options_and_literal_at_queries_still_work_as_json() {
+    let help = run(&["contents", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("QUERY|JSON|@file"));
+    let result = ok(&[
+        "contents",
+        "https://example.com",
+        "--highlights",
+        r#"{"query":"@openai roadmap"}"#,
+        "--dry-run",
+    ]);
+    assert_eq!(
+        result["data"]["request"]["body"]["highlights"]["query"],
+        "@openai roadmap"
+    );
+}

@@ -20,12 +20,25 @@ All notable changes to this project are documented here.
 
 - Account feature-access failures now return `feature_not_enabled`, distinct from
   a rejected credential. This follows a live Batch API entitlement refusal.
+- Recovery and pagination actions retain safe request scope, withhold private headers
+  and filters, and stop offering a cursor after the pagination loop rejects it.
+  Batch creation never auto-retries without a documented deduplication guarantee.
+- Auto-paginated NDJSON now honors `--output`, retains completed pages on later
+  failures, and avoids collecting the entire result set in memory. Intermediate
+  pages no longer offer redundant continuation commands.
+- Completed Agent streams now offer resource follow-ups without copying their
+  output again. Follow-up generation no longer clones whole retrieval responses.
 - Request previews now share header assembly with live requests, including custom
   headers, SSE Accept, idempotency keys, and the documented `Exa-Beta` header.
 - Doctor backups preserve original config permissions across undo and start private
   before config bytes are written, independent of the shell's umask.
 - Output documentation now explains how to recover the complete stdout result after
   an output-file write failure without repeating a successful create.
+
+### Changed
+
+- A leading `@` in `contents --highlights` now selects a file. For a literal query
+  such as `@openai roadmap`, use `--highlights '{"query":"@openai roadmap"}'`.
 
 ## 0.6.0 — 2026-08-11
 

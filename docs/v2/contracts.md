@@ -1,5 +1,9 @@
 # v2 Contracts (the agent-facing spec)
 
+Raw output preserves HTTP content-decoded body bytes, including gzip decoding;
+it is not a wire-level compressed-byte capture. References to exact upstream
+bytes below mean these decoded body bytes, subject to signed-payment redaction.
+
 Date: 2026-06-29
 Status: canonical. The schema ids, field names, exit codes, and rules here are the source of truth. `architecture.md`, `commands.md`, and the in-tool `robot-docs guide` must match this exactly. If you find a divergence, fix it here first, then propagate.
 
@@ -172,6 +176,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `network_error` | network (4) | true | DNS/connect/TLS/timeout before an upstream response. |
 | `upstream_error` | upstream (5) | true | Exa 5xx. |
 | `upstream_malformed` | upstream (5) | false | upstream returned an unparseable/contract-violating body. |
+| `response_too_large` | upstream (5) | false | decoded response/stream exceeded the receive cap; operation outcome may be unknown. |
 | `rate_limited` | rate_limit (6) | true | HTTP 429; `details.retryAfterMs` set when `Retry-After` is present. |
 | `concurrency_limit` | rate_limit (6) | true | account concurrency cap hit. |
 | `not_found` | not_found (7) | false | resource id does not exist. |
@@ -201,7 +206,7 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 | 2 | auth | Missing/invalid API key or team context (upstream 401/403). | no key; revoked key |
 | 3 | config | Config/profile/env problem. | malformed TOML; unknown profile |
 | 4 | network | DNS/connect/TLS/timeout *before* an upstream response. | offline; connect timeout |
-| 5 | upstream | Exa 5xx or malformed upstream response. | server error |
+| 5 | upstream | HTTP failure or an unusable upstream response. | server error |
 | 6 | rate_limit | HTTP 429 or concurrency limit. | search QPS; agent concurrency |
 | 7 | not_found | Resource does not exist. | run/webset/monitor id unknown |
 | 8 | conflict | Resource/idempotency conflict. | webset `externalId` exists |
@@ -259,6 +264,28 @@ Interrupted stream → exit 12 + `exa.cli.error.v1` on stderr including the last
 - Auto-spill (threshold-gated): the same spill mechanism, also triggered by the `--max-output-bytes` ceiling above. The standalone *auto*-spill threshold (independent of `--output`) ships conservative; the manual `--max-output-bytes` ceiling is the v1 guarantee.
 - **`count` and `dataHash` survive a spill.** A spilled envelope still carries `count` (item count) and `bytes`, so an agent can size and verify the spilled file without reading it (F1.4).
 - Conservative content defaults reduce how often any of this fires: `search` defaults to query-aware highlights; bare `search --text` / `similar --text` cap text at 1500 characters per result; bare `contents --text` remains uncapped for deep reads.
+
+### Receive and chunk bounds
+
+`--max-response-bytes N` (config `max_response_bytes`, default 67,108,864) bounds
+successful decoded bytes, including gzip and the whole SSE stream or JSON
+fallback. Reads stop at cap+1 before a whole response is retained; streaming
+feeds at most cap bytes to the decoder. Exceeding the cap returns nonretryable
+`response_too_large` / exit 5, retaining emitted output and the last complete
+event ID when available. JSON terminal mode has no terminal success envelope on
+failure. Malformed/zero cap values are local usage errors before sending.
+Non-2xx diagnostic reads are separately bounded to 64 KiB; status and payment
+headers remain available for classification. Ambiguous creates retain their
+pending-run recovery rules, never a generic rerun suggestion.
+
+`contents --chunk-size N --jobs J` has 1-16 workers, default 1, and renders in
+input order. Request, per-item, and output failures stop admission of new rounds,
+not drainage of requests already sent. `--output` stages the sequence of all
+successful chunk renderings (JSON envelopes, NDJSON records/summaries, or human
+text), then emits one confirmation. Existing modes and symlinks survive. On a
+later failure completed chunks are installed; an unwritable chunk is retained
+on stdout, and failed final rename reports its staging path. Multi-chunk raw
+output is refused before sending.
 
 ## 10. Pagination contract
 

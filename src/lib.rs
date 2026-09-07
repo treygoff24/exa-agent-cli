@@ -9,6 +9,7 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod error;
+pub mod fsutil;
 pub mod output;
 pub mod pending;
 pub mod presets;
@@ -48,7 +49,7 @@ use output::{
 };
 use request::RequestOverrides;
 use transport::{
-    body_wants_stream, execute_raw_stream_with_request_id, execute_raw_with_request_id,
+    body_wants_stream, execute_raw_stream_retaining, execute_raw_with_request_id,
     infer_stream_event_type, parse_user_headers, search_terminal_stream_data, terminal_stream_data,
     RawAuth, RawExecuteParams, StreamItem, Transport, UreqTransport,
 };
@@ -1217,6 +1218,7 @@ fn first_line(s: &str) -> String {
 
 fn dispatch(cli: &Cli) -> Result<i32, CliError> {
     let pretty = want_pretty(&cli.globals);
+    validate_network_policy_flags(&cli.globals)?;
     if payment_flow_requested(&cli.globals) && !matches!(cli.command, Command::Raw(_)) {
         return Err(CliError::Usage(
             Diag::new(
@@ -1281,6 +1283,30 @@ fn dispatch(cli: &Cli) -> Result<i32, CliError> {
         Command::Fetch(args) => dispatch_fetch(args, &cli.globals, pretty),
         Command::Raw(args) => dispatch_raw(args, &cli.globals, pretty),
     }
+}
+
+/// Reject an unusable `--timeout` / `--connect-timeout` / `--max-response-bytes` before the
+/// command does anything else.
+///
+/// These used to be parsed lazily inside the live paths, which meant `--dry-run` happily
+/// "validated" an invocation the real run would refuse, and `--connect-timeout` — never parsed
+/// at all — accepted any string forever. A preview that does not reject what the live call
+/// rejects is worse than no preview.
+fn validate_network_policy_flags(globals: &GlobalArgs) -> Result<(), CliError> {
+    // Flag values only: a config file that predates a stricter parser must not brick every
+    // command, including the `config`/`doctor` commands used to repair it.
+    let empty = config::Config {
+        timeout: None,
+        connect_timeout: None,
+        max_response_bytes: None,
+        ..config::Config::default()
+    };
+    if globals.timeout.is_some() {
+        transport::resolve_timeout(globals, &empty)?;
+    }
+    transport::resolve_connect_timeout(globals, &empty)?;
+    transport::resolve_max_response_bytes(globals, &empty)?;
+    Ok(())
 }
 
 fn capabilities_for(args: &CapabilitiesArgs) -> Result<serde_json::Value, CliError> {
@@ -1844,7 +1870,7 @@ fn dispatch_contents(
             let spec = specs.into_iter().next().expect("one contents spec");
             dispatch_typed_command(spec, globals, pretty)
         } else {
-            dispatch_typed_chunks(specs, globals, pretty)
+            dispatch_typed_chunks(specs, globals, args.jobs.unwrap_or(1))
         }
     })
 }
@@ -1982,6 +2008,7 @@ fn dispatch_fetch(args: &FetchArgs, globals: &GlobalArgs, pretty: bool) -> Resul
             summary_query: Some("Summarize the page".to_string()),
             highlights: None,
             chunk_size: None,
+            jobs: None,
         };
         let spec = build_contents_spec(&contents_args, globals)?;
         let specs = chunk_contents_specs(spec, None)?;
@@ -5792,12 +5819,15 @@ fn has_more(data: &serde_json::Value, next: Option<&str>) -> bool {
 }
 
 fn primary_items(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    primary_items_ref(data).cloned().unwrap_or_default()
+}
+
+/// Borrowed view of the primary item array, for callers that only read it.
+fn primary_items_ref(data: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
     data.get("data")
         .or_else(|| data.get("items"))
         .or_else(|| data.get("results"))
         .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default()
 }
 
 fn shell_join(args: &[String]) -> String {
@@ -6441,8 +6471,10 @@ fn dispatch_typed_inner(
         .unwrap_or_else(|| globals.clone());
     let credential = resolve_operation_credential(spec.op, &effective_globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(&effective_globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
+    let transport = UreqTransport::new(transport::resolve_transport_config(
+        &effective_globals,
+        &cfg,
+    )?);
     execute_typed_live(
         &transport,
         spec,
@@ -6483,8 +6515,7 @@ fn dispatch_paginated_typed_command(
     parse_user_headers(&globals.headers)?;
     let credential = resolve_operation_credential(spec.op, globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
+    let transport = UreqTransport::new(transport::resolve_transport_config(globals, &cfg)?);
     execute_paginated_live(
         &transport,
         &spec,
@@ -6981,14 +7012,18 @@ fn apply_output_ceiling(envelope: &mut serde_json::Value, max_output_bytes: u64)
     if data.is_null() {
         return;
     }
-    let serialized = serde_json::to_vec(data).unwrap_or_default();
-    let size = serialized.len() as u64;
+    // Measure with a counting sink instead of building a throwaway `Vec`: the common case is
+    // "under the ceiling", where the old code still allocated and discarded a full serialization
+    // of the payload, and the oversized case then allocated a second, larger, pretty copy on top
+    // of the `Value` itself.
+    let Some(size) = serialized_len(data) else {
+        return;
+    };
     if size <= max_output_bytes {
         return;
     }
 
-    let pretty = serde_json::to_vec_pretty(data).unwrap_or_else(|_| serialized.clone());
-    let warning = match spill_data_to_file(&pretty) {
+    let warning = match spill_data_to_file(data) {
         Ok(path) => {
             let path_str = path.display().to_string();
             let Some(obj) = envelope.as_object_mut() else {
@@ -7044,23 +7079,56 @@ fn apply_output_ceiling(envelope: &mut serde_json::Value, max_output_bytes: u64)
 /// `dataPath`, corrupting a result an agent may still be reading.
 static SPILL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn spill_data_to_file(serialized: &[u8]) -> std::io::Result<std::path::PathBuf> {
+/// Compact serialized length of `value` without materializing the bytes.
+fn serialized_len(value: &serde_json::Value) -> Option<u64> {
+    struct CountingWriter(u64);
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len() as u64);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = CountingWriter(0);
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.0)
+}
+
+/// Stream the pretty-printed payload straight into a fresh spill file.
+///
+/// The file is created with `create_new` (never following or clobbering a planted path) and is
+/// 0600 from creation, because a spilled `data` payload is exactly the response body an agent
+/// did not want inline. A partially-written file is removed so the caller's fallback ("keep the
+/// data inline and warn") is never contradicted by a truncated file on disk.
+fn spill_data_to_file(data: &serde_json::Value) -> std::io::Result<std::path::PathBuf> {
     let dir = pending::state_dir().join("spill");
-    std::fs::create_dir_all(&dir)?;
+    fsutil::create_dir_all_private(&dir)?;
     let n = SPILL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = dir.join(format!(
         "{}-{}-{n}.json",
         std::process::id(),
         transport::new_request_id()
     ));
-    std::fs::write(&path, serialized)?;
+    let file = fsutil::create_new_private(&path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let outcome = serde_json::to_writer_pretty(&mut writer, data)
+        .map_err(std::io::Error::from)
+        .and_then(|()| std::io::Write::flush(&mut writer))
+        .and_then(|()| writer.into_inner().map_err(std::io::Error::from))
+        .and_then(|file| file.sync_all());
+    if let Err(err) = outcome {
+        let _ = std::fs::remove_file(&path);
+        return Err(err);
+    }
     Ok(path)
 }
 
 fn dispatch_typed_chunks(
     specs: Vec<request::RequestSpec>,
     globals: &GlobalArgs,
-    _pretty: bool,
+    jobs: u32,
 ) -> Result<i32, CliError> {
     let op = specs
         .first()
@@ -7071,7 +7139,7 @@ fn dispatch_typed_chunks(
     } else {
         transport::new_request_id()
     };
-    match dispatch_typed_chunks_inner(specs, globals) {
+    match dispatch_typed_chunks_inner(specs, globals, jobs) {
         Ok(code) => Ok(code),
         Err(err) => {
             let code = err.category() as i32;
@@ -7093,6 +7161,7 @@ fn dispatch_typed_chunks(
 fn dispatch_typed_chunks_inner(
     specs: Vec<request::RequestSpec>,
     globals: &GlobalArgs,
+    jobs: u32,
 ) -> Result<i32, CliError> {
     parse_user_headers(&globals.headers)?;
     for spec in &specs {
@@ -7105,6 +7174,16 @@ fn dispatch_typed_chunks_inner(
         return Err(CliError::Usage(Diag::new(
             "invalid_flag_combination",
             "contents --chunk-size cannot be combined with --raw when it creates multiple upstream requests",
+        )));
+    }
+    if specs.len() > 1
+        && specs
+            .iter()
+            .any(|spec| body_wants_stream(&typed_wire_body(spec)))
+    {
+        return Err(CliError::Usage(Diag::new(
+            "invalid_flag_combination",
+            "contents does not support stream:true across multiple --chunk-size requests; remove stream from the request body",
         )));
     }
     if globals.print_request || globals.dry_run {
@@ -7124,54 +7203,351 @@ fn dispatch_typed_chunks_inner(
         .expect("contents chunking creates at least one spec");
     let credential = resolve_operation_credential(op, globals)?;
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
+    let transport = UreqTransport::new(transport::resolve_transport_config(globals, &cfg)?);
+    // Prefetching bypasses the ambiguous-create recovery and secret-capture paths that
+    // `execute_typed_live` wraps around a send. Both are inert for `contents` today (not
+    // idempotency-sensitive, no secret capture, never streams). If the registry ever says
+    // otherwise, fall back to the serial path rather than silently dropping a pending-run
+    // record for a possibly-billed request.
+    let prefetch_safe = !op.idempotency_sensitive
+        && op.secret_capture().is_none()
+        && !specs
+            .iter()
+            .any(|spec| body_wants_stream(&typed_wire_body(spec)));
+    if !prefetch_safe || globals.raw {
+        return run_chunks_serially(&specs, globals, &credential, &transport);
+    }
+    run_chunks_concurrently(&specs, globals, &credential, &transport, jobs)
+}
+
+/// Print the NDJSON error envelope for a failed chunk and return its exit code. Shared by the
+/// serial and concurrent paths so the two cannot drift in what a chunk failure looks like.
+fn emit_chunk_error(
+    spec: &request::RequestSpec,
+    request_id: &str,
+    globals: &GlobalArgs,
+    err: &CliError,
+) -> i32 {
+    let env = ErrorEnvelope::from_error(err).with_context(
+        spec.op.method.as_str(),
+        spec.op.api_path,
+        request_id.to_string(),
+        globals.correlation_id.clone(),
+    );
+    emit_ndjson(&env.to_json());
+    err.category() as i32
+}
+
+/// Fallback for raw output or operations whose recovery/secret handling cannot
+/// safely be split into fetch and render. Current typed contents uses rounds,
+/// including width one for the default serial behavior.
+fn run_chunks_serially<T: Transport>(
+    specs: &[request::RequestSpec],
+    globals: &GlobalArgs,
+    credential: &auth::ResolvedCredential,
+    transport: &T,
+) -> Result<i32, CliError> {
     let mut exit_code = 0;
-    for spec in &specs {
+    for spec in specs {
         let request_id = transport::new_request_id();
         match execute_typed_live(
-            &transport,
+            transport,
             spec,
             globals,
-            &credential,
-            TypedExecution {
-                request_id: &request_id,
-                pretty: false,
-                route: TypedRoute {
-                    path: spec.op.api_path,
-                    query: &[],
-                    sse_accept: false,
-                },
-                command_override: None,
-            },
+            credential,
+            chunk_execution(spec, &request_id),
             LiveExtras::default(),
         ) {
             Ok(10) => exit_code = 10,
             Ok(_) => {}
-            Err(err) => {
-                let code = err.category() as i32;
-                let env = ErrorEnvelope::from_error(&err).with_context(
-                    spec.op.method.as_str(),
-                    spec.op.api_path,
-                    request_id,
-                    globals.correlation_id.clone(),
-                );
-                emit_ndjson(&env.to_json());
-                return Ok(code);
-            }
+            Err(err) => return Ok(emit_chunk_error(spec, &request_id, globals, &err)),
         }
     }
     Ok(exit_code)
 }
 
-fn execute_typed_live<T: Transport>(
+fn chunk_execution<'a>(spec: &'a request::RequestSpec, request_id: &'a str) -> TypedExecution<'a> {
+    TypedExecution {
+        request_id,
+        pretty: false,
+        route: TypedRoute {
+            path: spec.op.api_path,
+            query: &[],
+            sse_accept: false,
+        },
+        command_override: None,
+    }
+}
+
+/// `--jobs N > 1`: fetch up to `N` independent chunks at a time, render strictly in input order.
+///
+/// Chunks of one `contents --chunk-size` call are independent upstream requests, so the wall
+/// clock is dominated by round trips that could overlap. What must NOT overlap is output: an
+/// agent parsing NDJSON needs chunk 2's envelope after chunk 1's, whichever request finished
+/// first. So workers only produce `RawExecuteResult`s; every byte of output is still written by
+/// this thread, in `specs` order.
+///
+/// Work is admitted one round of `N` at a time. Once a round contains a failure — upstream,
+/// transport, or a failure while rendering an earlier chunk — no further round is admitted, and
+/// the results already fetched in the failing round are still rendered in order, with error
+/// envelopes at their corresponding input positions. That is the honest position: those requests were paid for, so their data belongs to
+/// the caller; the ones never sent stay unsent.
+fn run_chunks_concurrently(
+    specs: &[request::RequestSpec],
+    globals: &GlobalArgs,
+    credential: &auth::ResolvedCredential,
+    transport: &UreqTransport,
+    jobs: u32,
+) -> Result<i32, CliError> {
+    let width = (jobs as usize).clamp(1, specs.len().max(1));
+    let mut exit_code = 0;
+    let mut output = globals
+        .output
+        .as_deref()
+        .map(ChunkOutput::new)
+        .transpose()?;
+    for round in specs.chunks(width) {
+        let fetched: Vec<(String, Result<transport::RawExecuteResult, CliError>)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = round
+                    .iter()
+                    .map(|spec| {
+                        scope.spawn(move || {
+                            let request_id = transport::new_request_id();
+                            let outcome =
+                                fetch_chunk(transport, spec, globals, credential, &request_id);
+                            (request_id, outcome)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().unwrap_or_else(|_| {
+                            (transport::new_request_id(), Err(chunk_worker_panic()))
+                        })
+                    })
+                    .collect()
+            });
+
+        let mut failed = false;
+        for (spec, (request_id, outcome)) in round.iter().zip(fetched) {
+            let result = match outcome {
+                Ok(result) => result,
+                Err(err) => {
+                    exit_code = emit_chunk_error(spec, &request_id, globals, &err);
+                    failed = true;
+                    continue;
+                }
+            };
+            match render_typed_live_with(
+                result,
+                spec,
+                globals,
+                chunk_execution(spec, &request_id),
+                LiveExtras::default(),
+                |envelope| match output.as_mut() {
+                    Some(output) => output.write(envelope, globals),
+                    None => emit_completed_response(envelope, globals, false),
+                },
+            ) {
+                Ok(10) => {
+                    if !failed {
+                        exit_code = 10;
+                    }
+                    failed = true;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    exit_code = emit_chunk_error(spec, &request_id, globals, &err);
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            break;
+        }
+    }
+    if let Some(output) = output {
+        output.finish(globals)?;
+    }
+    Ok(exit_code)
+}
+
+/// One staged destination for the entire chunk run, including a partially successful run.
+struct ChunkOutput {
+    path: String,
+    target: String,
+    temp: Option<String>,
+    file: Option<std::fs::File>,
+    chunks: u32,
+}
+
+impl ChunkOutput {
+    fn new(path: &str) -> Result<Self, CliError> {
+        let target = match std::fs::canonicalize(path) {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => path.to_owned(),
+            Err(err) => return Err(output_write_error(path, &err)),
+        };
+        let metadata = match std::fs::metadata(&target) {
+            Ok(metadata) => Some(metadata),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(output_write_error(path, &err)),
+        };
+        let unresolved_symlink = metadata.is_none()
+            && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        let temp = if unresolved_symlink || metadata.as_ref().is_some_and(|m| !m.is_file()) {
+            None
+        } else {
+            Some(format!(
+                "{target}.tmp-{}-{}",
+                std::process::id(),
+                transport::new_request_id()
+            ))
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true);
+        let file = match temp.as_deref() {
+            Some(temp) => options.create_new(true).open(temp),
+            None => options.create(true).truncate(false).open(path),
+        }
+        .map_err(|err| output_write_error(path, &err))?;
+        if let (Some(temp), Some(meta)) = (&temp, metadata) {
+            if let Err(err) = file.set_permissions(meta.permissions()) {
+                drop(file);
+                let _ = std::fs::remove_file(temp);
+                return Err(output_write_error(path, &err));
+            }
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            target,
+            temp,
+            file: Some(file),
+            chunks: 0,
+        })
+    }
+
+    fn write(
+        &mut self,
+        envelope: &mut serde_json::Value,
+        globals: &GlobalArgs,
+    ) -> Result<(), CliError> {
+        use std::io::{Seek, Write};
+        let bytes = serialize_response_output(envelope, globals, false)?;
+        let result = match self.file.as_mut() {
+            Some(file) => (|| {
+                let offset = if file.metadata()?.is_file() {
+                    Some(file.stream_position()?)
+                } else {
+                    None
+                };
+                let mut result = file.write_all(&bytes);
+                if result.is_err() {
+                    if let Some(offset) = offset {
+                        if let Err(err) = file.set_len(offset) {
+                            result = Err(std::io::Error::new(err.kind(), format!("chunk write failed and its partial tail could not be removed: {err}")));
+                        }
+                    }
+                }
+                result
+            })(),
+            None => Err(std::io::Error::other(
+                "output destination failed on an earlier chunk",
+            )),
+        };
+        if let Err(err) = result {
+            let err = output_write_error(&self.path, &err);
+            push_output_write_warning(envelope, &self.path, &err);
+            emit_response_value(envelope, globals, false);
+            self.file.take();
+            return Err(err);
+        }
+        self.chunks += 1;
+        Ok(())
+    }
+
+    fn finish(mut self, globals: &GlobalArgs) -> Result<(), CliError> {
+        let staged = settle_output_temp(
+            self.file.take(),
+            self.temp.as_deref(),
+            &self.target,
+            self.chunks,
+        );
+        if let Some(staged) = staged {
+            return Err(with_staged_output(
+                paginated_output_error(
+                    output_write_error(
+                        &self.path,
+                        &std::io::Error::other("could not install staged chunks"),
+                    ),
+                    &self.path,
+                    self.chunks,
+                    None,
+                ),
+                Some(staged),
+            ));
+        }
+        if self.chunks > 0 {
+            let confirmation =
+                output_file_confirmation("contents", &self.path, written_output_bytes(&self.path));
+            emit_response_value(&confirmation, globals, false);
+        }
+        Ok(())
+    }
+}
+
+fn chunk_worker_panic() -> CliError {
+    CliError::Usage(Diag::new(
+        "internal_error",
+        "a contents chunk worker panicked; rerun with --jobs 1",
+    ))
+}
+
+/// The network half of one chunk: everything `execute_typed_live` does up to and including the
+/// upstream call, and nothing that writes to stdout.
+fn fetch_chunk<T: Transport>(
     transport: &T,
     spec: &request::RequestSpec,
     globals: &GlobalArgs,
     credential: &auth::ResolvedCredential,
-    execution: TypedExecution<'_>,
-    extras: LiveExtras<'_>,
-) -> Result<i32, CliError> {
+    request_id: &str,
+) -> Result<transport::RawExecuteResult, CliError> {
+    let body = typed_wire_body(spec);
+    execute_raw_with_request_id(
+        transport,
+        RawExecuteParams {
+            method: spec.op.method.as_str(),
+            path: spec.op.api_path,
+            query_raw: &[],
+            body,
+            globals,
+            auth: RawAuth::Api(credential),
+            request_id: request_id.to_string(),
+            no_auto_retry: never_auto_retry(spec.op),
+        },
+    )
+}
+
+/// Everything about a typed live call that is decided before the request is sent.
+///
+/// Computed identically by the send path and the render path so a prefetched chunk formats the
+/// same way an inline one does; all of it is pure, so recomputing it is cheaper than threading
+/// it across a thread boundary.
+struct TypedPreamble {
+    body: serde_json::Value,
+    stream_requested: bool,
+    query_raw: Vec<String>,
+    command: String,
+    warnings: Vec<serde_json::Value>,
+}
+
+fn typed_preamble(
+    spec: &request::RequestSpec,
+    execution: &TypedExecution<'_>,
+    extras: &LiveExtras<'_>,
+) -> TypedPreamble {
     let body = typed_wire_body(spec);
     let stream_requested = body_wants_stream(&body) || execution.route.sse_accept;
     let query_raw: Vec<String> = execution
@@ -7187,6 +7563,30 @@ fn execute_typed_live<T: Transport>(
     let mut warnings = typed_command_warnings(spec.op);
     warnings.extend_from_slice(extras.extra_warnings);
     warnings.extend(request_body_warnings(spec.op, &body));
+    TypedPreamble {
+        body,
+        stream_requested,
+        query_raw,
+        command,
+        warnings,
+    }
+}
+
+fn execute_typed_live<T: Transport>(
+    transport: &T,
+    spec: &request::RequestSpec,
+    globals: &GlobalArgs,
+    credential: &auth::ResolvedCredential,
+    execution: TypedExecution<'_>,
+    extras: LiveExtras<'_>,
+) -> Result<i32, CliError> {
+    let TypedPreamble {
+        body,
+        stream_requested,
+        query_raw,
+        command,
+        warnings,
+    } = typed_preamble(spec, &execution, &extras);
     // A one-time secret must ride a plain JSON response so the capture hook below reads it
     // before redaction. Streaming/raw both early-return past that hook and would silently drop
     // the reserved secret (the reservation's Drop deletes the file), so reject the combination
@@ -7259,6 +7659,40 @@ fn execute_typed_live<T: Transport>(
             ));
         }
     };
+
+    render_typed_live(result, spec, globals, execution, extras)
+}
+
+/// Format and emit an already-fetched typed response.
+///
+/// Split out of [`execute_typed_live`] so `contents --jobs N` can fetch independent chunks
+/// concurrently and still render every one of them from a single thread, in input order.
+fn render_typed_live(
+    result: transport::RawExecuteResult,
+    spec: &request::RequestSpec,
+    globals: &GlobalArgs,
+    execution: TypedExecution<'_>,
+    extras: LiveExtras<'_>,
+) -> Result<i32, CliError> {
+    render_typed_live_with(result, spec, globals, execution, extras, |envelope| {
+        emit_completed_response(envelope, globals, execution.pretty)
+    })
+}
+
+fn render_typed_live_with(
+    result: transport::RawExecuteResult,
+    spec: &request::RequestSpec,
+    globals: &GlobalArgs,
+    execution: TypedExecution<'_>,
+    extras: LiveExtras<'_>,
+    mut emit: impl FnMut(&mut serde_json::Value) -> Result<(), CliError>,
+) -> Result<i32, CliError> {
+    let TypedPreamble {
+        body,
+        command,
+        mut warnings,
+        ..
+    } = typed_preamble(spec, &execution, &extras);
 
     if globals.raw {
         emit_raw_result(
@@ -7371,7 +7805,7 @@ fn execute_typed_live<T: Transport>(
         extras.next_action_webset_id,
         globals,
     )?;
-    emit_completed_response(&mut envelope, globals, execution.pretty)?;
+    emit(&mut envelope)?;
     Ok(exit_code)
 }
 
@@ -7411,7 +7845,7 @@ fn execute_streaming_live<T: Transport>(
             StreamItem::Frame(frame) if ndjson => {
                 write_stream_event_ndjson(
                     &mut out,
-                    &frame,
+                    frame,
                     command,
                     operation,
                     &mut seq,
@@ -7419,17 +7853,31 @@ fn execute_streaming_live<T: Transport>(
                 )?;
             }
             StreamItem::Frame(frame) if human => {
-                write_stream_event_human(&mut out, &frame)?;
+                write_stream_event_human(&mut out, frame)?;
             }
             _ => {}
         }
         Ok(())
     };
-    let (result, frames) = execute_raw_stream_with_request_id(transport, params, &mut on_item)?;
+    // Under `--raw` the bytes are already on their way to stdout/`--output`; there is no
+    // terminal envelope to build, so the transport keeps no payload history at all.
+    let retention = if globals.raw {
+        transport::StreamRetention::None
+    } else {
+        transport::StreamRetention::Terminal
+    };
+    let transport::StreamExecution {
+        result,
+        frames,
+        outcome,
+    } = execute_raw_stream_retaining(transport, params, retention, &mut on_item)?;
+    // Tracked by the transport whatever the retention policy is, so a `--raw` write failure
+    // still names the event to resume from even though no frames were kept.
+    let stream_last_event_id = outcome.last_event_id;
     if globals.raw {
         use std::io::Write;
         out.flush()
-            .map_err(|err| stream_write_error(err, last_frame_event_id(&frames)))?;
+            .map_err(|err| stream_write_error(err, stream_last_event_id.as_deref()))?;
         if let Some(path) = output_path {
             drop(out);
             emit_stdout(
@@ -7514,7 +7962,7 @@ fn execute_streaming_live<T: Transport>(
     attach_content_metadata(&mut terminal, answer_outcome, answer_stream.then(Vec::new));
     append_warning_next_actions(&mut terminal);
     append_stream_terminal_next_actions(&mut terminal, operation, globals);
-    let last_event_id = last_frame_event_id(&frames);
+    let last_event_id = stream_last_event_id.as_deref();
     if let Some(path) = output_path {
         write_stream_terminal(&mut out, &terminal, ndjson, human, pretty, last_event_id)?;
         drop(out);
@@ -7672,10 +8120,6 @@ fn stream_write_error(err: std::io::Error, last_event_id: Option<&str>) -> CliEr
     CliError::Interrupted(diag)
 }
 
-fn last_frame_event_id(frames: &[transport::SseFrame]) -> Option<&str> {
-    frames.iter().rev().find_map(|frame| frame.id.as_deref())
-}
-
 fn maybe_record_pending_run_on_create_failure(
     err: CliError,
     spec: &request::RequestSpec,
@@ -7689,7 +8133,11 @@ fn maybe_record_pending_run_on_create_failure(
         return err;
     }
 
-    let recovery = pending_recovery_command(spec.op, webset_id, body);
+    let recovery = if err.diag().code == "response_too_large" {
+        oversized_create_recovery_command(spec.op, webset_id)
+    } else {
+        pending_recovery_command(spec.op, webset_id, body)
+    };
     let (suggested, recovery_context_required) = match scoped_recovery_command(&recovery, globals) {
         Some(scoped) => (scoped, false),
         None => (format!("exa-agent {} --help", spec.op.command()), true),
@@ -7733,6 +8181,7 @@ fn pending_recovery_command(
     body: &serde_json::Value,
 ) -> String {
     match op.command().as_str() {
+        "websets create" => "exa-agent websets list --limit 10".to_string(),
         "agent runs create" => "exa-agent agent runs list --limit 10".to_string(),
         "batches create" => "exa-agent batches list --limit 10".to_string(),
         "websets exports create" => format!(
@@ -7746,6 +8195,24 @@ fn pending_recovery_command(
                 .unwrap_or_else(|| "<format>".to_string()),
         ),
         other => format!("exa-agent {other} --idempotency-key <stable-key>"),
+    }
+}
+
+fn oversized_create_recovery_command(
+    op: &registry::OperationDef,
+    webset_id: Option<&str>,
+) -> String {
+    let command = op.command();
+    let list = format!(
+        "{} list",
+        command.strip_suffix(" create").unwrap_or(&command)
+    );
+    if registry::lookup_by_command(&list).is_some() {
+        return format!("exa-agent {list}");
+    }
+    match webset_id {
+        Some(id) => format!("exa-agent websets get {}", shell_quote(id)),
+        None => "exa-agent websets list --limit 10".to_owned(),
     }
 }
 
@@ -8520,9 +8987,10 @@ fn run_doctor_online_probes(globals: &GlobalArgs) -> doctor::OnlineProbes {
     let base_url =
         transport::resolve_base_url_for_namespace(globals, &cfg, auth::CredentialNamespace::Api)
             .unwrap_or_else(|_| config::DEFAULT_BASE_URL.to_string());
-    let timeout =
-        transport::resolve_timeout(globals, &cfg).unwrap_or_else(|_| Duration::from_secs(30));
-    let transport = UreqTransport::new(timeout);
+    // Doctor's probes are diagnostics: an unparseable timeout must not stop the report, so this
+    // one path falls back to the built-in policy instead of erroring.
+    let settings = transport::resolve_transport_config(globals, &cfg).unwrap_or_default();
+    let transport = UreqTransport::new(settings);
     let connectivity =
         transport::probe_connectivity(&transport, &base_url).map_err(|e| e.diag().message.clone());
     let auth = credential_input(auth::CredentialNamespace::Api, globals)
@@ -8564,8 +9032,7 @@ fn dispatch_auth_test(globals: &GlobalArgs, pretty: bool) -> Result<i32, CliErro
     let cfg = config::Config::load()?;
     let base_url =
         transport::resolve_base_url_for_namespace(globals, &cfg, auth::CredentialNamespace::Api)?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
+    let transport = UreqTransport::new(transport::resolve_transport_config(globals, &cfg)?);
     match transport::probe_auth(&transport, &base_url, &credential.secret)? {
         transport::AuthProbe::Accepted { status } => {
             emit_document(
@@ -8821,6 +9288,11 @@ fn dispatch_robot_docs(
                     "`--include-domain` accepts hostnames, hostname paths, or wildcard subdomains, not bare TLDs such as `gov`; for broad government discovery put `site:.gov` in the query and inspect the returned domains.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
                     "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
+                    "--max-response-bytes N (config max_response_bytes) caps decoded success bodies and entire SSE streams/JSON fallbacks, including gzip; default 64 MiB. Exceeding it returns nonretryable response_too_large/exit 5; use create recovery instead of repeating an unknown-outcome operation.",
+                    "--raw preserves HTTP content-decoded body bytes, including gzip decoding; it is not a compressed wire capture. Signed-payment echo redaction still applies.",
+                    "--connect-timeout DURATION (config connect_timeout) limits connection setup independently of --timeout; unset adds no separate connect cap.",
+                    "contents --chunk-size N --jobs J uses 1-16 workers (default 1); explicit --jobs requires --chunk-size. It rejects multi-chunk stream bodies before sending, preserves input order, drains admitted results on failure, and stops new rounds. --output retains all successful chunk renderings with one confirmation; JSON is a sequence of envelopes, NDJSON keeps records and summaries.",
+                    "Empty/relative XDG config/state roots fall back to HOME; explicit EXA_AGENT_* paths may be relative. doctor permissions.state reports accessible files and writable managed directories without automatic chmod or following child directory symlinks. Fix/undo refuse lock failure; fix dry-run creates nothing. Explicit trace paths use sibling lock files and new-file 0600.",
                     "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
                     "For --all lists, --ndjson streams page envelopes; add -o FILE to save all pages with a small stdout confirmation. On later failure, error.details reports outputPath, outputPages, and resumeCursor when available. Other list-shaped NDJSON emits result items plus a summary; non-list commands fall back to compact JSON.",
                     "Use nextActions to inspect created resources and continue paginated lists. Pagination continuations preserve filters, cursors, and explicit profile/beta settings without copying credentials or overwriting your output file.",
@@ -9830,9 +10302,7 @@ fn dispatch_config(sub: &ConfigCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             Ok(0)
         }
         ConfigCmd::Set { path, value } => {
-            let mut cfg = config::Config::load()?;
-            cfg.set_path(path, value)?;
-            cfg.save()?;
+            config::Config::update(|cfg| cfg.set_path(path, value))?;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_set.v1",
@@ -9847,9 +10317,7 @@ fn dispatch_config(sub: &ConfigCmd, globals: &GlobalArgs, pretty: bool) -> Resul
             Ok(0)
         }
         ConfigCmd::Unset { path } => {
-            let mut cfg = config::Config::load()?;
-            cfg.unset_path(path)?;
-            cfg.save()?;
+            config::Config::update(|cfg| cfg.unset_path(path))?;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_unset.v1",
@@ -9966,9 +10434,7 @@ fn dispatch_config_profiles(
             Ok(0)
         }
         ConfigProfilesCmd::Use { name } => {
-            let mut cfg = config::Config::load()?;
-            cfg.use_profile(name)?;
-            cfg.save()?;
+            config::Config::update(|cfg| cfg.use_profile(name))?;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_use.v1",
@@ -9982,9 +10448,7 @@ fn dispatch_config_profiles(
             Ok(0)
         }
         ConfigProfilesCmd::Create { name } => {
-            let mut cfg = config::Config::load()?;
-            cfg.create_profile(name)?;
-            cfg.save()?;
+            config::Config::update(|cfg| cfg.create_profile(name))?;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_create.v1",
@@ -9998,9 +10462,7 @@ fn dispatch_config_profiles(
             Ok(0)
         }
         ConfigProfilesCmd::Delete { name } => {
-            let mut cfg = config::Config::load()?;
-            cfg.delete_profile(name)?;
-            cfg.save()?;
+            config::Config::update(|cfg| cfg.delete_profile(name))?;
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.config_profile_delete.v1",
@@ -10305,8 +10767,7 @@ fn dispatch_raw_inner(
         None
     };
     let cfg = config::Config::load()?;
-    let timeout = transport::resolve_timeout(globals, &cfg)?;
-    let transport = UreqTransport::new(timeout);
+    let transport = UreqTransport::new(transport::resolve_transport_config(globals, &cfg)?);
     let raw_auth = raw_auth(credential.as_ref(), payment_secret.as_ref(), globals);
     let no_auto_retry = transport::raw_path_creates_batch(method, &args.path);
     if body_wants_stream(&body) {
@@ -10710,9 +11171,24 @@ fn serialize_response_output(
             .unwrap_or(serde_json::to_vec_pretty(envelope).map_err(output_serialization_error)?),
         OutputMode::Ndjson => {
             let mut output = Vec::new();
-            for value in response_ndjson_values(envelope) {
-                serde_json::to_writer(&mut output, &value).map_err(output_serialization_error)?;
-                output.push(b'\n');
+            match primary_items_ref(envelope.get("data").unwrap_or(&serde_json::Value::Null))
+                .filter(|items| !items.is_empty())
+            {
+                Some(items) => {
+                    for item in items {
+                        serde_json::to_writer(&mut output, item)
+                            .map_err(output_serialization_error)?;
+                        output.push(b'\n');
+                    }
+                    serde_json::to_writer(&mut output, &summary_envelope(envelope))
+                        .map_err(output_serialization_error)?;
+                    output.push(b'\n');
+                }
+                None => {
+                    serde_json::to_writer(&mut output, envelope)
+                        .map_err(output_serialization_error)?;
+                    output.push(b'\n');
+                }
             }
             output
         }
@@ -10792,23 +11268,42 @@ fn response_output_mode(globals: &GlobalArgs) -> OutputMode {
     }
 }
 
+/// One NDJSON line per primary item, then a `summary: true` line carrying the envelope.
+///
+/// Emitted straight from the borrowed envelope. The previous version cloned every result into a
+/// `Vec` *and* cloned the whole data-bearing envelope for the summary line, so a large paginated
+/// page existed three times at once (the envelope, the item clones, the summary clone) purely to
+/// print it. The bytes on stdout are unchanged.
 fn emit_response_ndjson(envelope: &serde_json::Value) {
-    for value in response_ndjson_values(envelope) {
-        emit_ndjson(&value);
+    let items = primary_items_ref(envelope.get("data").unwrap_or(&serde_json::Value::Null));
+    let Some(items) = items.filter(|items| !items.is_empty()) else {
+        emit_ndjson(envelope);
+        return;
+    };
+    for item in items {
+        emit_ndjson(item);
     }
+    emit_ndjson(&summary_envelope(envelope));
 }
 
-fn response_ndjson_values(envelope: &serde_json::Value) -> Vec<serde_json::Value> {
-    let items = primary_items(envelope.get("data").unwrap_or(&serde_json::Value::Null));
-    if items.is_empty() {
-        return vec![envelope.clone()];
+/// The trailing `summary` line: every envelope field except the payload, which is elided.
+fn summary_envelope(envelope: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = envelope.as_object() else {
+        let mut summary = envelope.clone();
+        summary["summary"] = serde_json::Value::Bool(true);
+        summary["data"] = serde_json::Value::Null;
+        return summary;
+    };
+    let mut summary = serde_json::Map::with_capacity(object.len() + 1);
+    for (key, value) in object {
+        if key == "data" {
+            summary.insert(key.clone(), serde_json::Value::Null);
+        } else {
+            summary.insert(key.clone(), value.clone());
+        }
     }
-    let mut values = items;
-    let mut summary = envelope.clone();
-    summary["summary"] = serde_json::Value::Bool(true);
-    summary["data"] = serde_json::Value::Null;
-    values.push(summary);
-    values
+    summary.insert("summary".to_string(), serde_json::Value::Bool(true));
+    serde_json::Value::Object(summary)
 }
 
 fn render_human_response(envelope: &serde_json::Value) -> Option<String> {
@@ -12063,6 +12558,7 @@ mod tests {
                 summary_query: Some("summarize".into()),
                 highlights: None,
                 chunk_size: Some(10),
+                jobs: None,
             }
             .into_flag_values(),
             vec![
@@ -12198,6 +12694,7 @@ mod tests {
                     summary_query: None,
                     highlights: None,
                     chunk_size: None,
+                    jobs: None,
                 }
                 .into_flag_values()
             ),

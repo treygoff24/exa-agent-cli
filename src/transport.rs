@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +16,15 @@ use crate::error::{CliError, Diag};
 use crate::redaction;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many bytes of one upstream response the CLI is willing to buffer.
+///
+/// ureq's own default is 10 MiB and it reports the overflow as an I/O error, which this CLI
+/// used to map to a retryable `network_error`: an 11 MB `contents --text` came back as exit 4
+/// "connection failure", empty stdout, `retryable: true` — so an agent would keep re-paying for
+/// the same call. The policy is now explicit, generous enough that no legitimate Exa payload
+/// hits it, and reported as the local limit it is.
+pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Refuse every live network path when the caller explicitly requested a local-only run.
 pub fn ensure_network_allowed() -> Result<(), CliError> {
@@ -111,12 +119,11 @@ pub trait Transport {
         let mut last_event_id = None;
         on_item(StreamItem::Bytes(&response.body))
             .map_err(|err| stream_callback_error(err, last_event_id.as_deref()))?;
-        for frame in frames {
-            let frame_id = frame.id.clone();
+        for frame in &frames {
             on_item(StreamItem::Frame(frame))
                 .map_err(|err| stream_callback_error(err, last_event_id.as_deref()))?;
-            if frame_id.is_some() {
-                last_event_id = frame_id;
+            if frame.id.is_some() {
+                last_event_id = frame.id.clone();
             }
         }
         Ok((StreamOutcome { last_event_id }, retries))
@@ -128,9 +135,45 @@ pub struct StreamOutcome {
     pub last_event_id: Option<String>,
 }
 
+/// One item handed to a streaming callback.
+///
+/// `Frame` borrows: every consumer only reads the frame, and owning it forced the transport to
+/// clone each decoded frame even when the caller intended to keep it.
 pub enum StreamItem<'a> {
     Bytes(&'a [u8]),
-    Frame(SseFrame),
+    Frame(&'a SseFrame),
+}
+
+/// Resolved network policy for one command: the total request budget, an optional connect
+/// sub-budget, and the receive ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportConfig {
+    /// Total wall-clock budget for a request, `--timeout`.
+    pub timeout: Duration,
+    /// Budget for establishing the connection only, `--connect-timeout`. `None` leaves ureq's
+    /// default in place. This is a *sub*-budget: it never replaces or extends `timeout`.
+    pub connect_timeout: Option<Duration>,
+    /// Ceiling on buffered response bytes, `--max-response-bytes`. Always positive.
+    pub max_response_bytes: u64,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_TIMEOUT,
+            connect_timeout: None,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
+}
+
+impl TransportConfig {
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            ..Self::default()
+        }
+    }
 }
 
 /// Live transport backed by ureq + rustls (D14).
@@ -138,33 +181,37 @@ pub struct UreqTransport {
     agent: ureq::Agent,
     no_redirect_agent: ureq::Agent,
     sse_agent: ureq::Agent,
+    max_response_bytes: u64,
 }
 
 impl UreqTransport {
-    pub fn new(timeout: Duration) -> Self {
-        let config = ureq::config::Config::builder()
-            .timeout_global(Some(timeout))
-            .http_status_as_error(false)
-            .build();
-        let no_redirect_config = ureq::config::Config::builder()
-            .timeout_global(Some(timeout))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .build();
-        let sse_config = ureq::config::Config::builder()
-            .timeout_global(Some(timeout))
+    pub fn new(settings: TransportConfig) -> Self {
+        // `timeout_global` stays the whole-request budget; `timeout_connect` only bounds the
+        // connect phase inside it. Setting connect must never hand a slow response extra time.
+        let base = || {
+            let mut builder = ureq::config::Config::builder()
+                .timeout_global(Some(settings.timeout))
+                .http_status_as_error(false);
+            if let Some(connect) = settings.connect_timeout {
+                builder = builder.timeout_connect(Some(connect));
+            }
+            builder
+        };
+        let config = base().build();
+        let no_redirect_config = base().max_redirects(0).build();
+        let sse_config = base()
             .timeout_recv_body(Some(crate::stream::SSE_READ_TIMEOUT))
-            .http_status_as_error(false)
             .build();
         Self {
             agent: config.into(),
             no_redirect_agent: no_redirect_config.into(),
             sse_agent: sse_config.into(),
+            max_response_bytes: settings.max_response_bytes,
         }
     }
 
     pub fn with_defaults() -> Self {
-        Self::new(DEFAULT_TIMEOUT)
+        Self::new(TransportConfig::default())
     }
 }
 
@@ -172,29 +219,13 @@ impl Transport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
         ensure_network_allowed()?;
         let response = send_ureq_request(&self.agent, req)?;
-
-        let status = response.status().as_u16();
-        let headers = response_headers(&response);
-        let body = response.into_body().read_to_vec().map_err(map_ureq_error)?;
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        self.finish_response(response)
     }
 
     fn send_no_redirects(&self, req: &HttpRequest) -> Result<HttpResponse, CliError> {
         ensure_network_allowed()?;
         let response = send_ureq_request(&self.no_redirect_agent, req)?;
-
-        let status = response.status().as_u16();
-        let headers = response_headers(&response);
-        let body = response.into_body().read_to_vec().map_err(map_ureq_error)?;
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        self.finish_response(response)
     }
 
     fn send_sse<F>(
@@ -238,6 +269,25 @@ impl Transport for UreqTransport {
 }
 
 impl UreqTransport {
+    fn finish_response(
+        &self,
+        response: ureq::http::Response<ureq::Body>,
+    ) -> Result<HttpResponse, CliError> {
+        let status = response.status().as_u16();
+        let headers = response_headers(&response);
+        let mut body = response.into_body();
+        let body = if (200..300).contains(&status) {
+            read_body_capped(body, self.max_response_bytes)?
+        } else {
+            read_error_body_truncated(&mut body)
+        };
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
     fn send_sse_once<F>(
         &self,
         req: &HttpRequest,
@@ -250,7 +300,10 @@ impl UreqTransport {
         let status = response.status().as_u16();
         let headers = response_headers(&response);
         if !(200..300).contains(&status) {
-            let body = response.body_mut().read_to_vec().map_err(map_ureq_error)?;
+            // An error body is diagnostic material, not a payload: truncate it at the receive
+            // ceiling rather than failing the read, so the caller still gets the real HTTP
+            // status classification instead of a bogus "response too large".
+            let body = read_error_body_truncated(response.body_mut());
             return Err(classify_http_status(status, &body, &headers));
         }
 
@@ -258,6 +311,7 @@ impl UreqTransport {
         let mut last_emitted_event_id: Option<String> = None;
         let mut buf = [0u8; 8192];
         let mut saw_body = false;
+        let mut remaining = self.max_response_bytes;
         let mut reader = response.body_mut().as_reader();
         loop {
             if crate::stream::interrupted() {
@@ -265,21 +319,28 @@ impl UreqTransport {
                     last_emitted_event_id.as_deref(),
                 ));
             }
-            match reader.read(&mut buf) {
+            let read_len = remaining.max(1).min(buf.len() as u64) as usize;
+            match reader.read(&mut buf[..read_len]) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if n as u64 > remaining {
+                        return Err(stream_callback_error(
+                            response_too_large_error(self.max_response_bytes),
+                            last_emitted_event_id.as_deref(),
+                        ));
+                    }
+                    remaining -= n as u64;
                     saw_body = true;
                     let chunk = &buf[..n];
                     on_item(StreamItem::Bytes(chunk)).map_err(|err| {
                         stream_callback_error(err, last_emitted_event_id.as_deref())
                     })?;
                     for frame in decoder.push(chunk) {
-                        let frame_id = frame.id.clone();
-                        on_item(StreamItem::Frame(frame)).map_err(|err| {
+                        on_item(StreamItem::Frame(&frame)).map_err(|err| {
                             stream_callback_error(err, last_emitted_event_id.as_deref())
                         })?;
-                        if frame_id.is_some() {
-                            last_emitted_event_id = frame_id;
+                        if frame.id.is_some() {
+                            last_emitted_event_id = frame.id;
                         }
                     }
                 }
@@ -297,11 +358,10 @@ impl UreqTransport {
             }
         }
         for frame in decoder.finish() {
-            let frame_id = frame.id.clone();
-            on_item(StreamItem::Frame(frame))
+            on_item(StreamItem::Frame(&frame))
                 .map_err(|err| stream_callback_error(err, last_emitted_event_id.as_deref()))?;
-            if frame_id.is_some() {
-                last_emitted_event_id = frame_id;
+            if frame.id.is_some() {
+                last_emitted_event_id = frame.id;
             }
         }
         Ok(StreamOutcome {
@@ -314,6 +374,15 @@ fn stream_callback_error(err: CliError, last_event_id: Option<&str>) -> CliError
     let Some(last_event_id) = last_event_id else {
         return err;
     };
+    if err.diag().code == "response_too_large" {
+        let mut err = err;
+        let diag = err.diag_mut();
+        diag.details = Some(stream_event_id_details_with_existing(
+            diag.details.take(),
+            last_event_id,
+        ));
+        return err;
+    }
     match err {
         CliError::Interrupted(mut diag) => {
             diag.details = Some(stream_event_id_details_with_existing(
@@ -631,13 +700,73 @@ pub fn resolve_timeout(globals: &GlobalArgs, cfg: &Config) -> Result<Duration, C
         .as_deref()
         .or(cfg.timeout.as_deref())
         .unwrap_or(crate::config::DEFAULT_TIMEOUT);
+    parse_duration_flag(raw, "timeout", "--timeout")
+}
+
+/// `--connect-timeout` / `config connect_timeout`, parsed into a real duration.
+///
+/// The flag existed and was accepted for a whole release without ever reaching the HTTP stack:
+/// `--connect-timeout 5s` and `--connect-timeout banana` behaved identically (both ignored).
+/// It is now parsed up front — including under `--dry-run`, which must reject a value the live
+/// run would reject — and threaded into every ureq agent.
+pub fn resolve_connect_timeout(
+    globals: &GlobalArgs,
+    cfg: &Config,
+) -> Result<Option<Duration>, CliError> {
+    let Some(raw) = globals
+        .connect_timeout
+        .as_deref()
+        .or(cfg.connect_timeout.as_deref())
+    else {
+        return Ok(None);
+    };
+    parse_duration_flag(raw, "connect timeout", "--connect-timeout").map(Some)
+}
+
+/// `--max-response-bytes` / `config max_response_bytes`.
+///
+/// Zero is rejected rather than read as "unbounded": an agent that disables the ceiling has no
+/// way to notice a runaway response before the process is OOM-killed, and the CLI would have no
+/// honest error to report afterwards.
+pub fn resolve_max_response_bytes(globals: &GlobalArgs, cfg: &Config) -> Result<u64, CliError> {
+    let value = globals
+        .max_response_bytes
+        .or(cfg.max_response_bytes)
+        .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
+    if value == 0 {
+        return Err(CliError::Usage(
+            Diag::new(
+                "invalid_value",
+                "--max-response-bytes must be a positive byte count; there is no unbounded mode",
+            )
+            .with_suggestion(format!(
+                "exa-agent <command> --max-response-bytes {DEFAULT_MAX_RESPONSE_BYTES}"
+            )),
+        ));
+    }
+    Ok(value)
+}
+
+/// Resolve the full network policy in one place so every live path gets the same answer.
+pub fn resolve_transport_config(
+    globals: &GlobalArgs,
+    cfg: &Config,
+) -> Result<TransportConfig, CliError> {
+    Ok(TransportConfig {
+        timeout: resolve_timeout(globals, cfg)?,
+        connect_timeout: resolve_connect_timeout(globals, cfg)?,
+        max_response_bytes: resolve_max_response_bytes(globals, cfg)?,
+    })
+}
+
+fn parse_duration_flag(raw: &str, label: &str, flag: &str) -> Result<Duration, CliError> {
     parse_duration(raw).ok_or_else(|| {
         CliError::Usage(
             Diag::new(
                 "invalid_value",
-                format!("invalid timeout `{raw}` (use e.g. `30s` or `250ms`)"),
+                format!("invalid {label} `{raw}` (use e.g. `30s` or `250ms`)"),
             )
-            .with_suggestion("exa-agent <command> --timeout 30s"),
+            .with_suggestion(format!("exa-agent <command> {flag} 30s")),
         )
     })
 }
@@ -1423,6 +1552,46 @@ fn map_ureq_error(err: ureq::Error) -> CliError {
     CliError::Network(diag)
 }
 
+/// Bound decoded bytes explicitly: ureq's wire limit does not bound gzip inflation.
+fn read_body_capped(mut body: ureq::Body, cap: u64) -> Result<Vec<u8>, CliError> {
+    let mut bytes = Vec::new();
+    body.as_reader()
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|err| map_ureq_error(err.into()))?;
+    if bytes.len() as u64 > cap {
+        return Err(response_too_large_error(cap));
+    }
+    Ok(bytes)
+}
+
+/// The diagnostic for a response that overran `--max-response-bytes`.
+pub(crate) fn response_too_large_error(limit: u64) -> CliError {
+    let mut diag = Diag::new(
+        "response_too_large",
+        format!(
+            "upstream response exceeded the {limit}-byte receive limit \
+             (--max-response-bytes); the response is incomplete and the operation outcome may be unknown"
+        ),
+    );
+    // Explicit: this is a local ceiling, not a transport failure, so no agent should re-pay for
+    // the same call hoping the network behaves next time.
+    diag.retryable = false;
+    diag.details = Some(Box::new(serde_json::json!({
+        "maxResponseBytes": limit,
+        "reason": "receive_limit_exceeded",
+    })));
+    CliError::Upstream(diag)
+}
+
+/// Diagnostic bodies have a separate fixed bound so a tiny success cap cannot
+/// erase HTTP classification. Headers (including payment challenges) stay intact.
+fn read_error_body_truncated(body: &mut ureq::Body) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = body.as_reader().take(64 * 1024).read_to_end(&mut buf);
+    buf
+}
+
 pub fn parse_response_data(body: &[u8]) -> Value {
     if body.is_empty() {
         return Value::Null;
@@ -1431,9 +1600,30 @@ pub fn parse_response_data(body: &[u8]) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()))
 }
 
+/// `io::Write` sink that hashes instead of buffering.
+struct HashWriter(Sha256);
+
+impl Write for HashWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `dataHash` over the compact serialization of `data`.
+///
+/// Serialized straight into the digest rather than into a throwaway `Vec` first: on a large
+/// `contents --text` result that Vec was a second full copy of the payload, live at the same
+/// moment as the envelope it describes. The bytes fed to SHA-256 are identical to
+/// `serde_json::to_vec`, so existing hashes are unchanged.
 pub fn data_hash(data: &Value) -> Option<String> {
-    let bytes = serde_json::to_vec(data).ok()?;
-    let digest = Sha256::digest(bytes);
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, data).ok()?;
+    let digest = writer.0.finalize();
     Some(format!("sha256:{digest:x}"))
 }
 
@@ -2105,11 +2295,51 @@ fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// What a streaming caller still needs after the last byte arrives.
+///
+/// The stream path used to keep *both* every raw byte and a clone of every decoded frame for
+/// the whole run, whatever the output mode. Under `--raw` neither is ever read again — the
+/// bytes were already written to stdout — so a long agent run held a second full copy of its
+/// own output for no reason. This makes the retention an explicit choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRetention {
+    /// Keep nothing: the callback already emitted everything the caller will use.
+    None,
+    /// Keep decoded frames so a terminal envelope can be built from them.
+    Terminal,
+}
+
+/// A finished stream: the synthesized result, whatever frames were retained, and the terminal
+/// stream state (`lastEventId`) that replay and interruption diagnostics need.
+///
+/// `outcome` is tracked by the transport regardless of retention, so `--raw` still reports the
+/// exact event to resume from even though it keeps no frames.
+pub struct StreamExecution {
+    pub result: RawExecuteResult,
+    pub frames: Vec<SseFrame>,
+    pub outcome: StreamOutcome,
+}
+
 pub fn execute_raw_stream_with_request_id<T, F>(
     transport: &T,
     params: RawExecuteParams<'_>,
     on_item: &mut F,
 ) -> Result<(RawExecuteResult, Vec<SseFrame>), CliError>
+where
+    T: Transport,
+    F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
+{
+    let execution =
+        execute_raw_stream_retaining(transport, params, StreamRetention::Terminal, on_item)?;
+    Ok((execution.result, execution.frames))
+}
+
+pub fn execute_raw_stream_retaining<T, F>(
+    transport: &T,
+    params: RawExecuteParams<'_>,
+    retention: StreamRetention,
+    on_item: &mut F,
+) -> Result<StreamExecution, CliError>
 where
     T: Transport,
     F: FnMut(StreamItem<'_>) -> Result<(), CliError>,
@@ -2126,21 +2356,34 @@ where
     ensure_network_allowed()?;
     let prepared = prepare_raw_request(&params)?;
     let start = Instant::now();
+    let retain = matches!(retention, StreamRetention::Terminal);
+    // Raw bytes are only ever read back when the response turned out not to be a stream at all
+    // (`frames.is_empty()` in the caller). Once the first frame decodes, the accumulated bytes
+    // are dead weight, so drop them and stop collecting.
     let mut body = Vec::new();
+    let mut body_is_live = retain;
     let mut frames = Vec::new();
     let mut callback = |item: StreamItem<'_>| -> Result<(), CliError> {
         match item {
             StreamItem::Bytes(bytes) => {
-                body.extend_from_slice(bytes);
+                if body_is_live {
+                    body.extend_from_slice(bytes);
+                }
                 on_item(StreamItem::Bytes(bytes))
             }
             StreamItem::Frame(frame) => {
-                frames.push(frame.clone());
+                if retain {
+                    if body_is_live {
+                        body = Vec::new();
+                        body_is_live = false;
+                    }
+                    frames.push(frame.clone());
+                }
                 on_item(StreamItem::Frame(frame))
             }
         }
     };
-    let (_outcome, retries) =
+    let (outcome, retries) =
         transport.send_sse(&prepared.req, &prepared.send_opts, &mut callback)?;
     let duration_ms = elapsed_ms(start);
 
@@ -2150,8 +2393,8 @@ where
     // majority: search/contents/answer/context/websets/monitor/admin/etc.) are covered.
     // Add streaming trace support if/when an agent needs to debug a stream specifically.
 
-    Ok((
-        RawExecuteResult {
+    Ok(StreamExecution {
+        result: RawExecuteResult {
             request_id: prepared.request_id,
             method: prepared.method,
             path: prepared.path,
@@ -2166,7 +2409,8 @@ where
             duration_ms,
         },
         frames,
-    ))
+        outcome,
+    })
 }
 
 struct PreparedRawRequest {
@@ -2470,15 +2714,11 @@ fn write_trace_record(
 }
 
 fn append_trace_line(path: &str, record: &Value) -> std::io::Result<()> {
-    let path = std::path::Path::new(path);
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut line = serde_json::to_vec(record).unwrap_or_default();
     line.push(b'\n');
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(&line)?;
-    file.flush()
+    // `--jobs > 1` and several agents sharing one trace file both append here; the shared helper
+    // holds the file's exclusive lock so one record is one line.
+    crate::fsutil::append_record_locked(std::path::Path::new(path), &line)
 }
 
 /// `--trace` must never leak a credential. Redact any header whose name matches
@@ -2580,6 +2820,61 @@ fn trace_timestamp() -> u64 {
 mod tests {
     use super::*;
     use crate::auth::{self, NoopKeyring};
+
+    #[test]
+    fn oversized_payment_diagnostics_keep_status_and_challenges() {
+        let transport = UreqTransport::new(TransportConfig {
+            max_response_bytes: 1024,
+            ..Default::default()
+        });
+        for size in [20, 4096, 128 * 1024] {
+            for challenge in [false, true] {
+                let mut response = ureq::http::Response::builder().status(402);
+                if challenge {
+                    response = response.header("payment-required", "fixture-price");
+                }
+                let response = response
+                    .body(ureq::Body::builder().data(vec![b'x'; size]))
+                    .unwrap();
+                let response = transport.finish_response(response).unwrap();
+                assert_eq!(response.body.len(), size.min(64 * 1024));
+                let err = classify_http_status_with_payment_mode(
+                    response.status,
+                    &response.body,
+                    &response.headers,
+                    true,
+                );
+                assert_eq!(
+                    err.diag().code,
+                    if challenge {
+                        "payment_required"
+                    } else {
+                        "insufficient_credits"
+                    }
+                );
+                assert_eq!(err.category(), if challenge { 2 } else { 13 });
+                assert!(!err.diag().retryable);
+            }
+        }
+    }
+
+    #[test]
+    fn connect_timeout_reaches_every_agent() {
+        for connect in [None, Some(Duration::from_millis(123))] {
+            let transport = UreqTransport::new(TransportConfig {
+                connect_timeout: connect,
+                ..TransportConfig::default()
+            });
+            for agent in [
+                &transport.agent,
+                &transport.no_redirect_agent,
+                &transport.sse_agent,
+            ] {
+                assert_eq!(agent.config().timeouts().connect, connect);
+                assert_eq!(agent.config().timeouts().global, Some(DEFAULT_TIMEOUT));
+            }
+        }
+    }
 
     #[test]
     fn build_url_joins_base_path_and_query() {
@@ -3506,6 +3801,141 @@ data: [DONE]
     fn body_wants_stream_reads_boolean_field() {
         assert!(!body_wants_stream(&serde_json::json!({})));
         assert!(body_wants_stream(&serde_json::json!({"stream": true})));
+    }
+
+    fn api_credential_for_tests() -> ResolvedCredential {
+        auth::resolve_api_credential(
+            &auth::CredentialInput {
+                explicit: Some("test-key-12345678".into()),
+                ..Default::default()
+            },
+            &NoopKeyring,
+        )
+        .unwrap()
+    }
+
+    fn stream_params<'a>(
+        globals: &'a GlobalArgs,
+        cred: &'a ResolvedCredential,
+    ) -> RawExecuteParams<'a> {
+        RawExecuteParams {
+            method: "POST",
+            path: "/answer",
+            query_raw: &[],
+            body: serde_json::json!({"query":"q","stream": true}),
+            globals,
+            auth: RawAuth::Api(cred),
+            request_id: "req_stream".to_string(),
+            no_auto_retry: false,
+        }
+    }
+
+    const TWO_EVENT_SSE: &str =
+        "id: evt-1\ndata: {\"seq\":1}\n\nid: evt-2\ndata: {\"answer\":\"done\"}\n\n";
+
+    /// `--raw` already wrote every byte through the callback, so nothing is kept afterwards.
+    #[test]
+    fn raw_stream_retention_keeps_no_payload_history() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, TWO_EVENT_SSE);
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            "test-key-12345678",
+            "raw",
+            "POST",
+            "/answer",
+        ])
+        .unwrap();
+        let cred = api_credential_for_tests();
+        let mut seen = 0usize;
+        let execution = execute_raw_stream_retaining(
+            &fake,
+            stream_params(&cli.globals, &cred),
+            StreamRetention::None,
+            &mut |item| {
+                if matches!(item, StreamItem::Frame(_)) {
+                    seen += 1;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(seen, 2, "the callback still receives every frame");
+        assert!(
+            execution.frames.is_empty(),
+            "raw retention must not keep decoded frames"
+        );
+        assert!(
+            execution.result.response.body.is_empty(),
+            "raw retention must not keep a second copy of the raw bytes"
+        );
+        // Interruption/replay diagnostics are independent of retention.
+        assert_eq!(execution.outcome.last_event_id.as_deref(), Some("evt-2"));
+    }
+
+    /// The terminal policy keeps frames, and drops the raw byte copy once frames exist.
+    #[test]
+    fn terminal_stream_retention_keeps_frames_but_not_duplicate_bytes() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, TWO_EVENT_SSE);
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            "test-key-12345678",
+            "raw",
+            "POST",
+            "/answer",
+        ])
+        .unwrap();
+        let cred = api_credential_for_tests();
+        let execution = execute_raw_stream_retaining(
+            &fake,
+            stream_params(&cli.globals, &cred),
+            StreamRetention::Terminal,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(execution.frames.len(), 2);
+        assert!(
+            execution.result.response.body.is_empty(),
+            "once frames decode, the accumulated bytes are dead weight"
+        );
+        assert_eq!(execution.outcome.last_event_id.as_deref(), Some("evt-2"));
+    }
+
+    /// A stream that turns out to carry a plain JSON body keeps the bytes, because the terminal
+    /// envelope is built from them when no frame ever decodes.
+    #[test]
+    fn terminal_retention_keeps_bytes_when_no_frame_decodes() {
+        let fake = FakeTransport::default();
+        fake.push_ok_json(200, "{\"answer\":\"not a stream\"}");
+        let cli = crate::cli::Cli::try_parse_from([
+            "exa-agent",
+            "--api-key",
+            "test-key-12345678",
+            "raw",
+            "POST",
+            "/answer",
+        ])
+        .unwrap();
+        let cred = api_credential_for_tests();
+        let execution = execute_raw_stream_retaining(
+            &fake,
+            stream_params(&cli.globals, &cred),
+            StreamRetention::Terminal,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(execution.frames.is_empty());
+        assert_eq!(
+            execution.result.response.body,
+            b"{\"answer\":\"not a stream\"}".to_vec(),
+            "a non-SSE body must survive for the terminal envelope"
+        );
     }
 
     #[test]

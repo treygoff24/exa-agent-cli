@@ -4,7 +4,7 @@ An agent-first command-line interface over the full [Exa](https://exa.ai) API.
 
 Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
-`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single static Rust binary. It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
+`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single self-contained Rust binary (the Linux musl artifacts are fully static). It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
 The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
@@ -24,6 +24,38 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/treygoff24/exa-agent-cl
 ```
 
 All three install the `exa-agent` binary. Verify with `exa-agent --version`.
+
+### Platforms and release artifacts
+
+The 0.7.0 release configuration targets six prebuilt archives. These additions
+remain Unreleased. Windows is a deliberate non-goal.
+
+| Platform | Target triple | Linkage |
+| --- | --- | --- |
+| macOS, Apple silicon | `aarch64-apple-darwin` | dynamic |
+| macOS, Intel | `x86_64-apple-darwin` | dynamic |
+| Linux arm64, glibc | `aarch64-unknown-linux-gnu` | dynamic |
+| Linux arm64, static | `aarch64-unknown-linux-musl` | static |
+| Linux x86_64, glibc | `x86_64-unknown-linux-gnu` | dynamic |
+| Linux x86_64, static | `x86_64-unknown-linux-musl` | static |
+
+The shell installer chooses for you. On Linux it prefers the glibc archive and falls back to the
+musl archive when the host's glibc is older than the release's recorded minimum or missing entirely, so Alpine, distroless,
+and scratch images get a binary that actually runs. Nothing changes for an existing glibc user:
+the same `-gnu` archive is still what they receive.
+
+The musl archives are fully static. CI fails the build unless the binary carries no `PT_INTERP`
+segment and no `NEEDED` shared-library entries, and unless it runs on an Alpine image with no
+glibc present. Both Linux flavors are built for the architecture baseline, never `-C
+target-cpu=native`; CI's static lane fails if the repository's cargo config or the build
+environment narrows the CPU baseline.
+
+If you pin an exact archive instead of using the installer, take `-musl` inside containers and
+`-gnu` on an ordinary distribution.
+
+Credentials work identically on every artifact, and none of them uses an OS keyring — see
+[Authentication](#authentication).
+
 
 ## Build and run
 
@@ -49,6 +81,29 @@ cargo +1.85 clippy --all-features --all-targets
 
 After installing Rust 1.85, CI confirms the stricter
 `cargo clippy --locked --all-features --all-targets -- -D warnings` variant.
+
+### Local build knobs
+
+The dev profile keeps line tables only (`debug = "line-tables-only"`) and drops debug info for
+dependencies. Backtraces through this crate's own frames still carry file and line; dependency
+frames keep symbol names but lose line numbers. For a full debugging session, delete the
+`[profile.dev]` and `[profile.dev.package."*"]` blocks in `Cargo.toml` rather than working around
+them. Release and `dist` builds are unaffected. In the coordinator's Linux
+comparison, the debug binary shrank from 82,861,952 to 33,311,480 bytes. Single cold
+builds took 11.63s and 11.80s respectively: this supports a size reduction, not a
+build-speed claim. Project line tables were checked with `readelf`.
+
+Other things that help, roughly in order of payoff:
+
+- `cargo check` while editing; `cargo build` only when you need to run it.
+- A single test filter (`cargo test <name>`) instead of the whole suite.
+- A faster linker such as `mold` or `lld`, configured in your own `~/.cargo/config.toml`. The
+  repository's `.cargo/config.toml` is deliberately limited to the `xtask` alias so that CI and
+  new contributors get the stock toolchain with no surprises.
+
+Do not add `-C target-cpu=native` to anything you intend to ship or hand to someone else. Release
+artifacts have to run on any CPU of their architecture, and CI rejects a narrowed baseline.
+
 
 ## Usage
 
@@ -209,13 +264,59 @@ The contract is what makes this usable from code. Highlights:
 
 - **One JSON envelope per call.** Success is `exa.cli.response.v1`; errors are `exa.cli.error.v1` carrying a stable `error.code` and a category.
 - **stdout is data, stderr is diagnostics.** Errors and trace output go to stderr; the parseable result goes to stdout.
-- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to pass upstream JSON through untouched except signed payment responses replace exact submitted payment credential echoes with `<redacted>`.
+- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to emit decoded upstream body bytes except signed payment responses replace exact submitted payment credential echoes with `<redacted>`.
 - **Contents coverage is explicit.** Live `contents` and `fetch` result envelopes carry `outcome: "full"`, `"partial"`, or `"no_content"`, independent of the exit code.
 - **Exit codes are stable and meaningful** — `0` ok, `1` usage (bad invocation or local body validation failure), `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
 - **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it, but invalid bodies still exit `1` before any request is printed.
 - **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).
 - **No surprise double-billing.** `--idempotency-key` is forwarded upstream, and the CLI never auto-retries a non-idempotent create-POST.
 - **Billing vs payment is explicit.** `insufficient_credits` remains exit `13`; only a challenge-evidenced raw payment 402 is `payment_required` / exit `2`.
+
+## Transport, bulk output, and local state
+
+Raw output preserves HTTP content-decoded body bytes, including gzip decoding;
+it is not a wire-level compressed-byte capture. Signed-payment echo redaction
+still applies.
+
+`--max-response-bytes N` limits decoded response bytes, including gzip inflation
+and the entire successful SSE stream or JSON fallback. The default is 64 MiB
+(67,108,864 bytes); config key `max_response_bytes` supplies the same setting.
+Zero and malformed values fail before sending (exit 1). Exceeding the cap returns
+`response_too_large`, nonretryable exit 5. The response is incomplete; a create's
+outcome may be unknown, so use its recovery suggestion rather than repeat it.
+HTTP errors use a separate bounded diagnostic read, preserving status and payment
+challenge classification. This receive cap is separate from `--max-output-bytes`,
+which controls inline output and spilling.
+
+`--connect-timeout DURATION` (config key `connect_timeout`) limits connection
+setup for normal, nonredirecting, and streaming requests. It does not replace
+`--timeout`, the whole-request budget. Without it there is no additional connect
+limit. Flag values override config values.
+
+`contents URL... --chunk-size N --jobs J` fetches independent chunks with 1-16
+workers, default 1. Explicit `--jobs` requires `--chunk-size`; ordinary contents
+without `--jobs` is unchanged. Results remain in input order. After a request, per-item, or
+output failure, no new round starts; all already-started results are drained.
+`--output FILE` keeps every successful chunk in one file and emits one final
+confirmation. JSON files contain a sequence of chunk envelopes; NDJSON files
+contain each chunk's records and summary, and human output concatenates the chunk
+renderings. Existing file modes and symlinks are preserved. Completed chunks
+survive later failures; an unwritable chunk falls back to stdout. A failed final
+rename identifies the staging path. Multi-chunk `--raw` is not supported.
+
+Relative or empty `XDG_CONFIG_HOME` and `XDG_STATE_HOME` values are ignored in
+favor of `$HOME/.config` and `$HOME/.local/state`. Explicit `EXA_AGENT_*` file
+paths may remain relative. New managed files/directories use 0600/0700. Existing
+paths are not silently chmod-ed: `doctor --check permissions.state` reports
+accessible managed files and group/world-writable state, spill, or credential
+directories, without following child-directory symlinks. A 0755 directory alone
+is not a finding. Inspection is bounded to 1,024 state entries, one level deep.
+
+Config transactions and `doctor --fix`/`--undo` share a lock; lock failure refuses
+the operation. `doctor --fix --dry-run` creates no directories, locks, or backups;
+`doctor --undo --dry-run` plans restoration without changing files or the marker.
+Explicit `--trace FILE` appends under a sibling `.<filename>.lock`; a new trace
+file is 0600, while existing trace files retain their modes.
 
 ## Authentication
 
@@ -227,6 +328,13 @@ export EXA_SERVICE_KEY=...    # required only for `admin keys …` (Team Managem
 ```
 
 Alternatively, `exa-agent auth login` reads a key from stdin and writes it to a credentials file at `~/.config/exa-agent-cli/credentials.json` (mode `0600`). That file is plaintext on disk — it is not an OS keyring — so prefer the environment variable where you can, and protect the file otherwise. `exa-agent auth status` shows which source resolved the active credential, and `exa-agent auth logout` clears the stored key.
+
+This is true on every platform and every release artifact. The crate carries a `keyring` cargo
+feature, on by default, but it is currently inert: no code is compiled conditionally on it, so
+it does not enable an OS keyring. Earlier design notes under `docs/v2/`
+describe a keyring-backed credential store and a keyring-free musl build (D11/D15); that split is
+planned, not implemented. Treat `auth login` as plaintext-file storage until this README says
+otherwise.
 
 ## Design docs
 

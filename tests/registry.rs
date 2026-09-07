@@ -69,6 +69,9 @@ fn capabilities_covers_every_operation() {
     assert_eq!(caps["errorCodes"]["not_authenticated"]["retryable"], false);
     assert_eq!(caps["errorCodes"]["partial_batch"]["category"], "partial");
     assert_eq!(caps["errorCodes"]["upstream_malformed"]["exit"], 5);
+    assert_eq!(caps["errorCodes"].as_object().unwrap().len(), 36);
+    assert_eq!(caps["errorCodes"]["response_too_large"]["exit"], 5);
+    assert_eq!(caps["errorCodes"]["response_too_large"]["retryable"], false);
     assert_eq!(caps["errorCodes"]["concurrency_limit"]["exit"], 6);
     assert_eq!(caps["errorCodes"]["idempotency_conflict"]["exit"], 8);
     assert!(caps["errorCodes"].get("partial_success").is_none());

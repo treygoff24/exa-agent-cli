@@ -40,8 +40,239 @@ fn temp_config_path(name: &str) -> PathBuf {
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(&dir).unwrap();
     dir.join("config.toml")
+}
+
+fn fixture_ctx(path: &std::path::Path) -> DoctorCtx {
+    DoctorCtx {
+        config_path: path.to_owned(),
+        config_load: Config::load_from_path(path),
+        credentials_path: path.with_file_name("credentials.json"),
+        state_dir: path.with_file_name("state"),
+        api_key: None,
+        service_key: None,
+        stdout_is_tty: false,
+        expected_spec_sha256: None,
+        online_probes: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fix_and_undo_refuse_unavailable_lock_before_mutation() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for undo in [false, true] {
+        for symlinked in [false, true] {
+            let path = temp_config_path(&format!("refuse-lock-{undo}-{symlinked}"));
+            fs::write(&path, "retry=1\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            let lock = exa_agent_cli::fsutil::lock_path_for(&path);
+            let sentinel = path.with_file_name("sentinel");
+            fs::write(&sentinel, "untouched").unwrap();
+            if symlinked {
+                symlink(&sentinel, &lock).unwrap();
+            } else {
+                fs::create_dir(&lock).unwrap();
+            }
+            let options = DoctorOptions {
+                fix: !undo,
+                undo,
+                checks: vec!["permissions.config".into()],
+                ..Default::default()
+            };
+            let report = run_doctor(&options, &fixture_ctx(&path));
+            assert_eq!(doctor_exit_code(&report), 4);
+            assert_eq!(
+                finding_status(&report, "config.lock"),
+                FindingStatus::Refused
+            );
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "retry=1\n");
+            assert_eq!(fs::read_to_string(&sentinel).unwrap(), "untouched");
+            assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 3);
+            if symlinked {
+                fs::remove_file(&lock).unwrap();
+            } else {
+                fs::remove_dir(&lock).unwrap();
+            }
+            let fixed = run_doctor(
+                &DoctorOptions {
+                    fix: true,
+                    checks: vec!["permissions.config".into()],
+                    ..Default::default()
+                },
+                &fixture_ctx(&path),
+            );
+            assert_eq!(doctor_exit_code(&fixed), 0);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let before = fs::read(&path).unwrap();
+            let planned = run_doctor(
+                &DoctorOptions {
+                    undo: true,
+                    dry_run: true,
+                    ..Default::default()
+                },
+                &fixture_ctx(&path),
+            );
+            assert_eq!(doctor_exit_code(&planned), 0);
+            assert_eq!(
+                planned.actions[0].status,
+                exa_agent_cli::doctor::FixStatus::Planned
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let restored = run_doctor(
+                &DoctorOptions {
+                    undo: true,
+                    ..Default::default()
+                },
+                &fixture_ctx(&path),
+            );
+            assert_eq!(doctor_exit_code(&restored), 0);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+    }
+}
+
+#[test]
+fn fix_dry_run_never_creates_missing_parent_or_lock() {
+    let root_path = temp_config_path("dry-missing");
+    let path = root_path.with_file_name("missing").join("config.toml");
+    let ctx = fixture_ctx(&path);
+    let options = DoctorOptions {
+        fix: true,
+        dry_run: true,
+        checks: vec!["permissions.config".into()],
+        ..Default::default()
+    };
+    run_doctor(&options, &ctx);
+    assert!(!path.parent().unwrap().exists());
+    assert_eq!(
+        fs::read_dir(root_path.parent().unwrap()).unwrap().count(),
+        0
+    );
+    fs::create_dir(path.parent().unwrap()).unwrap();
+    fs::write(&path, "retry=1\n").unwrap();
+    let before = fs::read(&path).unwrap();
+    run_doctor(&options, &fixture_ctx(&path));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(!exa_agent_cli::fsutil::lock_path_for(&path).exists());
+}
+
+#[test]
+fn doctor_waits_for_config_lock_and_refreshes_the_snapshot() {
+    let path = temp_config_path("config-lock-refresh");
+    fs::write(&path, "retry = 1\n").unwrap();
+    let ctx = fixture_ctx(&path);
+    let guard = exa_agent_cli::fsutil::lock_exclusive(&path).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let report = run_doctor(
+            &DoctorOptions {
+                fix: true,
+                checks: vec!["config.parse".into()],
+                ..Default::default()
+            },
+            &ctx,
+        );
+        done_tx.send(report).unwrap();
+    });
+    started_rx.recv().unwrap();
+    let early = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+    // Write as the existing lock owner, like a concurrent config transaction.
+    fs::write(&path, "active_profile = \"missing\"\n").unwrap();
+    drop(guard);
+    assert!(
+        early.is_err(),
+        "doctor ran while another config transaction held the lock"
+    );
+    let report = done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    worker.join().unwrap();
+    assert_eq!(finding_status(&report, "config.parse"), FindingStatus::Fail);
+    assert!(report.findings[0].message.contains("missing"));
+}
+
+#[cfg(unix)]
+#[test]
+fn permissions_state_reports_writable_directories_without_following_links() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let path = temp_config_path("state-directories");
+    let ctx = fixture_ctx(&path);
+    fs::create_dir_all(ctx.state_dir.join("spill")).unwrap();
+    let outside = path.with_file_name("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("not-managed"), "private fixture").unwrap();
+    fs::set_permissions(
+        outside.join("not-managed"),
+        fs::Permissions::from_mode(0o666),
+    )
+    .unwrap();
+    symlink(&outside, ctx.state_dir.join("linked")).unwrap();
+    let options = DoctorOptions {
+        checks: vec!["permissions.state".into()],
+        ..Default::default()
+    };
+    for mode in [0o755, 0o775] {
+        for dir in [
+            &ctx.state_dir,
+            &ctx.state_dir.join("spill"),
+            path.parent().unwrap(),
+        ] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let report = run_doctor(&options, &ctx);
+        assert_eq!(doctor_exit_code(&report), if mode == 0o755 { 0 } else { 1 });
+        let json = report.to_json().to_string();
+        assert!(!json.contains("not-managed"));
+        assert!(!json.contains("private fixture"));
+        if mode == 0o775 {
+            assert!(json.contains("0775"));
+        }
+        assert_eq!(
+            fs::metadata(&ctx.state_dir).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+    for dir in [
+        &ctx.state_dir,
+        &ctx.state_dir.join("spill"),
+        path.parent().unwrap(),
+    ] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Each directory is independently sufficient; a state warning cannot mask
+    // an omitted credential-directory check.
+    for dir in [
+        &ctx.state_dir,
+        &ctx.state_dir.join("spill"),
+        path.parent().unwrap(),
+    ] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o775)).unwrap();
+        let report = run_doctor(&options, &ctx);
+        assert_eq!(doctor_exit_code(&report), 1);
+        assert!(report.findings[0]
+            .message
+            .contains(&format!("{} (0775)", dir.display())));
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(doctor_exit_code(&run_doctor(&options, &ctx)), 0);
+    }
 }
 
 #[test]

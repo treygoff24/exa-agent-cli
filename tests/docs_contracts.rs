@@ -1,4 +1,24 @@
 #[test]
+fn release_minimum_and_raw_decoding_are_documented_without_wire_capture_claims() {
+    for doc in [
+        include_str!("../README.md"),
+        include_str!("../AGENTS.md"),
+        include_str!("../CHANGELOG.md"),
+    ] {
+        assert!(doc.contains("the release's recorded minimum"));
+        assert!(!doc.contains("older than 2.31"));
+    }
+    for doc in [
+        include_str!("../README.md"),
+        include_str!("../AGENTS.md"),
+        include_str!("../docs/v2/contracts.md"),
+    ] {
+        assert!(doc.contains("HTTP content-decoded body bytes"));
+        assert!(doc.contains("not a wire-level compressed-byte capture"));
+    }
+}
+
+#[test]
 fn commands_doc_matches_contents_mixed_outcome_exit_contract() {
     let commands = include_str!("../docs/v2/commands.md");
     assert!(commands.contains("batch with mixed outcomes exits 0"));

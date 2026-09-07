@@ -6,6 +6,8 @@ rust-version = "1.85"
 description = "Agent-first CLI over the full Exa API surface (single static binary)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/treygoff24/exa-agent-cli"
+# dist warns without this: the generated Homebrew formula has a `homepage` field to fill.
+homepage = "https://github.com/treygoff24/exa-agent-cli"
 readme = "README.md"
 keywords = ["exa", "cli", "agent", "search", "ai"]
 categories = ["command-line-utilities"]
@@ -17,6 +19,7 @@ include = [
     "/openapi/exa-openapi.json",
     "/openapi/team-management.json",
     "/openapi/overlay.toml",
+    "/openapi/provenance.toml",
     "/README.md",
     "/LICENSE-*",
 ]
@@ -31,9 +34,11 @@ path = "src/lib.rs"
 
 [features]
 default = ["keyring"]
-# keyring: OS secret store (Keychain/secret-service/Win cred mgr). Off for musl artifacts (D15).
+# Reserved feature names; neither enables an OS keyring today. Authentication
+# uses environment keys or a plaintext 0600 credentials file on every platform.
 keyring = []
-# musl-set: the feature set the Linux static binaries ship with (no keyring) (D15).
+# dist builds every target with default features. A future keyring must account
+# for target_env = "musl" rather than relying on per-target feature selection.
 musl-set = []
 
 [dependencies]
@@ -45,9 +50,17 @@ thiserror = "2"
 time = { version = "=0.3.45", features = ["parsing"] }
 toml = "0.8"
 toml_edit = "0.22"
-ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
+# gzip: flate2 with its default pure-Rust `rust_backend` (miniz_oxide) — no zlib C shim, so musl
+# static linking stays clean (D14). default-features stays false to keep the dep tree minimal.
+ureq = { version = "3", default-features = false, features = ["gzip", "json", "rustls"] }
 sha2 = "0.10"
 ctrlc = "3"
+
+# Unix-only: safe wrappers over the syscalls the state layer needs (flock-style locking, O_NOFOLLOW
+# opens, fchmod on a held fd). rust-version 1.63, well under our 1.85 MSRV, and already in the tree
+# transitively, so this adds no new third-party code to audit.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -57,6 +70,8 @@ sha2 = "0.10"
 anyhow = "1"
 
 [dev-dependencies]
+rustix = { version = "1.1.4", features = ["net"] }
+flate2 = "1"
 
 [workspace]
 members = ["xtask"]
@@ -68,3 +83,11 @@ lto = "thin"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Smaller dev/test artifacts, not a measured build-speed improvement. Project
+# frames retain file/line information; dependency frames lose line numbers.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

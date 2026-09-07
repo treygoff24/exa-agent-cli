@@ -232,7 +232,8 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 | `--beta VALUE` | Sets the Exa beta header where required. |
 | `--payment-discovery` | Raw-only unauthenticated challenge request for exact nonstreaming `POST /search` or `/contents` on the default host. No retries, redirects, API key, or idempotency key. |
 | `--x402-payment-stdin` / `--mpp-payment-stdin` | Raw-only signed payment pass-through for exact nonstreaming `POST /search` or `/contents`. Reads the complete payment header value from stdin; conflicts with API/service credentials and other stdin body/input. Raw output has no envelope/payment metadata and replaces exact submitted payment credential echoes with `<redacted>`. |
-| `--timeout DURATION` / `--connect-timeout DURATION` | e.g. `30s`. |
+| `--timeout DURATION` / `--connect-timeout DURATION` | Whole-request / connection-setup budgets, e.g. `30s`. Config keys `timeout` / `connect_timeout`; unset connect timeout adds no separate cap. |
+| `--max-response-bytes N` | Decoded success body/whole-stream cap, including gzip and JSON fallback. Default 64 MiB; config `max_response_bytes`; positive only. Exceeded cap: nonretryable `response_too_large`, exit 5; malformed/zero input: exit 1. |
 | `--retry N` | Retry count for retryable failures (default 2). Auto-retry applies only to GETs, network (exit-4), 429, 5xx — **never** un-keyed create-POSTs (D7, contracts §7). |
 | `--retry-after` | Honor `Retry-After` on 429 (default on). |
 | `--idempotency-key KEY` | Client idempotency key. Required to make a create-POST auto-retryable (D7). |
@@ -360,7 +361,8 @@ Query/domain distinction:
 exa-agent contents URL...
 exa-agent contents --input urls.txt
 exa-agent contents --ids ID...                 # alternative to URLs (mutually exclusive)
-  --chunk-size N                                # split >100 inputs into N-sized batches → NDJSON per chunk
+  --chunk-size N                                # split inputs into N-sized requests
+  --jobs J                                      # 1-16 workers, default 1; input-order output
   # all content-extraction + freshness flags from `search` apply, e.g.:
   --text[=N|full]  --text-verbosity compact|standard|full  # bare contents --text is uncapped
   --include-section S  --exclude-section S  --include-html-tags
@@ -711,3 +713,18 @@ For the coordinator — points where decisions.md, contracts.md, and lane-e do n
 4. **Update verb drift.** Three different update methods upstream: `monitor update` = PATCH, `websets update` = POST, `admin keys update` = PUT. All are documented; just flagging that the CLI's uniform `update` verb hides three HTTP methods (captured in capabilities `method`).
 
 5. **`auth login` / keyring scope.** D11 makes keyring optional and env-first. I included `auth login` (keyring store) and a separate service-key scope, but the exact keyring identifiers (`exa:api:<profile>` vs `exa:service:<team>`) are an implementation detail not locked in decisions.md — confirm naming if it needs to be golden/stable.
+
+### Bulk and local-state details
+
+Explicit `contents --jobs` requires `--chunk-size`; no implicit chunking occurs.
+Chunked contents rejects stream-requesting bodies before sending. It drains all
+requests already started before stopping on failure.
+`--output` keeps the sequence of successful chunk renderings with one final
+confirmation, preserving completed results, destination modes, and symlinks.
+See contracts §9 for write-failure fallback and staging-path recovery.
+
+`doctor --check permissions.state` is report-only: accessible managed files and
+writable managed state/spill/credential directories are findings; 0755 alone is
+not. Relative/empty XDG roots fall back to HOME, while explicit `EXA_AGENT_*`
+paths may be relative. Fix/undo refuse lock failure; fix dry-run creates nothing.
+`--trace FILE` uses a sibling `.<filename>.lock` and creates new trace files 0600.

@@ -1,13 +1,13 @@
 //! Append-only pending-run records for ambiguous create failures.
 
 use std::borrow::Cow;
-use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::fsutil;
 use crate::registry::OperationDef;
 
 pub const SCHEMA: &str = "exa.cli.pending_run.v1";
@@ -57,17 +57,13 @@ struct JsonRecord {
 
 pub fn append_pending_run(path: impl AsRef<Path>, record: &PendingRunRecord<'_>) -> io::Result<()> {
     let path = path.as_ref();
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let mut line = serde_json::to_vec(&to_json_record(record))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     line.push(b'\n');
-
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(&line)?;
-    file.flush()
+    // One JSONL record is one write held under the file's exclusive lock, and a freshly created
+    // record file is 0600: an ambiguous-create record names the exact recovery command for a
+    // possibly-billed request, so a torn or world-readable line is not acceptable.
+    fsutil::append_record_locked(path, &line)
 }
 
 pub fn pending_runs_path() -> PathBuf {
@@ -88,24 +84,15 @@ pub fn pending_runs_path() -> PathBuf {
 /// The CLI's local state directory (D19: writing here doesn't make the client a cache).
 /// Shared by pending-run records, `--trace` files, and `--max-output-bytes` spill files.
 pub fn state_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("EXA_AGENT_STATE") {
-        if !path.trim().is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    if let Ok(path) = std::env::var("XDG_STATE_HOME") {
-        if !path.trim().is_empty() {
-            return PathBuf::from(path).join("exa-agent-cli");
-        }
-    }
-    std::env::var("HOME")
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("exa-agent-cli")
-        })
-        .unwrap_or_else(|_| PathBuf::from(".local/state/exa-agent-cli"))
+    // Same ladder as config/credentials, including ignoring a relative `XDG_STATE_HOME`: a
+    // relative value would move pending-run records and spill files every time an agent changed
+    // directory, so a recovery command would point at a file the next invocation cannot find.
+    crate::config::managed_path(
+        "EXA_AGENT_STATE",
+        "XDG_STATE_HOME",
+        &[".local", "state"],
+        &[],
+    )
 }
 
 #[cfg(test)]

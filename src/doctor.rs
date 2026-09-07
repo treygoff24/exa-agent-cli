@@ -19,7 +19,7 @@ use crate::transport::AuthProbe;
 
 /// Results of the networked probes, computed by dispatch when `--online` is set and injected
 /// into [`DoctorCtx`] so the detectors stay pure. `None` on a field means "not probed".
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OnlineProbes {
     /// `Ok(status)` if the base host answered; `Err(message)` on a transport-level failure.
     pub connectivity: Result<u16, String>,
@@ -34,6 +34,7 @@ pub const DETECTOR_IDS: &[&str] = &[
     "config.format",
     "permissions.config",
     "permissions.credentials",
+    "permissions.state",
     "state.stale-cache",
     "key.present",
     "service-key.scope",
@@ -172,8 +173,47 @@ impl DoctorReport {
 }
 
 pub fn run_doctor(options: &DoctorOptions, ctx: &DoctorCtx) -> DoctorReport {
+    let _config_lock = if (options.fix || options.undo) && !options.dry_run {
+        match crate::fsutil::lock_exclusive(&ctx.config_path) {
+            Ok(guard) => Some(guard),
+            Err(err) => {
+                return DoctorReport {
+                    schema: DOCTOR_SCHEMA,
+                    ok: false,
+                    status: DoctorStatus::Refused,
+                    findings: vec![refused_finding(
+                        "config.lock",
+                        "config",
+                        format!("cannot lock config: {err}"),
+                    )],
+                    actions: Vec::new(),
+                    backup_path: None,
+                }
+            }
+        }
+    } else {
+        None
+    };
+    // A config writer may have completed while this invocation waited for the lock.
+    let refreshed;
+    let ctx = if options.fix && !options.dry_run {
+        refreshed = DoctorCtx {
+            config_path: ctx.config_path.clone(),
+            config_load: Config::load_from_path(&ctx.config_path),
+            credentials_path: ctx.credentials_path.clone(),
+            state_dir: ctx.state_dir.clone(),
+            api_key: ctx.api_key.clone(),
+            service_key: ctx.service_key.clone(),
+            stdout_is_tty: ctx.stdout_is_tty,
+            expected_spec_sha256: ctx.expected_spec_sha256.clone(),
+            online_probes: ctx.online_probes.clone(),
+        };
+        &refreshed
+    } else {
+        ctx
+    };
     if options.undo {
-        return undo_latest(ctx);
+        return undo_latest(ctx, options.dry_run);
     }
     let mut findings = Vec::new();
     for id in DETECTOR_IDS {
@@ -189,6 +229,7 @@ pub fn run_doctor(options: &DoctorOptions, ctx: &DoctorCtx) -> DoctorReport {
             "permissions.credentials" => {
                 detect_permissions("permissions.credentials", &ctx.credentials_path, true)
             }
+            "permissions.state" => detect_state_permissions(ctx),
             "state.stale-cache" => detect_stale_cache(ctx),
             "key.present" => detect_key_present(ctx),
             "service-key.scope" => detect_service_key_scope(ctx),
@@ -399,6 +440,132 @@ fn detect_permissions(id: &'static str, path: &Path, auth_file: bool) -> Finding
             message: "POSIX permission-bit checks do not apply on this platform".to_string(),
         }
     }
+}
+
+/// Report managed-state files and directories that group or others can reach.
+///
+/// Spill files hold whole response payloads and pending-run records name recovery commands for
+/// possibly-billed requests, so both are private data even though neither is a credential. This
+/// detector is report-only on purpose: the state directory can hold paths a user pointed
+/// somewhere deliberate via `EXA_AGENT_STATE`, and recursively chmod-ing an arbitrary location
+/// on the strength of a health check is a worse failure than a warning. It reports paths and
+/// modes, never contents.
+fn detect_state_permissions(ctx: &DoctorCtx) -> Finding {
+    #[cfg(not(unix))]
+    {
+        let _ = ctx;
+        return Finding {
+            id: "permissions.state",
+            status: FindingStatus::Skip,
+            category: "permissions",
+            suggested_command: None,
+            message: "POSIX permission-bit checks do not apply on this platform".to_string(),
+        };
+    }
+    #[cfg(unix)]
+    {
+        let entries = (|| {
+            let mut entries = permissive_state_entries(&ctx.state_dir)?;
+            if let Some(parent) = ctx.credentials_path.parent() {
+                if let Some(entry) = permissive_state_entry(parent)? {
+                    entries.push(entry);
+                }
+            }
+            Ok::<_, String>(entries)
+        })();
+        match entries {
+            Ok(entries) if entries.is_empty() => ok_finding(
+                "permissions.state",
+                "permissions",
+                format!(
+                    "no accessible managed files or writable managed directories under {}; credential directory checked",
+                    ctx.state_dir.display()
+                ),
+            ),
+            Ok(entries) => {
+                let shown: Vec<String> = entries.iter().take(3).cloned().collect();
+                let more = entries.len().saturating_sub(shown.len());
+                let mut message = format!(
+                    "{} managed path(s) are group/world-accessible files or writable directories (state root {}): {}",
+                    entries.len(),
+                    ctx.state_dir.display(),
+                    shown.join(", ")
+                );
+                if more > 0 {
+                    message.push_str(&format!(" (+{more} more)"));
+                }
+                Finding {
+                    id: "permissions.state",
+                    status: FindingStatus::Warn,
+                    category: "permissions",
+                    // Deliberately not a `--fix` action: see the doc comment.
+                    suggested_command: None,
+                    message,
+                }
+            }
+            Err(message) => refused_finding("permissions.state", "permissions", message),
+        }
+    }
+}
+
+/// Report accessible regular files and writable managed directories. A 0755
+/// directory alone is safe for private files; 0775 permits replacing them.
+/// Inspect at most 1,024 entries one level deep, without following symlinks.
+#[cfg(unix)]
+fn permissive_state_entries(state_dir: &Path) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+    if let Some(entry) = permissive_state_entry(state_dir)? {
+        found.push(entry);
+    }
+    let metadata = match fs::symlink_metadata(state_dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(err) => return Err(err.to_string()),
+    };
+    if !metadata.is_dir() {
+        return Ok(found);
+    }
+    let entries = fs::read_dir(state_dir)
+        .map_err(|error| format!("cannot read {}: {error}", state_dir.display()))?;
+    let mut remaining = 1024usize;
+    for entry in entries.take(1024) {
+        if remaining == 0 {
+            break;
+        }
+        remaining -= 1;
+        let entry = entry.map_err(|error| format!("cannot read state directory: {error}"))?;
+        let path = entry.path();
+        if let Some(entry) = permissive_state_entry(&path)? {
+            found.push(entry);
+        }
+        if entry.file_type().map_err(|err| err.to_string())?.is_dir() {
+            let children = fs::read_dir(&path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            for child in children.take(remaining) {
+                remaining -= 1;
+                let child =
+                    child.map_err(|error| format!("cannot read state directory: {error}"))?;
+                if let Some(entry) = permissive_state_entry(&child.path())? {
+                    found.push(entry);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+#[cfg(unix)]
+fn permissive_state_entry(path: &Path) -> Result<Option<String>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("cannot inspect {}: {err}", path.display())),
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    let unsafe_mode =
+        (metadata.is_file() && mode & 0o077 != 0) || (metadata.is_dir() && mode & 0o022 != 0);
+    Ok(unsafe_mode.then(|| format!("{} ({mode:04o})", path.display())))
 }
 
 fn detect_stale_cache(ctx: &DoctorCtx) -> Finding {
@@ -826,6 +993,10 @@ fn apply_fixes(
     actions: &mut Vec<FixAction>,
     backup_path: &mut Option<String>,
 ) {
+    // Backup, reformat, and permission repair are one read-modify-write of the config file.
+    // Hold its lock for the whole sequence so a concurrent `config set` cannot land between the
+    // backup and the rewrite (which would make `--undo` restore over someone else's change).
+
     let needs_backup = findings.iter().any(|finding| {
         matches!(finding.status, FindingStatus::Warn | FindingStatus::Fail)
             && matches!(finding.id, "config.format" | "permissions.config")
@@ -1074,7 +1245,8 @@ fn cleanup_old_backups(config_path: &Path, keep: &Path, marker: &Path) -> Result
     Ok(())
 }
 
-fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
+fn undo_latest(ctx: &DoctorCtx, dry_run: bool) -> DoctorReport {
+    // Same transaction boundary as `--fix`: restore is a read-modify-write of the config file.
     let marker = latest_backup_marker(&ctx.config_path);
     let result = (|| {
         let raw = fs::read_to_string(&marker).map_err(|error| {
@@ -1101,9 +1273,12 @@ fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
                 backup.display()
             ));
         }
-        restore_backup(&backup, &ctx.config_path, recorded_mode)?;
-        fs::remove_file(&marker)
-            .map_err(|error| format!("restored config but could not clear undo marker: {error}"))?;
+        if !dry_run {
+            restore_backup(&backup, &ctx.config_path, recorded_mode)?;
+            fs::remove_file(&marker).map_err(|error| {
+                format!("restored config but could not clear undo marker: {error}")
+            })?;
+        }
         Ok(backup)
     })();
 
@@ -1115,10 +1290,19 @@ fn undo_latest(ctx: &DoctorCtx) -> DoctorReport {
             findings: Vec::new(),
             actions: vec![FixAction {
                 id: "config.undo",
-                status: FixStatus::Restored,
+                status: if dry_run {
+                    FixStatus::Planned
+                } else {
+                    FixStatus::Restored
+                },
                 path: ctx.config_path.display().to_string(),
                 reason: Some(
-                    "restored config to pre-last-fix state (undo is config-only)".to_string(),
+                    if dry_run {
+                        "would restore config to pre-last-fix state (undo is config-only)"
+                    } else {
+                        "restored config to pre-last-fix state (undo is config-only)"
+                    }
+                    .to_string(),
                 ),
                 required_flag: None,
             }],

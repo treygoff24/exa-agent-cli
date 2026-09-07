@@ -16,7 +16,22 @@ formula = "exa-agent"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
-# Windows is a documented v1 non-goal, so no windows target
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Windows is a documented v1 non-goal, so no windows target.
+#
+# Linux ships both libc flavors deliberately. The -gnu artifacts stay because they are already
+# published and are what a normal glibc distro should get; the -musl artifacts are the static
+# fallback for Alpine/distroless/scratch containers and for hosts whose glibc is older than the
+# builder's. dist's shell installer picks between them at install time, so adding musl does not
+# change what an existing glibc user receives.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
 # Where to host releases
 hosting = "github"
+# Extra steps injected into each `dist` build job (see the file for why).
+github-build-setup = "../dist-build-setup.yml"

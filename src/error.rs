@@ -146,7 +146,7 @@ pub const EXIT_CODES: &[(u8, &str, &str)] = &[
     (
         5,
         "upstream",
-        "Exa returned a non-2xx the CLI maps to a server error",
+        "HTTP failure or an unusable upstream response",
     ),
     (6, "rate_limit", "429; budget or concurrency exhausted"),
     (7, "not_found", "resource does not exist"),
@@ -328,6 +328,10 @@ pub fn error_code_specs() -> BTreeMap<&'static str, ErrorCodeSpec> {
                 false,
                 "upstream returned an unparseable or contract-violating body",
             ),
+        ),
+        (
+            "response_too_large",
+            spec(5, "upstream", false, "decoded response exceeded the configured receive limit; outcome may be unknown"),
         ),
         (
             "probe_inconclusive",

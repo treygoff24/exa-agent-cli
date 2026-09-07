@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CliError, Diag};
+use crate::fsutil;
 use crate::redaction;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
@@ -26,6 +26,20 @@ pub struct Config {
     pub output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
+    #[serde(
+        default,
+        rename = "connect_timeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connect_timeout: Option<String>,
+    /// Ceiling on how many bytes of one upstream response the CLI will buffer (see
+    /// `transport::DEFAULT_MAX_RESPONSE_BYTES`). `None` means "use the built-in default".
+    #[serde(
+        default,
+        rename = "max_response_bytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_response_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<u32>,
     #[serde(
@@ -75,6 +89,8 @@ impl Default for Config {
             admin_base_url: default_admin_base_url(),
             output: None,
             timeout: Some(DEFAULT_TIMEOUT.to_string()),
+            connect_timeout: None,
+            max_response_bytes: None,
             retry: Some(DEFAULT_RETRY),
             active_profile: None,
             profiles: BTreeMap::new(),
@@ -90,26 +106,46 @@ fn default_admin_base_url() -> String {
     DEFAULT_ADMIN_BASE_URL.to_string()
 }
 
+/// Directory name every managed file lives under inside `$XDG_*`/`$HOME`.
+pub const APP_DIR: &str = "exa-agent-cli";
+
+/// Shared resolution for a managed file: an explicit `EXA_AGENT_*` override wins, then the XDG
+/// base directory, then `$HOME`, then a last-ditch relative path.
+///
+/// Relative `$XDG_CONFIG_HOME`/`$XDG_STATE_HOME` values are ignored (see
+/// [`fsutil::absolute_dir_env`]): the XDG spec requires absolute paths, and honoring a relative
+/// one would move a fleet's shared config/credentials whenever an agent changed directory.
+/// The explicit `EXA_AGENT_*` overrides are the caller naming a file deliberately and are
+/// still allowed to be relative.
+pub(crate) fn managed_path(
+    explicit_env: &str,
+    xdg_env: &str,
+    home_relative: &[&str],
+    tail: &[&str],
+) -> PathBuf {
+    if let Some(path) = fsutil::explicit_path_env(explicit_env) {
+        return path;
+    }
+    if let Some(base) = fsutil::absolute_dir_env(xdg_env) {
+        return tail
+            .iter()
+            .fold(base.join(APP_DIR), |acc, part| acc.join(part));
+    }
+    let base = fsutil::home_dir()
+        .map(|home| home_relative.iter().fold(home, |acc, part| acc.join(part)))
+        .unwrap_or_else(|| home_relative.iter().collect::<PathBuf>());
+    tail.iter()
+        .fold(base.join(APP_DIR), |acc, part| acc.join(part))
+}
+
 /// Resolve the config file path: `EXA_AGENT_CONFIG`, then XDG, then `~/.config/...`.
 pub fn config_path() -> PathBuf {
-    if let Ok(path) = std::env::var("EXA_AGENT_CONFIG") {
-        if !path.trim().is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.trim().is_empty() {
-            return PathBuf::from(xdg).join("exa-agent-cli").join("config.toml");
-        }
-    }
-    std::env::var("HOME")
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("exa-agent-cli")
-                .join("config.toml")
-        })
-        .unwrap_or_else(|_| PathBuf::from(".config/exa-agent-cli/config.toml"))
+    managed_path(
+        "EXA_AGENT_CONFIG",
+        "XDG_CONFIG_HOME",
+        &[".config"],
+        &["config.toml"],
+    )
 }
 
 impl Config {
@@ -130,30 +166,44 @@ impl Config {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<(), CliError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| io_config_error(path, e))?;
-        }
         let serialized = toml::to_string_pretty(self).map_err(|e| {
             CliError::Config(Diag::new(
                 "config_invalid",
                 format!("failed to serialize config: {e}"),
             ))
         })?;
-        let tmp = path.with_extension("toml.tmp");
-        {
-            let mut file = fs::File::create(&tmp).map_err(|e| io_config_error(path, e))?;
-            file.write_all(serialized.as_bytes())
-                .map_err(|e| io_config_error(path, e))?;
-            file.sync_all().map_err(|e| io_config_error(path, e))?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-                .map_err(|e| io_config_error(path, e))?;
-        }
-        fs::rename(&tmp, path).map_err(|e| io_config_error(path, e))?;
-        Ok(())
+        // Unique `O_EXCL` sibling temp, 0600 from creation, fsync + rename + parent fsync. The
+        // old fixed `config.toml.tmp` name let two concurrent writers share one temp file and
+        // interleave their bytes into whichever rename landed last.
+        fsutil::write_private_atomic(path, serialized.as_bytes())
+            .map_err(|e| io_config_error(path, e))
+    }
+
+    /// Run one config mutation as an atomic read-modify-write.
+    ///
+    /// Load, mutate, and save all happen under the config file's exclusive lock, so two agents
+    /// running `config set` at the same moment serialize instead of each writing a full file
+    /// built from a stale read (last writer wins, first writer's key silently gone). Unique
+    /// temp names fix torn files; only the lock fixes lost updates.
+    pub fn update<T>(f: impl FnOnce(&mut Self) -> Result<T, CliError>) -> Result<T, CliError> {
+        Self::update_at(&config_path(), f)
+    }
+
+    pub fn update_at<T>(
+        path: &Path,
+        f: impl FnOnce(&mut Self) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        fsutil::create_parent_dir_private(path).map_err(|e| io_config_error(path, e))?;
+        fsutil::with_lock(
+            path,
+            |e| io_config_error(path, e),
+            || {
+                let mut cfg = Self::load_from_path(path)?;
+                let value = f(&mut cfg)?;
+                cfg.save_to_path(path)?;
+                Ok(value)
+            },
+        )
     }
 
     pub fn get_path(&self, path: &str) -> Result<Option<serde_json::Value>, CliError> {
@@ -167,6 +217,8 @@ impl Config {
                 "admin_base_url" => Ok(Some(json_string(&self.admin_base_url))),
                 "output" => Ok(self.output.as_ref().map(|v| json_string(v))),
                 "timeout" => Ok(self.timeout.as_ref().map(|v| json_string(v))),
+                "connect_timeout" => Ok(self.connect_timeout.as_ref().map(|v| json_string(v))),
+                "max_response_bytes" => Ok(self.max_response_bytes.map(|n| serde_json::json!(n))),
                 "retry" => Ok(self.retry.map(|n| serde_json::json!(n))),
                 "active_profile" => Ok(self.active_profile.as_ref().map(|v| json_string(v))),
                 _ => Err(invalid_path(path)),
@@ -209,6 +261,15 @@ impl Config {
                 }
                 "output" => self.output = Some(value.to_string()),
                 "timeout" => self.timeout = Some(value.to_string()),
+                "connect_timeout" => self.connect_timeout = Some(value.to_string()),
+                "max_response_bytes" => {
+                    let n: u64 = value
+                        .parse()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| invalid_value("max_response_bytes", value))?;
+                    self.max_response_bytes = Some(n);
+                }
                 "retry" => {
                     let n: u32 = value.parse().map_err(|_| invalid_value("retry", value))?;
                     self.retry = Some(n);
@@ -240,6 +301,8 @@ impl Config {
                 "admin_base_url" => self.admin_base_url = default_admin_base_url(),
                 "output" => self.output = None,
                 "timeout" => self.timeout = None,
+                "connect_timeout" => self.connect_timeout = None,
+                "max_response_bytes" => self.max_response_bytes = None,
                 "retry" => self.retry = None,
                 "active_profile" => self.active_profile = None,
                 _ => return Err(invalid_path(path)),
@@ -268,6 +331,8 @@ impl Config {
             "adminBaseUrl": self.admin_base_url,
             "output": self.output,
             "timeout": self.timeout,
+            "connectTimeout": self.connect_timeout,
+            "maxResponseBytes": self.max_response_bytes,
             "retry": self.retry,
             "activeProfile": self.active_profile,
             "profiles": self.profiles.keys().collect::<Vec<_>>(),

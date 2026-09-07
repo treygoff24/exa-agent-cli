@@ -83,6 +83,7 @@ where
         "--beta",
         "--timeout",
         "--connect-timeout",
+        "--max-response-bytes",
         "--retry",
         "--idempotency-key",
         "--input",
@@ -409,6 +410,9 @@ pub struct GlobalArgs {
     /// Connect timeout, e.g. `10s`.
     #[arg(long, global = true)]
     pub connect_timeout: Option<String>,
+    /// Cap decoded success response/stream bytes, including gzip (default 64 MiB; no zero).
+    #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_response_bytes: Option<u64>,
     /// Max retry count for retry-safe failures.
     #[arg(long, global = true, default_value_t = 2)]
     pub retry: u32,
@@ -498,6 +502,7 @@ impl std::fmt::Debug for GlobalArgs {
             .field("beta", &self.beta)
             .field("timeout", &self.timeout)
             .field("connect_timeout", &self.connect_timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
             .field("retry", &self.retry)
             .field("retry_after", &self.retry_after)
             .field(
@@ -820,7 +825,14 @@ pub struct ContentsArgs {
     pub highlights: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub chunk_size: Option<u32>,
+    /// Fetch independent `--chunk-size` chunks with N workers (1-16, default 1 = serial).
+    #[arg(long, requires = "chunk_size", value_parser = clap::value_parser!(u32).range(1..=MAX_CONTENTS_JOBS as i64))]
+    pub jobs: Option<u32>,
 }
+
+/// Ceiling on `contents --jobs`. Small on purpose: these are billable upstream requests against
+/// one account's concurrency budget, and the win is latency on a handful of chunks, not throughput.
+pub const MAX_CONTENTS_JOBS: u32 = 16;
 
 impl ContentsArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {

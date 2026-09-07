@@ -5,10 +5,10 @@
 
 use crate::config::Config;
 use crate::error::{CliError, Diag};
+use crate::fsutil;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fmt;
-use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_PROFILE: &str = "default";
 const API_ENV: &str = "EXA_API_KEY";
@@ -289,26 +289,14 @@ impl CredentialInput {
 /// Resolve the credentials file path used by `auth login` and live smoke. This is secret data,
 /// unlike `config.toml`, so callers must enforce 0600 on write.
 pub fn credentials_path() -> PathBuf {
-    if let Ok(path) = std::env::var("EXA_AGENT_CREDENTIALS") {
-        if !path.trim().is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.trim().is_empty() {
-            return PathBuf::from(xdg)
-                .join("exa-agent-cli")
-                .join("credentials.json");
-        }
-    }
-    std::env::var("HOME")
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("exa-agent-cli")
-                .join("credentials.json")
-        })
-        .unwrap_or_else(|_| PathBuf::from(".config/exa-agent-cli/credentials.json"))
+    // Same resolution ladder as `config_path()` (explicit override, then absolute XDG, then
+    // `$HOME`), so config and credentials can never disagree about which directory they live in.
+    crate::config::managed_path(
+        "EXA_AGENT_CREDENTIALS",
+        "XDG_CONFIG_HOME",
+        &[".config"],
+        &["credentials.json"],
+    )
 }
 
 pub fn credential_file_value(ns: CredentialNamespace) -> Result<Option<String>, CliError> {
@@ -337,61 +325,97 @@ pub fn credential_file_value(ns: CredentialNamespace) -> Result<Option<String>, 
         .map(ToOwned::to_owned))
 }
 
+/// Run one credential mutation as an atomic read-modify-write under the credentials file's
+/// exclusive lock.
+///
+/// `auth login` for the API namespace and `auth login` for the service namespace share one
+/// JSON file. Without the lock, two concurrent logins each read the pre-existing object, add
+/// their own key, and write a full replacement — the second rename silently discards the first
+/// agent's freshly stored key. A unique temp name does not help: both writes are individually
+/// well-formed.
+fn update_credentials<T>(
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> T,
+) -> Result<(PathBuf, T), CliError> {
+    update_credentials_at(credentials_path(), f)
+}
+
+fn update_credentials_at<T>(
+    path: PathBuf,
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> T,
+) -> Result<(PathBuf, T), CliError> {
+    fsutil::create_parent_dir_private(&path).map_err(|e| {
+        CliError::Config(Diag::new(
+            "config_invalid",
+            format!(
+                "failed to create credentials directory for {}: {e}",
+                path.display()
+            ),
+        ))
+    })?;
+    let value = fsutil::with_lock(
+        &path,
+        |e| {
+            CliError::Config(Diag::new(
+                "config_invalid",
+                format!("failed to lock credentials file {}: {e}", path.display()),
+            ))
+        },
+        || {
+            let mut object = match read_credentials_json_at(&path)? {
+                Some(serde_json::Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            };
+            let value = f(&mut object);
+            if object.is_empty() {
+                remove_credentials_file(&path)?;
+            } else {
+                write_credentials_json(&path, &serde_json::Value::Object(object))?;
+            }
+            Ok(value)
+        },
+    )?;
+    Ok((path, value))
+}
+
 pub fn write_credential_file(
     ns: CredentialNamespace,
     secret: &Secret,
 ) -> Result<PathBuf, CliError> {
-    let path = credentials_path();
-    let mut value = read_credentials_json()?
-        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    if !value.is_object() {
-        value = serde_json::Value::Object(serde_json::Map::new());
-    }
-    let obj = value
-        .as_object_mut()
-        .expect("credential file root is object");
-    obj.insert(
-        ns.credential_file_key().to_string(),
-        serde_json::Value::String(secret.expose().to_string()),
-    );
-    write_credentials_json(&path, &value)?;
+    let (path, ()) = update_credentials(|object| {
+        object.insert(
+            ns.credential_file_key().to_string(),
+            serde_json::Value::String(secret.expose().to_string()),
+        );
+    })?;
     Ok(path)
 }
 
 pub fn clear_credential_file(ns: CredentialNamespace) -> Result<PathBuf, CliError> {
-    let path = credentials_path();
-    let Some(mut value) = read_credentials_json()? else {
-        return Ok(path);
-    };
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove(ns.credential_file_key());
-        if obj.is_empty() {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(CliError::Config(Diag::new(
-                        "config_invalid",
-                        format!(
-                            "failed to remove credentials file {}: {err}",
-                            path.display()
-                        ),
-                    )));
-                }
-            }
-            return Ok(path);
-        }
-    }
-    write_credentials_json(&path, &value)?;
+    let (path, ()) = update_credentials(|object| {
+        object.remove(ns.credential_file_key());
+    })?;
     Ok(path)
 }
 
-fn read_credentials_json() -> Result<Option<serde_json::Value>, CliError> {
-    let path = credentials_path();
+fn remove_credentials_file(path: &Path) -> Result<(), CliError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(CliError::Config(Diag::new(
+            "config_invalid",
+            format!(
+                "failed to remove credentials file {}: {err}",
+                path.display()
+            ),
+        ))),
+    }
+}
+
+fn read_credentials_json_at(path: &Path) -> Result<Option<serde_json::Value>, CliError> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
         CliError::Config(Diag::new(
             "config_invalid",
             format!("failed to read credentials file at {}: {e}", path.display()),
@@ -409,91 +433,33 @@ fn read_credentials_json() -> Result<Option<serde_json::Value>, CliError> {
     Ok(Some(value))
 }
 
-fn write_credentials_json(path: &PathBuf, value: &serde_json::Value) -> Result<(), CliError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CliError::Config(Diag::new(
-                "config_invalid",
-                format!(
-                    "failed to create credentials directory {}: {e}",
-                    parent.display()
-                ),
-            ))
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if std::env::var_os("EXA_AGENT_CREDENTIALS").is_none() {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |e| {
-                        CliError::Config(Diag::new(
-                            "config_invalid",
-                            format!(
-                                "failed to secure credentials directory {}: {e}",
-                                parent.display()
-                            ),
-                        ))
-                    },
-                )?;
-            }
-        }
-    }
-    let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(value).map_err(|e| {
+fn write_credentials_json(path: &Path, value: &serde_json::Value) -> Result<(), CliError> {
+    // Create a *new* managed directory 0700; never chmod one that already exists. The parent of
+    // an explicit `EXA_AGENT_CREDENTIALS` path, or a `~/.config` shared with every other tool on
+    // the machine, belongs to its owner — `doctor` reports a permissive one instead.
+    fsutil::create_parent_dir_private(path).map_err(|e| {
+        CliError::Config(Diag::new(
+            "config_invalid",
+            format!(
+                "failed to create credentials directory for {}: {e}",
+                path.display()
+            ),
+        ))
+    })?;
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| {
         CliError::Config(Diag::new(
             "config_invalid",
             format!("failed to serialize credentials file: {e}"),
         ))
     })?;
-    {
-        #[cfg(unix)]
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&tmp).map_err(|e| {
-            CliError::Config(Diag::new(
-                "config_invalid",
-                format!("failed to open credentials file {}: {e}", tmp.display()),
-            ))
-        })?;
-        file.write_all(&bytes).map_err(|e| {
-            CliError::Config(Diag::new(
-                "config_invalid",
-                format!("failed to write credentials file {}: {e}", tmp.display()),
-            ))
-        })?;
-        file.write_all(b"\n").map_err(|e| {
-            CliError::Config(Diag::new(
-                "config_invalid",
-                format!("failed to write credentials file {}: {e}", tmp.display()),
-            ))
-        })?;
-        file.sync_all().map_err(|e| {
-            CliError::Config(Diag::new(
-                "config_invalid",
-                format!("failed to sync credentials file {}: {e}", tmp.display()),
-            ))
-        })?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-            CliError::Config(Diag::new(
-                "config_invalid",
-                format!("failed to secure credentials file {}: {e}", tmp.display()),
-            ))
-        })?;
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
+    bytes.push(b'\n');
+    // 0600 from creation (not a post-write chmod), unique temp, fsync, atomic rename.
+    fsutil::write_private_atomic(path, &bytes).map_err(|e| {
         CliError::Config(Diag::new(
             "config_invalid",
-            format!("failed to install credentials file {}: {e}", path.display()),
+            format!("failed to write credentials file {}: {e}", path.display()),
         ))
-    })?;
-    Ok(())
+    })
 }
 
 /// Cheap shape check for API keys, used to avoid accepting an API key in service-key flows.
@@ -636,4 +602,44 @@ fn found(
 
 fn clean(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_credential_namespaces_survive_without_global_environment() {
+        let path = std::env::temp_dir().join(format!(
+            "exa-credential-race-{}-{}.json",
+            std::process::id(),
+            crate::transport::new_request_id()
+        ));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                for name in ["api_key", "service_key"] {
+                    let path = &path;
+                    scope.spawn(move || {
+                        update_credentials_at(path.clone(), |object| {
+                            object.insert(name.to_string(), serde_json::json!("fixture-only"));
+                        })
+                        .unwrap();
+                    });
+                }
+            }
+        });
+        let value = read_credentials_json_at(&path).unwrap().unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 2);
+        assert_eq!(value["api_key"], "fixture-only");
+        assert_eq!(value["service_key"], "fixture-only");
+        update_credentials_at(path.clone(), |object| {
+            object.remove("api_key");
+        })
+        .unwrap();
+        let value = read_credentials_json_at(&path).unwrap().unwrap();
+        assert!(value.get("api_key").is_none());
+        assert_eq!(value["service_key"], "fixture-only");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(crate::fsutil::lock_path_for(&path)).unwrap();
+    }
 }

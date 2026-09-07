@@ -220,11 +220,22 @@ fn temp_path(name: &str) -> PathBuf {
     dir
 }
 
-fn closed_local_base_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
+/// Hold a bound, non-listening socket until the child exits. The reserved port
+/// cannot be reassigned to another fixture, and every connect is refused.
+fn closed_local_base_url() -> (rustix::fd::OwnedFd, String) {
+    use rustix::net::{AddressFamily, Ipv4Addr, SocketAddrV4, SocketFlags, SocketType};
+    let socket = rustix::net::socket_with(
+        AddressFamily::INET,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    rustix::net::bind(&socket, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let addr = rustix::net::getsockname(&socket).unwrap();
+    let addr = SocketAddrV4::try_from(addr).unwrap();
+    let url = format!("http://{addr}");
+    (socket, url)
 }
 
 fn http_request_lengths(buf: &[u8]) -> Option<(usize, usize)> {
@@ -808,7 +819,7 @@ fn schema_refresh_check_fetches_and_compares_live_spec() {
 
 #[test]
 fn schema_refresh_check_reports_network_failure_instead_of_current() {
-    let base_url = closed_local_base_url();
+    let (_socket, base_url) = closed_local_base_url();
     let output = run(&[
         "schema",
         "refresh",
@@ -1053,7 +1064,7 @@ fn no_network_refuses_live_paths_before_credentials_or_transport() {
     let credentials = dir.join("credentials.json");
     let original = br#"{"api_key":"test-key-abcdef12"}"#;
     fs::write(&credentials, original).unwrap();
-    let base_url = closed_local_base_url();
+    let (_socket, base_url) = closed_local_base_url();
     for args in [
         vec![
             "contents",
@@ -1587,16 +1598,20 @@ fn doctor_fix_requires_explicit_flags_for_auth_and_deletion() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let dir = temp_path("doctor-fix-gates");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let config = dir.join("config.toml");
     let credentials = dir.join("credentials.json");
     let state = dir.join("state");
     let spill = state.join("spill/old.json");
-    fs::create_dir_all(spill.parent().unwrap()).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(spill.parent().unwrap()).unwrap();
     fs::write(&config, "base_url = \"https://api.exa.ai\"\n").unwrap();
     fs::write(&credentials, r#"{"api_key":"secret"}"#).unwrap();
     fs::write(&spill, "{}\n").unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).unwrap();
+    // Spill files the CLI writes are 0600; match that so this test exercises the stale-cache
+    // gate rather than also tripping the `permissions.state` finding.
+    fs::set_permissions(&spill, fs::Permissions::from_mode(0o600)).unwrap();
     let status = std::process::Command::new("touch")
         .args(["-t", "202001010000", spill.to_str().unwrap()])
         .status()
@@ -1610,7 +1625,13 @@ fn doctor_fix_requires_explicit_flags_for_auth_and_deletion() {
     ];
 
     let gated = run_with_env(&["doctor", "--fix", "--compact"], &envs);
-    assert_eq!(gated.status.code(), Some(1));
+    assert_eq!(
+        gated.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&gated.stdout),
+        String::from_utf8_lossy(&gated.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&gated.stdout).unwrap();
     assert!(report["actions"].as_array().unwrap().iter().any(|action| {
         action["id"] == "permissions.credentials"
@@ -1645,7 +1666,8 @@ fn doctor_fix_requires_explicit_flags_for_auth_and_deletion() {
     );
     assert!(
         fixed.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fixed.stdout),
         String::from_utf8_lossy(&fixed.stderr)
     );
     assert_eq!(fs::metadata(&credentials).unwrap().mode() & 0o777, 0o600);
@@ -1659,14 +1681,15 @@ fn doctor_fix_sweeps_quarantine_leftovers() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_path("doctor-fix-quarantine");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let config = dir.join("config.toml");
     let credentials = dir.join("credentials.json");
     let state = dir.join("state");
     let spill = state.join("spill");
     let quarantine = spill.join(".doctor-quarantine");
     let leftover = quarantine.join("leftover.json");
-    fs::create_dir_all(quarantine.parent().unwrap()).unwrap();
-    fs::create_dir_all(&quarantine).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(quarantine.parent().unwrap()).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(&quarantine).unwrap();
     fs::write(&leftover, "{}\n").unwrap();
     fs::write(&config, "base_url = \"https://api.exa.ai\"\n").unwrap();
     fs::write(&credentials, r#"{"api_key":"secret"}"#).unwrap();
@@ -1680,7 +1703,13 @@ fn doctor_fix_sweeps_quarantine_leftovers() {
     ];
 
     let report = run_with_env(&["doctor", "--compact"], &envs);
-    assert_eq!(report.status.code(), Some(1));
+    assert_eq!(
+        report.status.code(),
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&report.stdout),
+        String::from_utf8_lossy(&report.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
     assert!(report["findings"]
         .as_array()
@@ -1691,7 +1720,8 @@ fn doctor_fix_sweeps_quarantine_leftovers() {
     let fixed = run_with_env(&["doctor", "--fix", "--allow-delete", "--compact"], &envs);
     assert!(
         fixed.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fixed.stdout),
         String::from_utf8_lossy(&fixed.stderr)
     );
     assert!(!leftover.exists());
@@ -1704,9 +1734,10 @@ fn doctor_fix_dry_run_plans_without_mutation() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let dir = temp_path("doctor-fix-dry-run");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let config = dir.join("config.toml");
     let state = dir.join("state");
-    fs::create_dir_all(&state).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(&state).unwrap();
     let original = "retry=2\nbase_url=\"https://api.exa.ai\"\n";
     fs::write(&config, original).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
@@ -1718,7 +1749,13 @@ fn doctor_fix_dry_run_plans_without_mutation() {
             ("EXA_API_KEY", "exa-test-key"),
         ],
     );
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "healthy");
     assert!(report["actions"]
@@ -1761,9 +1798,10 @@ fn doctor_backup_uses_wall_clock_not_source_date_epoch() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_path("doctor-backup-clock");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let config = dir.join("config.toml");
     let state = dir.join("state");
-    fs::create_dir_all(&state).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(&state).unwrap();
     fs::write(&config, "retry=2\nbase_url=\"https://api.exa.ai\"\n").unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
     let source_epoch = "2000000000";
@@ -1777,7 +1815,8 @@ fn doctor_backup_uses_wall_clock_not_source_date_epoch() {
     let output = run_with_env(&["doctor", "--fix", "--compact"], &envs);
     assert!(
         output.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -1820,9 +1859,10 @@ fn doctor_undo_restores_pre_last_fix_state_only() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = temp_path("doctor-undo-single-slot");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let config = dir.join("config.toml");
     let state = dir.join("state");
-    fs::create_dir_all(&state).unwrap();
+    exa_agent_cli::fsutil::create_dir_all_private(&state).unwrap();
     let first = "# first\nretry=2\nbase_url=\"https://api.exa.ai\"\n";
     fs::write(&config, first).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
@@ -1835,7 +1875,8 @@ fn doctor_undo_restores_pre_last_fix_state_only() {
     let first_fix = run_with_env(&["doctor", "--fix", "--compact"], &envs);
     assert!(
         first_fix.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first_fix.stdout),
         String::from_utf8_lossy(&first_fix.stderr)
     );
 
@@ -1846,14 +1887,16 @@ fn doctor_undo_restores_pre_last_fix_state_only() {
     let second_fix = run_with_env(&["doctor", "--fix", "--compact"], &envs);
     assert!(
         second_fix.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second_fix.stdout),
         String::from_utf8_lossy(&second_fix.stderr)
     );
 
     let undone = run_with_env(&["doctor", "--undo", "--compact"], &envs);
     assert!(
         undone.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&undone.stdout),
         String::from_utf8_lossy(&undone.stderr)
     );
     let undo_report: serde_json::Value = serde_json::from_slice(&undone.stdout).unwrap();
@@ -7403,7 +7446,7 @@ fn monitor_create_ambiguous_failure_records_pending_run() {
     let dir = temp_path("monitor-create-pending");
     let pending_path = dir.join("pending-runs.jsonl");
     let pending_path_string = pending_path.to_string_lossy().into_owned();
-    let base_url = closed_local_base_url();
+    let (_socket, base_url) = closed_local_base_url();
     let output = run_with_env(
         &[
             "monitor",
@@ -9341,7 +9384,7 @@ fn websets_webhooks_create_ambiguous_failure_records_pending_run() {
     let dir = temp_path("websets-webhook-create-pending");
     let pending_path = dir.join("pending-runs.jsonl");
     let pending_path_string = pending_path.to_string_lossy().into_owned();
-    let base_url = closed_local_base_url();
+    let (_socket, base_url) = closed_local_base_url();
     let output = run_with_env(
         &[
             "websets",
@@ -9874,11 +9917,12 @@ fn admin_keys_use_service_key_and_admin_base_url() {
         .iter()
         .any(|value| value == "EXA_SERVICE_KEY"));
 
+    let (_socket, base_url) = closed_local_base_url();
     let api_shaped_service = run_with_env(
         &["admin", "keys", "list", "--compact"],
         &[
             ("EXA_SERVICE_KEY", "00000000-0000-0000-0000-000000000000"),
-            ("EXA_ADMIN_BASE_URL", closed_local_base_url().as_str()),
+            ("EXA_ADMIN_BASE_URL", base_url.as_str()),
         ],
     );
     assert_eq!(api_shaped_service.status.code(), Some(2));
@@ -9921,7 +9965,7 @@ fn admin_keys_create_safety_edges() {
     let stderr: serde_json::Value = serde_json::from_slice(&raw.stderr).unwrap();
     assert_eq!(stderr["error"]["code"], "invalid_flag_combination");
 
-    let base_url = closed_local_base_url();
+    let (_socket, base_url) = closed_local_base_url();
 
     // Without --secret-output the minted key would be unretrievable (it is never
     // printed to stdout), so the command is refused before any network call.
@@ -10521,7 +10565,7 @@ fn debug_redacts_global_secret_values() {
 #[test]
 fn output_and_secret_output_may_not_name_the_same_file() {
     let dir = temp_path("output-vs-secret-output");
-    let unreachable = closed_local_base_url();
+    let (_socket, unreachable) = closed_local_base_url();
 
     let cases: Vec<(&str, Vec<String>)> = vec![
         (

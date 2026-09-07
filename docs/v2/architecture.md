@@ -325,6 +325,8 @@ fn resolve_credential(ns: Namespace, g: &GlobalArgs, cfg: &Config) -> Result<Sec
 base_url = "https://api.exa.ai"
 format   = "json"
 timeout  = "30s"
+connect_timeout = "10s"         # optional connection-setup limit
+max_response_bytes = 67108864  # decoded success body / whole-stream cap
 retry    = 2
 
 [profiles.work]
@@ -359,6 +361,7 @@ Detector list (all read-only):
 | `config.format` | config TOML has canonical formatting | `exa-agent doctor --fix` |
 | `permissions.config` | config mode is `0600` on Unix | `exa-agent doctor --fix` |
 | `permissions.credentials` | credentials mode is `0600` on Unix | `exa-agent doctor --fix --allow-auth` |
+| `permissions.state` | accessible managed files or writable state/spill/credential directories; bounded, report-only, no child-directory symlink traversal | no automatic fix |
 | `state.stale-cache` | spill files older than seven days | `exa-agent doctor --fix --allow-delete` |
 | `key.present` | api key resolvable via precedence (presence, not validity) | `export EXA_API_KEY=…` |
 | `service-key.scope` | service key, if configured, isn't an api key (shape) | `export EXA_SERVICE_KEY=…` (must be a service key, not an `EXA_API_KEY`) |
@@ -417,3 +420,30 @@ Flagged for the coordinator — none silently resolved:
 4. **`diagnostics.cache` is vestigial.** The contracts §4 envelope includes `diagnostics.cache`, but D5 forbids a cache, so it's always `null`. Harmless and forward-compatible, but worth noting the field exists only to satisfy the frozen schema.
 5. **Disk touches under a "stateless" client.** D5 says no hidden local state, but pending-run JSONL (D7), the config file, the OS keyring, auto-spill temp files, and `--trace` all touch disk. These are all explicitly sanctioned by other decisions; calling it out so "stateless" isn't read as "never writes disk." None is a cache.
 6. **`--header` vs managed `Authorization`.** §5 forbids `--header` from overriding the managed `Authorization` (a prompt-injection / footgun guard). No decision speaks to this directly; I made the safe call. Confirm it's the desired posture (vs. letting power users override).
+
+## Linux state and transport implementation
+
+The transport constructs normal, nonredirecting, and SSE ureq agents with the
+same connect timeout, independent of the total request budget. Decoded body
+reads use an explicit cap+1 bound and size comparison, since gzip can bypass a
+wire-byte limit. SSE counts decoded bytes before feeding its decoder. The same
+64 MiB default applies to the whole stream and JSON fallback. Oversize is an
+unusable-response Upstream error, nonretryable exit 5; HTTP error bodies instead
+use a bounded diagnostic read so status and payment headers keep their meaning.
+
+Contents chunk workers fetch only; the caller drains each round in input order
+and owns rendering. Failure stops new rounds, never already-admitted results.
+One staged output sink serves all successful chunks and preserves earlier data
+on later failure. JSON chunk output is a sequence of envelopes.
+
+`fsutil` owns private creation, unique sibling temp files, atomic replacement,
+directory sync, and advisory lock sidecars. Config read-modify-write and doctor
+fix/undo share the same lock. Doctor re-reads config under that lock, refuses
+lock failures, and skips locking entirely for fix dry-run. Explicit trace paths
+also use sidecars and new-file 0600. Existing modes are not silently tightened.
+`permissions.state` reports writable managed directories (not 0755 alone) and
+accessible state files, inspecting at most 1,024 entries one level deep without
+following child directory symlinks. Credential-directory mode is checked too.
+
+Empty or relative XDG config/state roots are ignored; HOME supplies the fallback.
+Explicit Exa path overrides keep their relative-path semantics.

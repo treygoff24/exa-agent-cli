@@ -5,12 +5,64 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded runs on a PR branch. `head_ref` is set only for pull_request events, so a push
+# to main falls back to the unique run_id and is never cancelled by a later push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  # OS-independent checks. Formatting and the generated-artifact comparisons produced identical
+  # results on both matrix legs, so they run once here instead of twice in `test`.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      # `vendor-spec --check` never touches the network: it parses the committed specs, verifies
+      # the overlay against them, and re-hashes them against openapi/provenance.toml. The live
+      # re-vendor path is the no-argument form, and it refuses to run under EXA_AGENT_NO_NETWORK.
+      - name: Vendored spec + provenance
+        run: EXA_AGENT_NO_NETWORK=1 cargo xtask vendor-spec --check
+      - name: Generated skill
+        run: EXA_AGENT_NO_NETWORK=1 cargo xtask generate-skill --check
+      - name: Generated registry
+        run: EXA_AGENT_NO_NETWORK=1 cargo xtask generate-registry --check
+
+  # Native per-OS behavior: clippy and the test suite genuinely differ across targets, so these
+  # stay on the matrix.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-features
+      - name: Release build
+        run: cargo build --locked --release
+
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
@@ -19,27 +71,104 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: MSRV clippy
         run: cargo clippy --locked --all-features --all-targets -- -D warnings
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+
+  # Builds the Linux static artifact the way the release pipeline builds it, then proves the
+  # binary is actually static and actually runs somewhere with no glibc. A tag-time musl failure
+  # is expensive; this catches it on the PR.
+  static-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Generated skill
-        run: EXA_AGENT_NO_NETWORK=1 cargo xtask generate-skill --check
-      - name: Generated registry
-        run: EXA_AGENT_NO_NETWORK=1 cargo xtask generate-registry --check
-      - name: Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - name: Tests
-        run: cargo test --locked --all-features
-      - name: Release build
-        run: cargo build --locked --release
+      # `ring` compiles C and assembly through the `cc` crate, and cc treats a gnu host building a
+      # musl target as a cross-compile, so it needs a musl-targeting compiler driver.
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      # Release artifacts must run on any CPU of the architecture, so nothing may narrow the
+      # baseline with -C target-cpu. Assert it rather than trusting that nobody added it.
+      - name: Reject non-portable codegen flags
+        run: |
+          set -euo pipefail
+          for var in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS; do
+            value="${!var-}"
+            case "$value" in
+              *target-cpu*|*target-feature*)
+                echo "$var narrows the CPU baseline: $value" >&2
+                exit 1
+                ;;
+            esac
+          done
+          if grep -rnE 'target-cpu|target-feature' .cargo/ 2>/dev/null; then
+            echo "committed cargo config narrows the CPU baseline" >&2
+            exit 1
+          fi
+          echo "no non-portable codegen flags in effect"
+      # dist has no per-target feature selection, so the musl release artifacts are built with the
+      # default feature set exactly like every other target. Build the same thing here, otherwise
+      # this lane rehearses a configuration that never ships.
+      - name: Static build
+        run: cargo build --locked --release --target "$TARGET"
+      # `musl-set` is inert today, but it is the name D15 reserves for the static-artifact feature
+      # set. Keep the combination compiling so it is not discovered broken on the day it matters.
+      - name: musl-set feature combination still compiles
+        run: |
+          cargo check --locked --target "$TARGET" \
+            --no-default-features --features musl-set
+      - name: Linkage smoke
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/exa-agent"
+          test -x "$bin" || { echo "missing binary: $bin" >&2; exit 1; }
+          file "$bin"
+          # A static binary has no PT_INTERP segment. `file` wording has changed across releases,
+          # so the ELF program headers are the check and `file` output is just for the log.
+          if readelf -l "$bin" | grep -q 'INTERP'; then
+            echo "binary requests a dynamic loader; it is not static" >&2
+            readelf -l "$bin" | grep -A1 'INTERP' >&2
+            exit 1
+          fi
+          if readelf -d "$bin" 2>/dev/null | grep -q 'NEEDED'; then
+            echo "binary has NEEDED shared-library entries; it is not static" >&2
+            exit 1
+          fi
+          echo "no PT_INTERP and no NEEDED entries: statically linked"
+      # The decisive test: run it on a distro that has no glibc at all.
+      - name: Run the static binary on Alpine
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e EXA_AGENT_NO_NETWORK=1 \
+            -v "$PWD/target/$TARGET/release/exa-agent:/exa-agent:ro" \
+            alpine:3.20 /exa-agent --version
+          docker run --rm \
+            -e EXA_AGENT_NO_NETWORK=1 \
+            -v "$PWD/target/$TARGET/release/exa-agent:/exa-agent:ro" \
+            alpine:3.20 /exa-agent capabilities --json > /dev/null
+          echo "static binary runs on a glibc-free distro"
+
+  # dist-workspace.toml and the generated release.yml are two files that must agree; regenerating
+  # by hand is easy to forget. This fails the PR that changes one without the other.
+  release-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist (version pinned by dist-workspace.toml)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -oP '(?<=^cargo-dist-version = ")[^"]+' dist-workspace.toml)"
+          test -n "$version" || { echo "no cargo-dist-version in dist-workspace.toml" >&2; exit 1; }
+          echo "pinned dist version: $version"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
+      - name: Generated release workflow is current
+        run: dist generate --check

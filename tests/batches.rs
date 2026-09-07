@@ -14,21 +14,38 @@ const AGENT_STOP_BETA: &str = "agent-max-effort-2026-07-27";
 const VALID_REQUESTS: &str =
     r#"[{"customId":"row-1","method":"POST","url":"/search","body":{"query":"AI"}}]"#;
 
-fn run(args: &[&str]) -> Output {
+/// Every subprocess in this file goes through here: config, credentials, presets, and state all
+/// point at throwaway paths, and inherited output/profile overrides are stripped. Writing test
+/// recovery state into the developer's real `$HOME` is never acceptable.
+fn isolated_command() -> Command {
+    let isolated = temp_path("isolated");
     let mut command = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
     command
-        .args(args)
         .env_remove("EXA_AGENT_NO_NETWORK")
         .env_remove("EXA_API_KEY")
         .env_remove("EXA_SERVICE_KEY")
         .env_remove("EXA_PROFILE")
         .env_remove("EXA_OUTPUT")
-        .env("EXA_AGENT_CONFIG", temp_path("config").join("config.toml"))
+        .env_remove("EXA_ADMIN_BASE_URL")
+        .env("EXA_AGENT_CONFIG", isolated.join("config.toml"))
+        .env("EXA_AGENT_CREDENTIALS", isolated.join("credentials.json"))
+        .env("EXA_AGENT_PRESETS", isolated.join("presets.toml"))
         .env(
-            "EXA_AGENT_CREDENTIALS",
-            temp_path("credentials").join("credentials.json"),
+            "EXA_AGENT_LOCAL_PRESETS",
+            isolated.join("local-presets.toml"),
+        )
+        .env("EXA_AGENT_STATE", isolated.join("state"))
+        .env(
+            "EXA_AGENT_PENDING_RUNS",
+            isolated.join("pending-runs.jsonl"),
         );
     command
+}
+
+fn run(args: &[&str]) -> Output {
+    let mut command = isolated_command();
+    command
+        .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed to run exa-agent {args:?}: {err}"))
 }
@@ -514,7 +531,10 @@ fn batch_create_ambiguous_failure_suggests_listing() {
     });
     let pending_path = temp_path("pending").join("pending-runs.jsonl");
     fs::create_dir_all(pending_path.parent().unwrap()).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
+    // Built through `isolated_command`, not a bare `Command`: a direct spawn inherits the
+    // developer's real EXA_API_KEY, EXA_PROFILE, and ~/.config, so this test's result depended
+    // on the machine it ran on.
+    let mut command = isolated_command();
     let output = command
         .args([
             "batches",
@@ -528,7 +548,6 @@ fn batch_create_ambiguous_failure_suggests_listing() {
             "--compact",
         ])
         .env("EXA_AGENT_PENDING_RUNS", &pending_path)
-        .env_remove("EXA_AGENT_NO_NETWORK")
         .output()
         .expect("run ambiguous create");
     server.join().expect("drop server");
@@ -639,7 +658,7 @@ metadata = {origin="preset"}
     )
     .unwrap();
     for override_body in [None, Some(format!(r#"{{"requests":{VALID_REQUESTS}}}"#))] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
+        let mut command = isolated_command();
         command
             .args([
                 "batches",
@@ -716,19 +735,11 @@ fn stop_counting_server(base_url: &str, server: thread::JoinHandle<()>) {
 fn run_against(base_url: &str, args: &[&str]) -> Output {
     let pending = temp_path("retry-pending").join("pending-runs.jsonl");
     fs::create_dir_all(pending.parent().unwrap()).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_exa-agent"));
+    let mut command = isolated_command();
     command
         .args(args)
         .args(["--api-key", "test-key-abcdef12", "--base-url", base_url])
-        .env_remove("EXA_AGENT_NO_NETWORK")
-        .env_remove("EXA_PROFILE")
-        .env_remove("EXA_OUTPUT")
-        .env("EXA_AGENT_PENDING_RUNS", pending)
-        .env("EXA_AGENT_CONFIG", temp_path("config").join("config.toml"))
-        .env(
-            "EXA_AGENT_CREDENTIALS",
-            temp_path("credentials").join("credentials.json"),
-        );
+        .env("EXA_AGENT_PENDING_RUNS", pending);
     command.output().expect("run exa-agent against the server")
 }
 

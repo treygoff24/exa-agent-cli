@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single static binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 73 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints upstream bytes as-is except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single self-contained binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 73 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 
@@ -19,6 +19,16 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/treygoff24/exa-agent-cl
 ```
 
 Verify: `exa-agent --version`.
+
+The shell installer picks the right archive for the host. On Linux it prefers the glibc build and
+falls back to a fully static musl build when glibc is older than the release's recorded minimum or absent, so it works inside
+Alpine, distroless, and scratch images. Supported targets: `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`,
+`x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`. Windows is a documented non-goal.
+
+Credentials never live in an OS keyring on any artifact. The `keyring` cargo feature is inert — it
+gates no code — so `auth login` writes a plaintext `0600` file on every platform. Prefer
+`EXA_API_KEY`.
 
 ## Setup for your human
 
@@ -67,11 +77,15 @@ self-description commands still work.
 
 ## Reading the output
 
+Raw output preserves HTTP content-decoded body bytes, including gzip decoding;
+it is not a wire-level compressed-byte capture. Signed-payment echo redaction
+still applies.
+
 Success envelope (`exa.cli.response.v1`, stdout): `data` carries the command's result, shaped per-command; async-create and paginated commands also carry `nextActions` (paste-ready follow-up commands), `count`, and `dataHash`. Live `contents`/`fetch` and `answer`/`ask` result envelopes carry text-aware `outcome` (`full`, `partial`, or `no_content`) independently of exit classification. They also carry `contentDiagnostics[]`: contents entries expose exact upstream `crawl_status`, `error_tag`, and `http_status` when present plus honestly inferred `content_type`, `content_status`, `usable`, and `pdf_unextracted`; answer currently emits `[]` because Exa provides no per-citation diagnostics. Empty/binary/PDF/crawl failures always add a warning and fallback action. `request.correlationId` echoes `--correlation-id`/`EXA_CORRELATION_ID` if you set one.
 
 Error envelope (`exa.cli.error.v1`, stderr): `error.code` (from the published dictionary below), `error.message`, and often `suggestedCommand`. Stdout normally stays empty on error. If `--output` fails after a successful operation, the complete result stays on stdout with an `output_write_failed` warning and a nonzero exit: save that result rather than repeating a potentially billable create. Interrupted NDJSON streams can also leave partial events on stdout.
 
-Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits exact upstream bytes with no CLI envelope except signed-payment output replaces exact submitted payment credential echoes with `<redacted>`. `-o/--output FILE` writes the complete selected output to `FILE` (same signed-payment redaction rule for `--raw`); stdout carries only a small confirmation envelope with `dataPath`, and an explicit output path supersedes state-dir auto-spill.
+Output format is automatic — JSON when stdout is piped, human-readable in a TTY. Always pass `--json` (alias for `--format json`) when you are the consumer, so behavior doesn't depend on how you were invoked. `--raw` emits decoded upstream body bytes with no CLI envelope except signed-payment output replaces exact submitted payment credential echoes with `<redacted>`. `-o/--output FILE` writes the complete selected output to `FILE` (same signed-payment redaction rule for `--raw`); stdout carries only a small confirmation envelope with `dataPath`, and an explicit output path supersedes state-dir auto-spill.
 
 ## Exit codes
 
@@ -82,7 +96,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 2 | auth | missing, invalid, or wrong-scope credential |
 | 3 | config | malformed config or unknown profile |
 | 4 | network | connection/timeout failure reaching Exa |
-| 5 | upstream | Exa returned a non-2xx the CLI maps to a server error |
+| 5 | upstream | HTTP failure or an unusable upstream response |
 | 6 | rate_limit | 429; budget or concurrency exhausted |
 | 7 | not_found | resource does not exist |
 | 8 | conflict | duplicate/externalId conflict |
@@ -92,7 +106,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 | 12 | interrupted | SIGINT / stream interrupted |
 | 13 | billing | 402; the Exa account is out of credits (key is valid, command was fine) |
 
-`error.code` is the finer-grained signal: 35 codes map onto these 14 exit categories. For exit `2`, `not_authenticated` means set a key, `reauth_required` means Exa rejected the credential, and `feature_not_enabled` means request access from Exa rather than rotating the key. The full dictionary is in `capabilities --json`; trust its generated values if this file disagrees.
+`error.code` is the finer-grained signal: 36 codes map onto these 14 exit categories. For exit `2`, `not_authenticated` means set a key, `reauth_required` means Exa rejected the credential, and `feature_not_enabled` means request access from Exa rather than rotating the key. The full dictionary is in `capabilities --json`; trust its generated values if this file disagrees.
 
 **Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** Challenge-evidenced raw payment 402 is checked first and is `payment_required` / exit `2`; otherwise a bare 402, or any 4xx body carrying `NO_MORE_CREDITS`, means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane.
 
@@ -106,7 +120,30 @@ Dispatch-level body validation runs before credential resolution and network I/O
 - `--dry-run --print-request` works on every mutation: it builds and prints the exact request body without sending it.
 - Preview headers show explicit and feature-specific values, not credentials or HTTP-stack defaults. Custom caller headers are not copied into automatic follow-ups; `followup_context_required` means preserve the original context manually.
 - `--header` cannot override managed auth or payment headers (`Authorization`, payment namespaces, or other secret headers) — refused at exit `1`.
-- Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` are limited to exact nonstreaming `raw POST /search` or `/contents` on the default host; payment values are stdin-only and never combined with API/service credentials. Successful signed raw payment responses redact exact submitted payment credential echoes before any output. JSON-envelope mode adds top-level `payment: { kind: "receipt", headers: [...] }` receipt metadata after `dataTruncated`; under `--raw`, no envelope or `payment` metadata is added and output is exact except those echoes are replaced with `<redacted>`.
+- Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` are limited to exact nonstreaming `raw POST /search` or `/contents` on the default host; payment values are stdin-only and never combined with API/service credentials. Successful signed raw payment responses redact exact submitted payment credential echoes before any output. JSON-envelope mode adds top-level `payment: { kind: "receipt", headers: [...] }` receipt metadata after `dataTruncated`; under `--raw`, no envelope or `payment` metadata is added and output preserves decoded upstream body bytes except those echoes are replaced with `<redacted>`.
+
+## Receive, chunk, and state limits
+
+- `--max-response-bytes N` / config `max_response_bytes`: 64 MiB default, positive
+  decoded-byte cap, including gzip and the entire SSE stream/JSON fallback. Bad
+  values fail before sending (exit 1); an exceeded cap is `response_too_large`,
+  nonretryable Upstream/exit 5. Preserve partial output and use create recovery.
+  This is separate from the inline `--max-output-bytes` spill threshold.
+- `--connect-timeout DURATION` / config `connect_timeout` bounds connection setup
+  without changing the whole-request `--timeout`; unset means no extra connect cap.
+- `contents --chunk-size N --jobs J`: 1-16 workers, default 1, input-order output.
+  Explicit `--jobs` requires `--chunk-size`. A failed round admits no further work, but drains every already-started result.
+  `--output` holds the complete sequence of successful chunk renderings, with one
+  final confirmation. JSON is a sequence of envelopes; NDJSON retains records and
+  summaries. Completed data survives later failure, with stdout fallback for failed
+  writes and a staging path if rename fails. File modes and symlinks are preserved.
+- Empty/relative XDG config/state roots are ignored; explicit `EXA_AGENT_*` paths
+  retain relative-path support. `permissions.state` reports accessible managed files
+  and writable state/spill/credential directories; 0755 alone is not a finding.
+  It checks at most 1,024 state entries, one level deep, without following child
+  directory symlinks. Existing paths are report-only, not silently chmod-ed.
+- Doctor fix/undo refuse config-lock failure; fix dry-run has no filesystem writes.
+  Explicit trace paths use a sibling `.<filename>.lock`; new traces are 0600.
 
 ## Machine self-description
 
@@ -131,7 +168,23 @@ If anything in this file disagrees with `capabilities` output, trust `capabiliti
 
 ## Maintainers
 
-Release process and CI are driven by cargo-dist (`dist-workspace.toml`); the design record lives under `docs/v2/`, starting with `docs/v2/decisions.md`. Local working docs (audits, reviews, plans, journals, research) belong in `work/`, which is gitignored — keep them out of the repo; `work/generated/` is the tracked exception pinned by tests.
+Release process and CI are driven by cargo-dist (`dist-workspace.toml`); the design record lives under `docs/v2/`, starting with `docs/v2/decisions.md`.
+
+`.github/workflows/release.yml` is **generated** — never hand-edit it. Change `dist-workspace.toml`
+or `.github/dist-build-setup.yml`, then run `dist generate` with the pinned dist version. CI's
+`release-config` job runs `dist generate --check` and fails the pull request if the two drift. The
+target list lives only in `dist-workspace.toml`; the workflow computes its build matrix at plan
+time, so adding a target does not change `release.yml` at all.
+
+CI jobs: `lint` (formatting, generated skill/registry, offline `vendor-spec --check`) runs once on
+Linux because those checks are OS-independent; `test` keeps clippy, the suite, and a release build
+on both Linux and macOS; `msrv` pins 1.85; `static-linux` builds the musl target and proves the
+binary is static and runs on Alpine; `release-config` checks the generated workflow.
+
+Note for anyone implementing D15: dist has no per-target feature selection, so the musl artifacts
+are built with the default feature set like every other target. A real keyring must be gated on
+`cfg(target_env = "musl")` (or equivalent), not on the `musl-set` cargo feature, or the shipped
+binary will not match the design. Local working docs (audits, reviews, plans, journals, research) belong in `work/`, which is gitignored — keep them out of the repo; `work/generated/` is the tracked exception pinned by tests.
 
 ## Issue tracking — beads (house rules)
 

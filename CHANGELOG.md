@@ -16,8 +16,37 @@ All notable changes to this project are documented here.
   option-conflict checks.
 - Follow-up commands for created resources and remaining pages. Continuations retain
   filters and explicit profile/beta settings without copying API keys or output paths.
+- Linux static release artifacts for `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl`, alongside the existing glibc builds. The shell installer
+  prefers the glibc archive and falls back to musl when the host's glibc is older than the release's recorded minimum
+  or absent, so containers without glibc now get a working binary. Existing glibc users
+  receive the same `-gnu` archive as before.
+- CI gains a Linux static lane that builds the musl target, fails unless the binary has no
+  `PT_INTERP` segment and no `NEEDED` entries, and runs the result on an Alpine image; a
+  guard rejecting `-C target-cpu`/`-C target-feature` in the build environment or the
+  repository's cargo config; an offline `cargo xtask vendor-spec --check` gate over the
+  vendored specs, overlay, and `openapi/provenance.toml`; and a check that the generated
+  `release.yml` still matches `dist-workspace.toml`.
+
+- `--max-response-bytes` and config `max_response_bytes`: a 64 MiB default ceiling
+  on decoded success bodies, gzip, and entire SSE streams/JSON fallbacks. Oversize
+  responses return nonretryable `response_too_large` (exit 5), preserving HTTP error
+  classification and ambiguous-create recovery. Invalid/zero caps remain exit 1.
+- `contents --jobs` supports 1-16 workers (default 1) for `--chunk-size` requests.
+  Output stays in input order and retains every admitted result after a failure.
+  One `--output` destination holds all successful chunk renderings, preserving
+  modes, symlinks, and completed data on later failure.
+- `permissions.state` reports accessible state files and group/world-writable
+  managed directories, including the credential directory, without changing modes
+  or following child-directory symlinks.
 
 ### Fixed
+
+- Healthy doctor test fixtures explicitly create private managed directories;
+  writable-directory diagnostics remain report-only.
+- Chunked contents rejects `stream:true` before sending or touching output, and
+  explicit `--jobs` requires `--chunk-size`. Failed writes roll back partial
+  records on regular files, including targets created through dangling symlinks.
 
 - Account feature-access failures now return `feature_not_enabled`, distinct from
   a rejected credential. This follows a live Batch API entitlement refusal.
@@ -46,6 +75,14 @@ All notable changes to this project are documented here.
 - Output documentation now explains how to recover the complete stdout result after
   an output-file write failure without repeating a successful create.
 
+- Connect timeout now reaches all three HTTP agents via `--connect-timeout` or
+  config `connect_timeout`, independently of the whole-request timeout.
+- Doctor fix/undo honor lock acquisition failure and refresh config under lock;
+  `--fix --dry-run` performs no filesystem mutation. Temporary files are cleaned
+  after failed sync/rename, and supported directory-sync errors are reported.
+- Empty/relative XDG roots fall back to HOME; explicit Exa path overrides remain
+  relative-capable. Explicit trace paths use locking sidecars and new-file 0600.
+
 ### Changed
 
 - A leading `@` in `contents --highlights` now selects a file. For a literal query
@@ -56,6 +93,27 @@ All notable changes to this project are documented here.
   instead of forwarding it upstream.
 - `answer --user-location` is sent as the string upstream expects, and
   `answer --text` is a boolean; `capabilities` now reports both kinds.
+- HTTP responses may now be gzip-encoded: `ureq` gains its `gzip` feature, which pulls in
+  `flate2` on its default pure-Rust backend, so musl static linking stays free of a zlib C
+  shim. `default-features` on `ureq` stays off. Raw output preserves the decoded
+  response body, not compressed wire bytes; payment redaction is unchanged.
+- `rustix` (unix only, `fs` feature) is now a direct dependency for the state layer's file
+  handling. It was already present transitively, so the lockfile gained no new versions
+  beyond the gzip chain and nothing was upgraded.
+- The source package now includes `openapi/provenance.toml`, which the OpenAPI parity test
+  and `vendor-spec --check` read.
+- CI no longer repeats the formatting and generated-artifact checks on both operating
+  systems; they run once in a dedicated `lint` job. Per-OS clippy, tests, and release
+  builds are unchanged. Every job now has a timeout, and superseded pull-request runs are
+  cancelled while pushes to `main` are not.
+- The dev profile now builds with `debug = "line-tables-only"` and no debug info for
+  dependencies. A Linux comparison reduced the binary from 82,861,952 to 33,311,480
+  bytes while retaining project line tables. Single cold builds were 11.63s and
+  11.80s, so no build-speed gain is claimed. Release and `dist` builds are unaffected.
+- Documentation correction: the `keyring` cargo feature is inert and gates no code, so no
+  release artifact stores credentials in an OS keyring. `auth login` writes a plaintext
+  `0600` file on every platform. The D11/D15 keyring design in `docs/v2/` is planned, not
+  implemented.
 
 ## 0.6.0 — 2026-08-11
 

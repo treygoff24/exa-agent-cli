@@ -18,11 +18,11 @@ that can drift. `cargo run -p xtask -- vendor-spec --check` and the
 recorded vendored SHA-256 and operation count against the committed files, so a re-vendor
 that forgets to update the record fails offline instead of passing green.
 
-The admin spec is served as YAML; it is normalized to JSON on vendor so the shipped binary
-carries no YAML parser (D21). `xtask vendor-spec` re-fetches and re-verifies both; `--check`
-verifies offline (identity + overlay consistency + the `provenance.toml` record). The
-embedded-spec SHA-256 is computed at build time over `exa-openapi.json` and surfaced in
-`capabilities --json` / `doctor`.
+The admin spec is served as YAML; the Rust-only `xtask` dev tool normalizes it to JSON on vendor,
+so the shipped binary still carries no YAML parser (D21). `xtask vendor-spec` re-fetches and
+re-verifies both; `--check` verifies offline (identity + overlay consistency + the
+`provenance.toml` record). The embedded-spec SHA-256 is computed at build time over
+`exa-openapi.json` and surfaced in `capabilities --json` / `doctor`.
 
 The three partial specs under `work/research/` (Search 1.2.0, Websets 0, Team-Management
 1.0.0) are **not** vendor sources (D22). The live team-management spec was byte-compared to

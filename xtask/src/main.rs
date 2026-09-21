@@ -94,18 +94,22 @@ fn vendor_spec(check_only: bool) -> Result<()> {
         bail!("vendor-spec refused because EXA_AGENT_NO_NETWORK is set");
     }
 
-    // Live re-vendor. The Exa public spec is served as JSON; the admin spec as YAML, so it is
-    // normalized to JSON via ruby (no YAML parser ships in the binary, D21).
-    fetch_json(EXA_SPEC_URL, &root.join(EXA_SPEC))?;
-    fetch_yaml_as_json(ADMIN_SPEC_URL, &root.join(ADMIN_SPEC))?;
+    // Live re-vendor. The Exa public spec is served as JSON; the admin spec as YAML, so xtask
+    // normalizes it to JSON. The YAML parser remains a dev-tool dependency and does not ship in
+    // the binary (D21).
+    let exa_source_sha = fetch_json(EXA_SPEC_URL, &root.join(EXA_SPEC))?;
+    let admin_source_sha = fetch_yaml_as_json(ADMIN_SPEC_URL, &root.join(ADMIN_SPEC))?;
     verify_spec(&root.join(EXA_SPEC), EXA_TITLE, EXA_VERSION)?;
     verify_spec(&root.join(ADMIN_SPEC), ADMIN_TITLE, ADMIN_VERSION)?;
     // A re-vendor that changed the specs must also update `openapi/provenance.toml`, so the
     // freshly measured values are printed before the record is re-asserted.
-    for (section, spec) in [("exa", EXA_SPEC), ("admin", ADMIN_SPEC)] {
+    for (section, spec, source_sha) in [
+        ("exa", EXA_SPEC, exa_source_sha),
+        ("admin", ADMIN_SPEC, admin_source_sha),
+    ] {
         let path = root.join(spec);
         println!(
-            "[{section}] vendored_sha256 = {:?}  operations = {}",
+            "[{section}] source_sha256 = {source_sha:?}  vendored_sha256 = {:?}  operations = {}",
             file_sha256(&path)?,
             collect_op_ids(&path)?.len()
         );
@@ -160,12 +164,16 @@ fn verify_provenance(root: &Path) -> Result<()> {
 }
 
 fn file_sha256(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(bytes_sha256(&bytes))
 }
 
-fn fetch_json(url: &str, dest: &Path) -> Result<()> {
+fn bytes_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn fetch(url: &str) -> Result<Vec<u8>> {
     let out = Command::new("curl")
         .args(["-sS", "-L", "--fail", "--max-time", "60", url])
         .output()
@@ -176,31 +184,29 @@ fn fetch_json(url: &str, dest: &Path) -> Result<()> {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    // Round-trip through serde_json to normalize whitespace deterministically.
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).context("parse fetched JSON")?;
-    std::fs::write(dest, serde_json::to_string_pretty(&v)? + "\n")?;
-    Ok(())
+    Ok(out.stdout)
 }
 
-fn fetch_yaml_as_json(url: &str, dest: &Path) -> Result<()> {
-    let script = format!(
-        "require 'yaml'; require 'json'; require 'open-uri'; \
-         d = YAML.safe_load(URI.open({url:?}).read, aliases: true); \
-         File.write({dest:?}, JSON.pretty_generate(d) + \"\\n\")",
-        url = url,
-        dest = dest.to_string_lossy(),
-    );
-    let out = Command::new("ruby")
-        .args(["-e", &script])
-        .output()
-        .context("run ruby (YAML->JSON conversion needs ruby on PATH)")?;
-    if !out.status.success() {
-        bail!(
-            "ruby YAML->JSON failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
+fn fetch_json(url: &str, dest: &Path) -> Result<String> {
+    let bytes = fetch(url)?;
+    // Round-trip through serde_json to normalize whitespace deterministically.
+    // The public spec has historically been canonicalized by serde_json's sorted map, so retain
+    // that ordering after enabling preserve_order for the admin YAML normalizer.
+    let mut v: serde_json::Value = serde_json::from_slice(&bytes).context("parse fetched JSON")?;
+    v.sort_all_objects();
+    std::fs::write(dest, serde_json::to_string_pretty(&v)? + "\n")?;
+    Ok(bytes_sha256(&bytes))
+}
+
+fn fetch_yaml_as_json(url: &str, dest: &Path) -> Result<String> {
+    let bytes = fetch(url)?;
+    let v = parse_yaml_as_json(&bytes)?;
+    std::fs::write(dest, serde_json::to_string_pretty(&v)? + "\n")?;
+    Ok(bytes_sha256(&bytes))
+}
+
+fn parse_yaml_as_json(bytes: &[u8]) -> Result<serde_json::Value> {
+    serde_yaml_ng::from_slice(bytes).context("parse fetched YAML")
 }
 
 fn verify_spec(path: &Path, want_title: &str, want_version: &str) -> Result<()> {
@@ -1723,4 +1729,21 @@ fn run_env(cmd: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
         bail!("{cmd} {} failed ({status})", args.join(" "));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_yaml_as_json;
+
+    #[test]
+    fn yaml_normalizer_resolves_aliases_and_preserves_key_order() {
+        let yaml = b"defaults: &defaults\n  scopes: []\ncopy: *defaults\n";
+        let value = parse_yaml_as_json(yaml).expect("parse YAML with an alias");
+
+        assert_eq!(value.pointer("/copy/scopes"), Some(&serde_json::json!([])));
+        assert_eq!(
+            serde_json::to_string_pretty(&value).expect("serialize normalized JSON"),
+            "{\n  \"defaults\": {\n    \"scopes\": []\n  },\n  \"copy\": {\n    \"scopes\": []\n  }\n}"
+        );
+    }
 }

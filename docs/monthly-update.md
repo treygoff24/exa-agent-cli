@@ -25,9 +25,11 @@ live.
 
 - Full gate: `EXA_AGENT_NO_NETWORK=1 cargo xtask ci` (fmt, clippy `-D
   warnings`, tests; 672 tests across 29 suites after `exa-wl1`).
-- On the devbox cell, build output must live under
-  `CARGO_TARGET_DIR=$HOME/.cache/cargo-targets` (the `rustc-gate` hook
-  rejects other locations, including `/tmp`).
+- On the devbox cell, build output must live in this repo's managed cache
+  directory: `export CARGO_TARGET_DIR="$(estate-build-cache path)"` (a
+  per-repo path under `~/.cache/cargo-targets/managed-v1/`; the `rustc-gate`
+  hook rejects other locations, including the cache root itself and `/tmp`).
+  Lane briefs must carry this line verbatim.
 - Offline switch: `EXA_AGENT_NO_NETWORK=1` refuses every live path;
   dry-run and self-description keep working.
 - Generated artifacts: the command registry

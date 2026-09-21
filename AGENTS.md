@@ -184,7 +184,7 @@ binary is static and runs on Alpine; `release-config` checks the generated workf
 Note for anyone implementing D15: dist has no per-target feature selection, so the musl artifacts
 are built with the default feature set like every other target. A real keyring must be gated on
 `cfg(target_env = "musl")` (or equivalent), not on the `musl-set` cargo feature, or the shipped
-binary will not match the design. Local working docs (audits, reviews, plans, journals, research) belong in `work/`, which is gitignored — keep them out of the repo; the generated skill is tracked at `skills/exa-agent-cli/SKILL.md` and pinned by tests.
+binary will not match the design. Local working docs (audits, reviews, plans, journals, research) belong in `work/`, which is gitignored — keep them out of the repo; the generated skill is tracked at `skills/exa-agent-cli/SKILL.md` and pinned by tests. The monthly upstream/papercut cycle runs from the `cli-monthly-update` skill with this repo's facts in `docs/monthly-update.md`.
 
 ## Issue tracking — beads (house rules)
 

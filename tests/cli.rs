@@ -3324,6 +3324,26 @@ fn merged_livecrawl_emits_deprecation_warning() {
 }
 
 #[test]
+fn contents_rejects_merged_livecrawl_and_max_age_hours() {
+    let output = run(&[
+        "contents",
+        "https://example.com",
+        "--set",
+        r#"livecrawl="always""#,
+        "--set",
+        "maxAgeHours=24",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_json(&output);
+    assert_eq!(error["error"]["code"], "invalid_flag_combination");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains("livecrawl"), "{message}");
+    assert!(message.contains("maxAgeHours"), "{message}");
+}
+
+#[test]
 fn search_and_similar_text_share_normalization_boundaries() {
     for command in ["search", "similar"] {
         let mut valid = vec![command, "https://example.com", "--text"];

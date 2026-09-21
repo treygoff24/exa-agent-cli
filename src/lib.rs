@@ -6125,13 +6125,13 @@ fn build_typed_spec(
         request::deep_merge(&mut body, spec.body);
         spec.body = body;
     }
-    validate_snapshot_options(op, &spec.body)?;
+    validate_content_freshness_conflicts(op, &spec.body)?;
     validate_content_options(op, &spec.body)?;
     validate_highlights_beta(op, &spec.body, globals)?;
     Ok(spec)
 }
 
-fn validate_snapshot_options(
+fn validate_content_freshness_conflicts(
     op: &registry::OperationDef,
     body: &serde_json::Value,
 ) -> Result<(), CliError> {
@@ -6140,6 +6140,15 @@ fn validate_snapshot_options(
         "contents" => ("snapshotAsOf", ""),
         _ => return Ok(()),
     };
+    let livecrawl_path = format!("{content_prefix}livecrawl");
+    let max_age_path = format!("{content_prefix}maxAgeHours");
+    if body_field_present(body, &livecrawl_path) && body_field_present(body, &max_age_path) {
+        return Err(option_conflict(
+            &livecrawl_path,
+            &max_age_path,
+            "because `livecrawl` is deprecated; use `maxAgeHours` alone",
+        ));
+    }
     if !body_field_present(body, snapshot_path) {
         return Ok(());
     }
@@ -6147,7 +6156,11 @@ fn validate_snapshot_options(
     for field in ["maxAgeHours", "livecrawl", "livecrawlTimeout", "subpages"] {
         let conflicting_path = format!("{content_prefix}{field}");
         if body_field_present(body, &conflicting_path) {
-            return Err(snapshot_conflict(snapshot_path, &conflicting_path));
+            return Err(option_conflict(
+                snapshot_path,
+                &conflicting_path,
+                "because Snapshot uses stored page versions only",
+            ));
         }
     }
 
@@ -6156,28 +6169,31 @@ fn validate_snapshot_options(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !matches!(*value, "auto" | "fast" | "instant"))
         {
-            return Err(snapshot_conflict(
+            return Err(option_conflict(
                 snapshot_path,
                 &format!("type={search_type}"),
+                "because Snapshot uses stored page versions only",
             ));
         }
         if body_field_present(body, "category") {
-            return Err(snapshot_conflict(snapshot_path, "category"));
+            return Err(option_conflict(
+                snapshot_path,
+                "category",
+                "because Snapshot uses stored page versions only",
+            ));
         }
     }
     Ok(())
 }
 
-fn snapshot_conflict(snapshot_path: &str, conflicting_field: &str) -> CliError {
+fn option_conflict(field: &str, conflicting_field: &str, reason: &str) -> CliError {
     CliError::Usage(
         Diag::new(
             "invalid_flag_combination",
-            format!(
-                "`{snapshot_path}` cannot be combined with `{conflicting_field}` because Snapshot uses stored page versions only"
-            ),
+            format!("`{field}` cannot be combined with `{conflicting_field}` {reason}"),
         )
         .with_details(serde_json::json!({
-            "field": snapshot_path,
+            "field": field,
             "conflictingField": conflicting_field,
         })),
     )

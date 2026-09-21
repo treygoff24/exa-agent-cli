@@ -1367,21 +1367,25 @@ fn classify_http_status_with_payment_mode(
     let upstream_tag = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|value| value.get("tag").and_then(Value::as_str).map(str::to_owned));
-    if matches!(
-        upstream_tag.as_deref(),
-        Some(
-            "SNAPSHOT_NOT_ON_PLAN"
-                | "SNAPSHOT_NOT_IN_CONTRACT"
-                | "SNAPSHOT_TRIAL_EXHAUSTED"
-                | "SNAPSHOT_TRIAL_CAP_EXCEEDED"
+    if matches!(status, 402 | 403)
+        && matches!(
+            upstream_tag.as_deref(),
+            Some(
+                "SNAPSHOT_NOT_ON_PLAN"
+                    | "SNAPSHOT_NOT_IN_CONTRACT"
+                    | "SNAPSHOT_TRIAL_EXHAUSTED"
+                    | "SNAPSHOT_TRIAL_CAP_EXCEEDED"
+            )
         )
-    ) {
+    {
         let mut diag = upstream_error_diag("feature_not_enabled", status, body);
         diag.http_status = Some(status);
         diag.retryable = false;
         return CliError::Auth(diag);
     }
-    if upstream_tag.as_deref() == Some("SNAPSHOT_RATE_LIMIT_EXCEEDED") {
+    if matches!(status, 403 | 429)
+        && upstream_tag.as_deref() == Some("SNAPSHOT_RATE_LIMIT_EXCEEDED")
+    {
         return rate_limit_error(status, body, headers);
     }
     // Credit exhaustion is a billing state, not a bad request, bad key, or rate limit, but only

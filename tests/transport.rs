@@ -576,7 +576,9 @@ fn snapshot_tags_override_their_http_carrier() {
             assert!(!err.diag().retryable, "{status} {tag}");
             assert_eq!(err.diag().http_status, Some(status), "{status} {tag}");
         }
+    }
 
+    for status in [429, 403] {
         let body = br#"{"tag":"SNAPSHOT_RATE_LIMIT_EXCEEDED"}"#;
         let headers = [("Retry-After".to_string(), "3".to_string())];
         let err = classify_http_status(status, body, &headers);
@@ -585,6 +587,19 @@ fn snapshot_tags_override_their_http_carrier() {
         assert!(err.diag().retryable, "{status}");
         assert_eq!(err.diag().http_status, Some(status), "{status}");
         assert_eq!(err.diag().details.as_ref().unwrap()["retryAfterMs"], 3000);
+    }
+
+    for tag in ["SNAPSHOT_NOT_ON_PLAN", "SNAPSHOT_RATE_LIMIT_EXCEEDED"] {
+        let body = serde_json::json!({ "tag": tag }).to_string();
+        let auth = classify_http_status(401, body.as_bytes(), &[]);
+        assert!(matches!(auth, CliError::Auth(_)), "401 {tag}");
+        assert_eq!(auth.diag().code, "reauth_required", "401 {tag}");
+        assert!(!auth.diag().retryable, "401 {tag}");
+
+        let upstream = classify_http_status(503, body.as_bytes(), &[]);
+        assert!(matches!(upstream, CliError::Upstream(_)), "503 {tag}");
+        assert_eq!(upstream.diag().code, "upstream_error", "503 {tag}");
+        assert!(upstream.diag().retryable, "503 {tag}");
     }
 }
 

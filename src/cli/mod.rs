@@ -19,15 +19,12 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Clap cannot represent a local option that shadows a global option name. Keep the
-    /// documented export `--format` spelling by normalizing it to an internal id before Clap
-    /// parses the command tree.
     pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let mut args = normalize_export_format_flag(itr);
+        let mut args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         normalize_bare_contents_text(&mut args);
         <Self as Parser>::try_parse_from(args)
     }
@@ -60,101 +57,6 @@ fn normalize_bare_contents_text(args: &mut [OsString]) {
             args[index] = OsString::from("--text=");
         }
     }
-}
-
-fn normalize_export_format_flag<I, T>(itr: I) -> Vec<OsString>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<OsString> + Clone,
-{
-    // Values of these global options are data, never command words or leaf flags. The scan for
-    // `websets exports create` must skip each one's value or a value like `websets` advances it.
-    const VALUE_TAKING_GLOBALS: &[&str] = &[
-        "-o",
-        "--output",
-        "--format",
-        "--max-output-bytes",
-        "--correlation-id",
-        "--api-key",
-        "--service-key",
-        "--profile",
-        "--base-url",
-        "--header",
-        "--beta",
-        "--timeout",
-        "--connect-timeout",
-        "--max-response-bytes",
-        "--retry",
-        "--idempotency-key",
-        "--input",
-        "--input-format",
-        "--set",
-        "--body",
-        "--preset",
-        "--trace",
-    ];
-    let mut export_create = false;
-    let mut export_format_value_pending = false;
-    let mut export_format_consumed = false;
-    let mut command_parts = 0usize;
-    // Give up on the first positional that cannot be part of `websets exports create`, rather
-    // than restarting the match. Restarting made the rewrite latch onto the token run wherever
-    // it appeared — including `contents websets exports create` positionals.
-    let mut abandoned = false;
-    let mut index = 0usize;
-    let mut previous_was_flag = false;
-    itr.into_iter()
-        .map(Into::into)
-        .map(|arg| {
-            let text = arg.to_string_lossy();
-            if export_create && text == "--" {
-                export_format_consumed = true;
-                return arg;
-            }
-            if !export_create {
-                let is_flag = text.starts_with('-');
-                let was_flag = previous_was_flag;
-                previous_was_flag =
-                    is_flag && !text.contains('=') && VALUE_TAKING_GLOBALS.contains(&text.as_ref());
-                // argv[0] is the binary name, never part of the command path.
-                let skip = index == 0;
-                index += 1;
-                if abandoned || skip || is_flag {
-                    return arg;
-                }
-                // A token bound to the preceding value-taking global is data, never a command
-                // word — checked BEFORE the command arms so `--profile websets` can't advance
-                // the match (it used to, leaving `--format csv` parsed as the global format).
-                if was_flag {
-                    return arg;
-                }
-                match (command_parts, text.as_ref()) {
-                    (0, "websets") => command_parts = 1,
-                    (1, "exports") => command_parts = 2,
-                    (2, "create") => export_create = true,
-                    _ => abandoned = true,
-                }
-                return arg;
-            }
-            if export_format_value_pending {
-                export_format_value_pending = false;
-                export_format_consumed = true;
-                return arg;
-            }
-            if export_format_consumed {
-                return arg;
-            }
-            if text == "--format" {
-                export_format_value_pending = true;
-                return OsString::from("--export-format");
-            }
-            if let Some(value) = text.strip_prefix("--format=") {
-                export_format_consumed = true;
-                return OsString::from(format!("--export-format={value}"));
-            }
-            arg
-        })
-        .collect()
 }
 
 impl std::fmt::Debug for Cli {
@@ -1301,11 +1203,6 @@ pub enum WebsetsCmd {
         #[command(subcommand)]
         sub: WebsetsEnrichmentsCmd,
     },
-    /// Webset exports.
-    Exports {
-        #[command(subcommand)]
-        sub: WebsetsExportsCmd,
-    },
     /// CSV imports.
     Imports {
         #[command(subcommand)]
@@ -1487,42 +1384,6 @@ pub enum WebsetsEnrichmentsCmd {
     Cancel {
         webset_id: String,
         enrichment_id: String,
-    },
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[value(rename_all = "lower")]
-pub enum WebsetExportFormat {
-    Csv,
-    Json,
-}
-
-impl WebsetExportFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WebsetExportFormat::Csv => "csv",
-            WebsetExportFormat::Json => "json",
-        }
-    }
-}
-
-#[derive(Subcommand, Debug)]
-pub enum WebsetsExportsCmd {
-    /// POST /websets/v0/websets/{webset}/exports [create-POST].
-    Create {
-        webset_id: String,
-        #[arg(
-            long = "export-format",
-            value_enum,
-            ignore_case = true,
-            help = "Export file format (csv|json). On this command --format selects the export format, so the global --format envelope selector is unavailable here: choose the envelope shape with --json or --ndjson (or EXA_OUTPUT)."
-        )]
-        export_format: Option<WebsetExportFormat>,
-    },
-    /// GET /websets/v0/websets/{webset}/exports/{id}.
-    Get {
-        webset_id: String,
-        export_id: String,
     },
 }
 
@@ -2088,10 +1949,6 @@ pub(crate) fn websets_command_path(sub: &WebsetsCmd) -> String {
             WebsetsEnrichmentsCmd::Update { .. } => "websets enrichments update".to_string(),
             WebsetsEnrichmentsCmd::Delete { .. } => "websets enrichments delete".to_string(),
             WebsetsEnrichmentsCmd::Cancel { .. } => "websets enrichments cancel".to_string(),
-        },
-        WebsetsCmd::Exports { sub } => match sub {
-            WebsetsExportsCmd::Create { .. } => "websets exports create".to_string(),
-            WebsetsExportsCmd::Get { .. } => "websets exports get".to_string(),
         },
         WebsetsCmd::Imports { sub } => match sub {
             WebsetsImportsCmd::Create { .. } => "websets imports create".to_string(),

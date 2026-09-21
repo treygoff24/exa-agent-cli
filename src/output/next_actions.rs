@@ -7,7 +7,6 @@ use crate::{has_more, next_cursor, redaction, shell_quote, transport};
 pub(crate) fn append_operation_next_actions(
     envelope: &mut serde_json::Value,
     operation: &registry::OperationDef,
-    webset_id: Option<&str>,
     globals: &GlobalArgs,
 ) -> Result<(), CliError> {
     let Some(data) = envelope.get("data") else {
@@ -96,20 +95,6 @@ pub(crate) fn append_operation_next_actions(
                         shell_quote(import_id.unwrap_or("<id>"))
                     )),
                 ));
-            }
-        }
-        "websets exports create" => {
-            let Some(webset_id) = webset_id else {
-                return Ok(());
-            };
-            if let Some(export_id) = id.as_deref() {
-                push_resource_next_action(
-                    envelope,
-                    "Poll export status",
-                    "websets exports get",
-                    &[webset_id.to_string(), export_id.to_string()],
-                    globals,
-                );
             }
         }
         _ => {}

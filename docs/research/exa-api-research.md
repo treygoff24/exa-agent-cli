@@ -67,7 +67,6 @@ Websets are a full async product surface, not a minor search option. Coverage sh
 - Webhooks: create, list, get, update, delete, attempts list.
 - Events: list/get.
 - Team info: `/v0/teams/me`.
-- Exports: docs mention schedule/get export even though the downloaded Websets OpenAPI snapshot did not list the endpoints. Treat exports as docs-confirmed/spec-drift and runtime-validate before implementation.
 
 Key Websets constraints/semantics from docs:
 
@@ -168,11 +167,10 @@ Pricing/cost:
 Known drift or uncertainty:
 
 1. Exa has multiple spec surfaces: docs OpenAPI JSON/YAML, GitHub `exa-openapi-spec.yaml`, GitHub `exa-websets-spec.yaml`, and docs-only pages. They do not perfectly match.
-2. Websets exports are in docs/index and coding-agent guide but not in the downloaded Websets spec snapshot.
-3. Research appears as `/research/v1` in current docs and `/research/v0/tasks` in the GitHub Search spec snapshot.
-4. OpenAI `/responses` model naming should be live-tested; some snippets mention different names.
-5. Team Management `rateLimit` wording should be runtime-verified if possible, though the spec says requests per second.
-6. It is not documented whether Exa returns `Retry-After` on 429.
-7. It is not documented whether create API key returns a raw secret once; docs examples show metadata only.
+2. Research appears as `/research/v1` in current docs and `/research/v0/tasks` in the GitHub Search spec snapshot.
+3. OpenAI `/responses` model naming should be live-tested; some snippets mention different names.
+4. Team Management `rateLimit` wording should be runtime-verified if possible, though the spec says requests per second.
+5. It is not documented whether Exa returns `Retry-After` on 429.
+6. It is not documented whether create API key returns a raw secret once; docs examples show metadata only.
 
 Implementation should therefore embed a spec snapshot but include `schema refresh --check`, `raw`, `--body`, and `--set` escape hatches.

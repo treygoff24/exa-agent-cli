@@ -11,8 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-// Wave 1 removes retired Research; Wave 2 exports raise this to 67; Batch/stop raise it to 73.
-const EXPECTED_OP_COUNT: usize = 73;
+// Retired Research and Websets export routes are absent; Batch/stop bring the surface to 71.
+const EXPECTED_OP_COUNT: usize = 71;
 const MANIFEST: &str = "tests/request_corpus/manifest.toml";
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +60,6 @@ const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
         "enrichment-format",
         ConstraintKind::Enum,
     ),
-    ("websets-exports-create", "format", ConstraintKind::Enum),
 ];
 
 #[test]

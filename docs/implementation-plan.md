@@ -68,7 +68,6 @@ Implement:
 
 - Top-level `monitor` family.
 - Websets core, items, searches, enrichments, imports, monitors, events, webhooks.
-- Exports if runtime validation confirms exact endpoints.
 - Webhook signature guidance in robot-docs/doctor.
 
 Acceptance:

@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Removed
+
+- Removed `websets exports create` and `websets exports get` because Exa no longer
+  documents or ships their routes and a live probe returned a route-level 404. A stale
+  `websets exports ...` invocation now fails as an unrecognized subcommand; there is no
+  replacement command.
+
 ## 0.7.0 — 2026-09-21
 
 ### Added

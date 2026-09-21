@@ -75,7 +75,6 @@ Structured successes are JSON envelopes with `ok`, `data`, `warnings`, and `next
 ## Websets
 - Include a Webset's items with `exa-agent websets get WEBSET --expand items`.
 - Create an import, then use the upload PUT template in its returned `nextActions`; `websets imports create` accepts neither `--csv` nor `--url`.
-- Create and retrieve exports with `exa-agent websets exports create WEBSET --format csv|json`, then `exa-agent websets exports get WEBSET EXPORT_ID`. These routes are absent from the current Exa SDKs and may have been retired, so the commands emit an `undocumented_upstream` warning.
 
 ## Config and limits
 - Set `EXA_AGENT_NO_NETWORK` to any value, including empty, to refuse live typed, raw, streaming, `auth test`/`status`, `schema refresh --check`, and `doctor --online` calls before credential resolution and transport. Unset it to allow live calls; dry-run and self-description remain available while it is set.

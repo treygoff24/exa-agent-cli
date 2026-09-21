@@ -31,11 +31,11 @@ use cli::{
     ConfigProfilesCmd, ContentsArgs, ContextArgs, FetchArgs, GlobalArgs, GroupBy, MacroCmd,
     MonitorBatchArgs, MonitorCmd, MonitorCreateArgs, MonitorListArgs, MonitorRunsCmd,
     PaginationArgs, PresetCmd, ResearchCmd, RobotDocsCmd, SchemaCmd, SearchArgs, SimilarArgs,
-    TeamCmd, WebsetEnrichmentFormat, WebsetExportFormat, WebsetsCmd, WebsetsCreateArgs,
-    WebsetsEventsListArgs, WebsetsExportsCmd, WebsetsGetArgs, WebsetsImportsCmd, WebsetsListArgs,
-    WebsetsMonitorsCreateArgs, WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs,
-    WebsetsPreviewArgs, WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs,
-    WebsetsWebhooksUpdateArgs, SEARCH_CATEGORY_VALUES,
+    TeamCmd, WebsetEnrichmentFormat, WebsetsCmd, WebsetsCreateArgs, WebsetsEventsListArgs,
+    WebsetsGetArgs, WebsetsImportsCmd, WebsetsListArgs, WebsetsMonitorsCreateArgs,
+    WebsetsMonitorsListArgs, WebsetsMonitorsUpdateArgs, WebsetsPreviewArgs,
+    WebsetsWebhookAttemptsListArgs, WebsetsWebhooksCreateArgs, WebsetsWebhooksUpdateArgs,
+    SEARCH_CATEGORY_VALUES,
 };
 use error::{CliError, Diag};
 use output::envelope::{
@@ -106,7 +106,6 @@ struct TypedExecution<'a> {
 struct LiveExtras<'a> {
     secret_output: Option<SecretOutputReservation>,
     extra_warnings: &'a [serde_json::Value],
-    next_action_webset_id: Option<&'a str>,
 }
 
 /// The one `websets imports create` invocation that actually succeeds. Both the rejected
@@ -1080,7 +1079,7 @@ fn display_arg(arg: &str) -> String {
     }
 }
 
-/// The full command path from a clap usage line, e.g. `websets exports create`.
+/// The full command path from a clap usage line, e.g. `websets imports create`.
 fn command_path_from_error(e: &clap::Error) -> Option<String> {
     use clap::error::ContextKind;
     let usage = clap_ctx_strings(e, ContextKind::Usage)
@@ -2283,7 +2282,6 @@ fn dispatch_admin_keys_create(
             LiveExtras {
                 secret_output: Some(secret_output),
                 extra_warnings: &[],
-                ..LiveExtras::default()
             },
         )
     })
@@ -3329,7 +3327,6 @@ fn dispatch_monitor_create(
             LiveExtras {
                 secret_output,
                 extra_warnings: &extra_warnings,
-                ..LiveExtras::default()
             },
         )
     })
@@ -3918,7 +3915,6 @@ fn dispatch_websets(sub: &WebsetsCmd, globals: &GlobalArgs, pretty: bool) -> Res
         WebsetsCmd::Items { sub } => dispatch_websets_items(sub, globals, pretty),
         WebsetsCmd::Searches { sub } => dispatch_websets_searches(sub, globals, pretty),
         WebsetsCmd::Enrichments { sub } => dispatch_websets_enrichments(sub, globals, pretty),
-        WebsetsCmd::Exports { sub } => dispatch_websets_exports(sub, globals, pretty),
         WebsetsCmd::Imports { sub } => dispatch_websets_imports(sub, globals, pretty),
         WebsetsCmd::Monitors { sub } => dispatch_websets_monitors(sub, globals, pretty),
         WebsetsCmd::Events { sub } => dispatch_websets_events(sub, globals, pretty),
@@ -4141,87 +4137,6 @@ fn dispatch_websets_get(
             false,
             None,
         )
-    })
-}
-
-fn dispatch_websets_exports(
-    sub: &WebsetsExportsCmd,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    match sub {
-        WebsetsExportsCmd::Create {
-            webset_id,
-            export_format,
-        } => dispatch_websets_exports_create(webset_id, *export_format, globals, pretty),
-        WebsetsExportsCmd::Get {
-            webset_id,
-            export_id,
-        } => dispatch_websets_exports_get(webset_id, export_id, globals, pretty),
-    }
-}
-
-fn dispatch_websets_exports_create(
-    webset_id: &str,
-    format: Option<WebsetExportFormat>,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["websets", "exports", "create"])
-        .expect("websets exports create is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(
-            op,
-            &[(
-                "format",
-                Some(
-                    format
-                        .map(|format| format.as_str().to_string())
-                        .unwrap_or_default(),
-                ),
-            )],
-            globals,
-        )?;
-        let format_missing = match spec.body.get("format") {
-            None | Some(serde_json::Value::Null) => true,
-            Some(value) => value.as_str().is_some_and(str::is_empty),
-        };
-        if format_missing {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "missing_required_argument",
-                    "websets exports create requires format (via --format, --body, or --set)",
-                )
-                .with_suggestion("exa-agent websets exports create <webset> --format csv"),
-            ));
-        }
-        let path = checked_substitute_path(op.api_path, &[("webset", webset_id)])?;
-        dispatch_typed_command_with_next_action_context(
-            spec,
-            globals,
-            pretty,
-            TypedDispatchOptions {
-                path_override: Some(path.as_str()),
-                ..TypedDispatchOptions::default()
-            },
-            webset_id,
-        )
-    })
-}
-
-fn dispatch_websets_exports_get(
-    webset_id: &str,
-    export_id: &str,
-    globals: &GlobalArgs,
-    pretty: bool,
-) -> Result<i32, CliError> {
-    let op = registry::lookup_by_segments(&["websets", "exports", "get"])
-        .expect("websets exports get is in registry");
-    with_typed_error_context(op, globals, || {
-        let spec = build_typed_spec(op, &[], globals)?;
-        let path =
-            checked_substitute_path(op.api_path, &[("webset", webset_id), ("id", export_id)])?;
-        dispatch_typed_command_routed(spec, globals, pretty, Some(path.as_str()), &[], false, None)
     })
 }
 
@@ -5471,7 +5386,6 @@ fn dispatch_websets_webhooks_create(
             LiveExtras {
                 secret_output,
                 extra_warnings: &extra_warnings,
-                ..LiveExtras::default()
             },
         )
     })
@@ -6399,25 +6313,6 @@ fn dispatch_typed_command_routed(
             sse_accept,
             extra_headers,
             ..TypedDispatchOptions::default()
-        },
-    )
-}
-
-fn dispatch_typed_command_with_next_action_context(
-    spec: request::RequestSpec,
-    globals: &GlobalArgs,
-    pretty: bool,
-    options: TypedDispatchOptions<'_>,
-    webset_id: &str,
-) -> Result<i32, CliError> {
-    dispatch_typed_command_with_extras(
-        spec,
-        globals,
-        pretty,
-        options,
-        LiveExtras {
-            next_action_webset_id: Some(webset_id),
-            ..LiveExtras::default()
         },
     )
 }
@@ -7698,8 +7593,6 @@ fn execute_typed_live<T: Transport>(
                 globals,
                 execution.request_id,
                 execution.route.path,
-                extras.next_action_webset_id,
-                &body,
             )),
         };
     }
@@ -7725,8 +7618,6 @@ fn execute_typed_live<T: Transport>(
                 globals,
                 execution.request_id,
                 execution.route.path,
-                extras.next_action_webset_id,
-                &body,
             ));
         }
     };
@@ -7870,12 +7761,7 @@ fn render_typed_live_with(
         execution.route.query,
         globals,
     );
-    append_operation_next_actions(
-        &mut envelope,
-        spec.op,
-        extras.next_action_webset_id,
-        globals,
-    )?;
+    append_operation_next_actions(&mut envelope, spec.op, globals)?;
     emit(&mut envelope)?;
     Ok(exit_code)
 }
@@ -8197,17 +8083,15 @@ fn maybe_record_pending_run_on_create_failure(
     globals: &GlobalArgs,
     request_id: &str,
     path: &str,
-    webset_id: Option<&str>,
-    body: &serde_json::Value,
 ) -> CliError {
     if !should_write_pending_run(&err, spec, globals) {
         return err;
     }
 
     let recovery = if err.diag().code == "response_too_large" {
-        oversized_create_recovery_command(spec.op, webset_id)
+        oversized_create_recovery_command(spec.op)
     } else {
-        pending_recovery_command(spec.op, webset_id, body)
+        pending_recovery_command(spec.op)
     };
     let (suggested, recovery_context_required) = match scoped_recovery_command(&recovery, globals) {
         Some(scoped) => (scoped, false),
@@ -8246,33 +8130,16 @@ fn should_write_pending_run(
         )
 }
 
-fn pending_recovery_command(
-    op: &'static registry::OperationDef,
-    webset_id: Option<&str>,
-    body: &serde_json::Value,
-) -> String {
+fn pending_recovery_command(op: &'static registry::OperationDef) -> String {
     match op.command().as_str() {
         "websets create" => "exa-agent websets list --limit 10".to_string(),
         "agent runs create" => "exa-agent agent runs list --limit 10".to_string(),
         "batches create" => "exa-agent batches list --limit 10".to_string(),
-        "websets exports create" => format!(
-            "exa-agent websets exports create {} --format {} --idempotency-key <stable-key>",
-            webset_id
-                .map(shell_quote)
-                .unwrap_or_else(|| "<webset-id>".to_string()),
-            body.get("format")
-                .and_then(serde_json::Value::as_str)
-                .map(shell_quote)
-                .unwrap_or_else(|| "<format>".to_string()),
-        ),
         other => format!("exa-agent {other} --idempotency-key <stable-key>"),
     }
 }
 
-fn oversized_create_recovery_command(
-    op: &registry::OperationDef,
-    webset_id: Option<&str>,
-) -> String {
+fn oversized_create_recovery_command(op: &registry::OperationDef) -> String {
     let command = op.command();
     let list = format!(
         "{} list",
@@ -8281,10 +8148,7 @@ fn oversized_create_recovery_command(
     if registry::lookup_by_command(&list).is_some() {
         return format!("exa-agent {list}");
     }
-    match webset_id {
-        Some(id) => format!("exa-agent websets get {}", shell_quote(id)),
-        None => "exa-agent websets list --limit 10".to_owned(),
-    }
+    "exa-agent websets list --limit 10".to_owned()
 }
 
 fn attach_pending_run_details(
@@ -8500,19 +8364,6 @@ fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json
         return vec![serde_json::json!({
             "code": "undocumented_upstream",
             "message": "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.",
-        })];
-    }
-    if matches!(
-        op.operation_id,
-        "websets-exports-create" | "websets-exports-get"
-    ) {
-        return vec![serde_json::json!({
-            "code": "undocumented_upstream",
-            "message": format!(
-                "The upstream route `{}` for `{}` is undocumented as of 2026-09-21 and may have been retired.",
-                op.api_path,
-                op.command(),
-            ),
         })];
     }
     if !op.deprecated {
@@ -9446,7 +9297,6 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
         &[
             "Include a Webset's items with `exa-agent websets get WEBSET --expand items`.",
             "Create an import, then use the upload PUT template in its returned `nextActions`; `websets imports create` accepts neither `--csv` nor `--url`.",
-            "Create and retrieve exports with `exa-agent websets exports create WEBSET --format csv|json`, then `exa-agent websets exports get WEBSET EXPORT_ID`. These routes are absent from the current Exa SDKs and may have been retired, so the commands emit an `undocumented_upstream` warning.",
         ],
     ),
     (
@@ -11695,13 +11545,13 @@ mod tests {
 
         let mut warning_first = envelope();
         append_warning_next_actions(&mut warning_first);
-        append_operation_next_actions(&mut warning_first, operation, None, &globals)
+        append_operation_next_actions(&mut warning_first, operation, &globals)
             .expect("create follow-ups");
 
         // The generators run in this order today. Neither may own `nextActions` outright, or a
         // future reorder would silently drop the other's follow-ups.
         let mut create_first = envelope();
-        append_operation_next_actions(&mut create_first, operation, None, &globals)
+        append_operation_next_actions(&mut create_first, operation, &globals)
             .expect("create follow-ups");
         append_warning_next_actions(&mut create_first);
 
@@ -12535,7 +12385,6 @@ mod tests {
             LiveExtras {
                 secret_output: Some(reservation),
                 extra_warnings: &[],
-                ..LiveExtras::default()
             },
         )
         .unwrap();
@@ -12627,7 +12476,6 @@ mod tests {
             LiveExtras {
                 secret_output: Some(reservation),
                 extra_warnings: &[],
-                ..LiveExtras::default()
             },
         )
         .unwrap_err();

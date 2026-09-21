@@ -4,7 +4,7 @@ An agent-first command-line interface over the full [Exa](https://exa.ai) API.
 
 Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
-`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as a single self-contained Rust binary (the Linux musl artifacts are fully static). It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
+`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the Websets tree, and team/key administration — as a single self-contained Rust binary (the Linux musl artifacts are fully static). It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
 
 The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
 
@@ -171,7 +171,7 @@ exa-agent schema --help         # embedded API/CLI schema
 exa-agent doctor                # offline health checks (add --online for a live probe)
 ```
 
-`capabilities` lists all 73 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
+`capabilities` lists all 71 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
 
 ### Agent skill
 
@@ -195,7 +195,7 @@ commands still work.
 - **Batches** — `batches create|list|get|cancel|delete` (alias `batch`) runs `/search` and `/agent/runs` requests asynchronously. Typed batch commands add the required beta token. Access depends on your team's Batch API entitlement.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
-- **Websets** — websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events. The retained exports commands warn that their routes are undocumented upstream as of 2026-09-21 and may have been retired.
+- **Websets** — websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.

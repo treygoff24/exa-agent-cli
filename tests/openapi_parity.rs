@@ -592,10 +592,9 @@ fn externally_sourced_required(operation_id: &str) -> &'static [&'static str] {
 
 fn known_skips() -> BTreeSet<&'static str> {
     [
-        // Docs-only overlay-defined commands; no upstream OpenAPI JSON requestBody
+        // Docs-only overlay-defined command; no upstream OpenAPI JSON requestBody
         // schema exists to compare.
         "context",
-        "websets-exports-create",
     ]
     .into_iter()
     .collect()

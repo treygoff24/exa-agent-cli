@@ -128,7 +128,7 @@ Typed commands over the Phase-1 spine: `search` (`/search`), `contents` (`/conte
 
 ## Phase 4 — Monitors & Websets
 
-Top-level `monitor` family; `websets` core/items/searches/enrichments/imports/monitors/events/webhooks (all first-class in the spec per D22). `exports` only if runtime validation confirms the endpoints (else `raw` + a note in `DISCREPANCIES.md`).
+Top-level `monitor` family; `websets` core/items/searches/enrichments/imports/monitors/events/webhooks (all first-class in the spec per D22).
 
 **Deliverables**
 - Full `websets` tree, all over the same registry + spine.

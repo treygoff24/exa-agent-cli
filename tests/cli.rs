@@ -7718,21 +7718,6 @@ fn parse_websets_representative_nested() {
     assert_path(&["websets", "list"], "websets list");
     assert_path(&["websets", "get", "webset_abc"], "websets get");
     assert_path(
-        &[
-            "websets",
-            "exports",
-            "create",
-            "webset_abc",
-            "--format",
-            "csv",
-        ],
-        "websets exports create",
-    );
-    assert_path(
-        &["websets", "exports", "get", "webset_abc", "export_abc"],
-        "websets exports get",
-    );
-    assert_path(
         &["websets", "items", "list", "webset_abc"],
         "websets items list",
     );
@@ -7761,39 +7746,7 @@ fn parse_websets_representative_nested() {
 }
 
 #[test]
-fn argument_normalizers_preserve_global_values_and_end_markers() {
-    let cli = exa_agent_cli::cli::Cli::try_parse_from([
-        "exa-agent",
-        "--preset",
-        "contents",
-        "websets",
-        "exports",
-        "create",
-        "ws_abc",
-        "--format",
-        "csv",
-    ])
-    .unwrap();
-    assert_eq!(cli.globals.preset.as_deref(), Some("contents"));
-    assert_eq!(
-        exa_agent_cli::cli::command_path(&cli.command),
-        "websets exports create"
-    );
-
-    let output = run_ok_json(&[
-        "websets",
-        "exports",
-        "create",
-        "--body",
-        r#"{"format":"csv"}"#,
-        "--dry-run",
-        "--",
-        "--format",
-    ]);
-    assert_eq!(
-        output["data"]["request"]["path"],
-        "/websets/v0/websets/--format/exports"
-    );
+fn bare_contents_text_normalizer_preserves_end_markers_and_global_values() {
     let cli = exa_agent_cli::cli::Cli::try_parse_from([
         "exa-agent",
         "contents",
@@ -8667,167 +8620,6 @@ fn websets_imports_body_first_create_list_get_update_delete_shapes() {
 
     let delete_live = run(&["websets", "imports", "delete", "imp_abc", "--compact"]);
     assert_eq!(delete_live.status.code(), Some(9));
-}
-
-#[test]
-fn websets_exports_preview_and_live_next_action() {
-    let help = run(&["websets", "exports", "create", "--help"]);
-    assert!(help.status.success());
-    let help = String::from_utf8_lossy(&help.stdout);
-    assert!(help.contains("--format"));
-    assert!(!help.contains("--export-format"));
-    assert!(help.contains("Export file format (csv|json)."));
-    assert_eq!(
-        help.lines()
-            .filter(|line| line.trim_start().starts_with("--format "))
-            .count(),
-        1
-    );
-
-    let invalid = run(&[
-        "websets",
-        "exports",
-        "create",
-        "ws_abc",
-        "--format",
-        "ndjson",
-        "--compact",
-    ]);
-    assert_eq!(invalid.status.code(), Some(1));
-    let invalid_error = stderr_json(&invalid);
-    assert_eq!(invalid_error["error"]["code"], "invalid_value");
-    let invalid_message = invalid_error["error"]["message"].as_str().unwrap();
-    assert!(invalid_message.contains("--format"));
-    assert!(invalid_message.contains("csv"));
-    assert!(invalid_message.contains("json"));
-    assert!(!String::from_utf8_lossy(&invalid.stderr).contains("--export-format"));
-
-    let missing = run(&["websets", "exports", "create", "ws_abc", "--compact"]);
-    assert_eq!(missing.status.code(), Some(1));
-    let missing_error = stderr_json(&missing);
-    assert_eq!(missing_error["error"]["code"], "missing_required_argument");
-    let missing_message = missing_error["error"]["message"].as_str().unwrap();
-    assert!(missing_message.contains("--format"));
-    assert!(missing_message.contains("--body"));
-    assert!(missing_message.contains("--set"));
-    assert!(!String::from_utf8_lossy(&missing.stderr).contains("--export-format"));
-
-    let create = run_ok_json(&[
-        "websets",
-        "exports",
-        "create",
-        "ws_abc",
-        "--format",
-        "JSON",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(create["command"], "websets exports create");
-    assert_eq!(create["data"]["request"]["method"], "POST");
-    assert_eq!(
-        create["data"]["request"]["path"],
-        "/websets/v0/websets/ws_abc/exports"
-    );
-    assert_eq!(create["data"]["request"]["body"]["format"], "json");
-    assert_eq!(create["warnings"][0]["code"], "undocumented_upstream");
-
-    let body_format = run_ok_json(&[
-        "websets",
-        "exports",
-        "create",
-        "ws_abc",
-        "--body",
-        r#"{"format":"csv"}"#,
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(body_format["data"]["request"]["body"]["format"], "csv");
-
-    let later_global_format = run_ok_json(&[
-        "websets",
-        "exports",
-        "create",
-        "ws_abc",
-        "--format",
-        "csv",
-        "--format",
-        "json",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(
-        later_global_format["data"]["request"]["body"]["format"],
-        "csv"
-    );
-
-    let get = run_ok_json(&[
-        "websets",
-        "exports",
-        "get",
-        "ws_abc",
-        "export_abc",
-        "--dry-run",
-        "--compact",
-    ]);
-    assert_eq!(get["command"], "websets exports get");
-    assert_eq!(get["data"]["request"]["method"], "GET");
-    assert_eq!(
-        get["data"]["request"]["path"],
-        "/websets/v0/websets/ws_abc/exports/export_abc"
-    );
-    assert!(get["data"]["request"]["body"].is_null());
-    assert_eq!(get["warnings"][0]["code"], "undocumented_upstream");
-
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/websets/exports-create.json")).unwrap();
-    let response = Box::leak(
-        fixture["upstream"]
-            .to_string()
-            .into_bytes()
-            .into_boxed_slice(),
-    );
-    let expected_format = fixture["expected"]["format"].as_str().unwrap().to_string();
-    let (base_url, server) = local_json_server(
-        move |request| {
-            assert!(
-                request.starts_with("POST /websets/v0/websets/ws%2Fabc/exports "),
-                "unexpected export request:\n{request}"
-            );
-            let (_, body) = request
-                .split_once("\r\n\r\n")
-                .expect("request headers and body");
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(body).unwrap(),
-                serde_json::json!({"format": expected_format})
-            );
-        },
-        response,
-    );
-    let output = run_owned(&[
-        "websets".into(),
-        "exports".into(),
-        "create".into(),
-        "ws/abc".into(),
-        "--format".into(),
-        "csv".into(),
-        "--base-url".into(),
-        base_url.clone(),
-        "--api-key".into(),
-        "test-key-abcdef12".into(),
-        "--compact".into(),
-    ]);
-    server.join().expect("local export server panicked");
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let live: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        live["nextActions"][0]["command"],
-        format!("exa-agent websets exports get --json --base-url={base_url} -- ws/abc export/123")
-    );
 }
 
 #[test]
@@ -11225,81 +11017,6 @@ fn contents_highlights_json_is_validated_rather_than_demoted_to_a_query() {
     );
 }
 
-/// The rewrite used to latch onto the `websets exports create` token run anywhere in argv, so
-/// these positional URLs silently became an export-format rewrite.
-#[test]
-fn export_format_rewrite_ignores_matching_positional_arguments() {
-    let output = run(&[
-        "contents",
-        "websets",
-        "exports",
-        "create",
-        "--format",
-        "ndjson",
-        "--dry-run",
-        "--print-request",
-        "--compact",
-    ]);
-    assert!(
-        output.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(preview["command"], "contents");
-
-    let export = run(&[
-        "websets",
-        "exports",
-        "create",
-        "ws_1",
-        "--format",
-        "csv",
-        "--dry-run",
-        "--print-request",
-        "--compact",
-    ]);
-    assert!(
-        export.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&export.stderr)
-    );
-    let preview: serde_json::Value = serde_json::from_slice(&export.stdout).unwrap();
-    assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
-
-    let profiled = run(&[
-        "--profile",
-        "default",
-        "websets",
-        "exports",
-        "create",
-        "ws_1",
-        "--format",
-        "csv",
-        "--dry-run",
-        "--print-request",
-        "--compact",
-    ]);
-    assert!(profiled.status.success(), "{profiled:?}");
-    let preview: serde_json::Value = serde_json::from_slice(&profiled.stdout).unwrap();
-    assert_eq!(preview["data"]["request"]["body"]["format"], "csv");
-
-    let search = run(&[
-        "search",
-        "websets exports create",
-        "--dry-run",
-        "--print-request",
-        "--compact",
-    ]);
-    assert!(search.status.success(), "{search:?}");
-    let preview: serde_json::Value = serde_json::from_slice(&search.stdout).unwrap();
-    assert_eq!(preview["command"], "search");
-    assert_eq!(
-        preview["data"]["request"]["body"]["query"],
-        "websets exports create"
-    );
-}
-
 #[test]
 fn empty_positional_ids_are_refused_before_the_path_is_built() {
     let output = run(&["websets", "get", "", "--expand", "items", "--compact"]);
@@ -11316,20 +11033,5 @@ fn rejected_enum_values_come_back_as_a_runnable_command() {
     assert_eq!(
         stderr_json(&expand)["error"]["suggestedCommand"],
         "exa-agent websets get item --expand items --compact"
-    );
-
-    let format = run(&[
-        "websets",
-        "exports",
-        "create",
-        "ws_1",
-        "--format",
-        "parquet",
-        "--compact",
-    ]);
-    assert_eq!(format.status.code(), Some(1));
-    assert_eq!(
-        stderr_json(&format)["error"]["suggestedCommand"],
-        "exa-agent websets exports create ws_1 --format csv --compact"
     );
 }

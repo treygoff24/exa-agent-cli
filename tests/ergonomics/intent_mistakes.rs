@@ -309,18 +309,17 @@ fn corrected_commands_preserve_at_file_body_without_omitted_flags() {
 
     let rejected_value = error_json(&[
         "websets",
-        "exports",
+        "imports",
         "create",
-        "ws_1",
-        "--format",
-        "jsonn",
+        "--sourc",
+        "csv",
         "--body",
         "@request.json",
         "--compact",
     ]);
     assert_eq!(
         rejected_value["error"]["suggestedCommand"],
-        "exa-agent websets exports create ws_1 --format json --body @request.json --compact"
+        "exa-agent websets imports create --source csv --body @request.json --compact"
     );
     assert!(rejected_value["error"]["details"]
         .get("omittedFlags")
@@ -376,28 +375,27 @@ fn non_recovery_clap_errors_do_not_report_omitted_flags() {
 }
 
 #[test]
-fn rejected_value_recovery_reports_sanitized_omitted_flags_without_leaks() {
+fn unknown_flag_recovery_reports_sanitized_omitted_flags_without_leaks() {
     let json = error_json(&[
         "--api-key",
         "API_SECRET_CANARY",
         "--header",
         "x-extra: HEADER_SECRET_CANARY",
         "websets",
-        "exports",
+        "imports",
         "create",
-        "ws_1",
-        "--format",
-        "jsonn",
+        "--sourc",
+        "csv",
         "--set",
         "token=SET_SECRET_CANARY",
         "--body",
         r#"{"token":"BODY_SECRET_CANARY"}"#,
         "--compact",
     ]);
-    assert_eq!(json["error"]["code"], "invalid_value");
+    assert_eq!(json["error"]["code"], "unknown_flag");
     assert_eq!(
         json["error"]["suggestedCommand"],
-        "exa-agent websets exports create ws_1 --format json --compact"
+        "exa-agent websets imports create --source csv --compact"
     );
     assert_eq!(
         json["error"]["details"]["omittedFlags"],

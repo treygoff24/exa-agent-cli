@@ -20,7 +20,6 @@ fn registry_idempotency_matches_contract_create_list() {
         "webhooks-create",
         "websets-create",
         "websets-enrichments-create",
-        "websets-exports-create",
         "websets-searches-create",
     ];
     let mut expected: Vec<&str> = expected.to_vec();
@@ -180,27 +179,15 @@ fn assert_registry_inputs_match_clap(command_path: &str) {
         });
         let arg = match input_kind {
             registry::InputKind::Flag => {
-                let arg = leaf.get_arguments().find(|arg| {
-                    // The format <-> export-format alias is the load-bearing half of normalization.
-                    arg.get_long() == Some(field.flag)
-                        || (command_path == "websets exports create"
-                            && field.flag == "format"
-                            && arg.get_long() == Some("export-format"))
-                });
+                let arg = leaf
+                    .get_arguments()
+                    .find(|arg| arg.get_long() == Some(field.flag));
                 let long = arg.and_then(|arg| arg.get_long()).unwrap_or_else(|| {
                     panic!("{} missing clap long flag for {}", op.command(), field.flag)
                 });
-                let public_long = if command_path == "websets exports create"
-                    && field.flag == "format"
-                    && long == "export-format"
-                {
-                    "format"
-                } else {
-                    long
-                };
                 assert!(flag_input_name_matches_clap_long(
                     field.input_name.expect("flag input name"),
-                    public_long
+                    long
                 ));
                 arg
             }

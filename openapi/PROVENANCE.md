@@ -9,7 +9,7 @@ real Exa surfaces are *not* in any OpenAPI (so they are overlay-defined or raw-o
 |---|---|---|---|
 | `exa-openapi.json` | `https://exa.ai/docs/exa-spec.json` | JSON | `Exa Public API` **2.0.0**, OpenAPI 3.1.0 |
 | `team-management.json` | `https://exa.ai/docs/team-management-spec.yaml` | YAML → normalized to JSON | `Team Management API` **1.0.0**, OpenAPI 3.1.0 |
-| `overlay.toml` | hand-curated from `docs/v2/commands.md` and the Websets API guide | TOML | 70 spec ops mapped (64 public + 6 admin) + 3 overlay-defined (`context`, `websets-exports-create`, `websets-exports-get`) = 73 commands |
+| `overlay.toml` | hand-curated from `docs/v2/commands.md` and the Websets API guide | TOML | 70 spec ops mapped (64 public + 6 admin) + 1 overlay-defined (`context`) = 71 commands |
 
 Operation counts, vendored SHA-256s, source SHA-256s, and verification dates live in
 [`provenance.toml`](provenance.toml) — one machine-readable copy rather than a prose table
@@ -34,7 +34,6 @@ the research copy and is identical — there is no newer published version; "sta
 | Surface | Disposition | Where |
 |---|---|---|
 | `POST /context` (Exa Code) | **overlay-defined** typed command (`exa-agent context`) | `overlay.toml` → `[operations."context"]` |
-| `websets exports` | **overlay-defined** typed commands (`exa-agent websets exports create/get`) | Websets API guide: https://exa.ai/docs/websets/api-guide; `overlay.toml` → `[operations."websets-exports-create"]` / `[operations."websets-exports-get"]` |
 | `POST /chat/completions`, `POST /responses` (OpenAI-compat) | **raw-only** in v1 (D16) | `exa-agent raw POST /chat/completions --body @…` |
 
 ## Payment access modes

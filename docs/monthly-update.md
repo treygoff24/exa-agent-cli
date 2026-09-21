@@ -15,8 +15,8 @@ live.
   `cargo xtask vendor-spec` (write). Rust-only since 0.7.0; no Ruby needed.
 - Withdrawn or added routes show up in the Exa docs (docs.exa.ai changelog
   and API reference) and the official SDKs (`exa-js`, `exa-py` on GitHub),
-  not in the spec diff. Read those every cycle; `/context` and Websets
-  exports were caught this way in 2026-09.
+  not in the spec diff. Read those every cycle; `/context` and the retired
+  Websets routes were caught this way in 2026-09.
 - Papercut search: `papercuts list --all --status open --format md
   --limit 300`, then filter text for `exa-agent`, `exa`, `EXA_API_KEY`;
   tags in use are `exa-agent`, `research`, `research-tools`.
@@ -24,7 +24,7 @@ live.
 ## Build and gate
 
 - Full gate: `EXA_AGENT_NO_NETWORK=1 cargo xtask ci` (fmt, clippy `-D
-  warnings`, tests; 674 tests across 29 suites as of 0.7.0).
+  warnings`, tests; 672 tests across 29 suites after `exa-wl1`).
 - On the devbox cell, build output must live under
   `CARGO_TARGET_DIR=$HOME/.cache/cargo-targets` (the `rustc-gate` hook
   rejects other locations, including `/tmp`).
@@ -58,8 +58,8 @@ live.
 
 ## Last cycle
 
-- 2026-09-21: released 0.7.0 (`2e6038e`, tag `v0.7.0`). Carried forward:
-  bead `exa-wl1` (keep/remove/hide `websets exports create|get`; needs
-  Trey), bead `exa-7fc` (`--dry-run` skips registry range validation;
+- 2026-09-21: released 0.7.0 (`2e6038e`, tag `v0.7.0`). Resolved
+  `exa-wl1` by removing the two retired Websets commands in this commit.
+  Carried forward: bead `exa-7fc` (`--dry-run` skips registry range validation;
   non-string `type` bypasses the Snapshot conflict check), papercut
   `pc2_5d400e3f9250ca3b` (503 fallback guidance, research-skill matter).

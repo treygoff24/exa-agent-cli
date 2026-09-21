@@ -61,9 +61,6 @@ exa-agent
 │   │   ├── update                 # PATCH  /websets/v0/websets/{webset}/enrichments/{id}
 │   │   ├── delete                 # DELETE /websets/v0/websets/{webset}/enrichments/{id}    [--yes]
 │   │   └── cancel                 # POST   /websets/v0/websets/{webset}/enrichments/{id}/cancel [--yes]
-│   ├── exports                    # overlay-defined (docs-only, D40/D17 precedent; added 0.5.0)
-│   │   ├── create                 # POST   /websets/v0/websets/{webset}/exports  --format csv|json  [create-POST]
-│   │   └── get                    # GET    /websets/v0/websets/{webset}/exports/{id}
 │   ├── imports
 │   │   ├── create                 # POST   /websets/v0/imports   (returns uploadUrl)        [create-POST]
 │   │   ├── list                   # GET    /websets/v0/imports
@@ -175,7 +172,6 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `POST/GET/cancel searches` | `exa-agent websets searches create/get/cancel` | `create` is `[create-POST]`. |
 | `POST/GET/PATCH/DELETE/cancel enrichments` | `exa-agent websets enrichments create/get/update/delete/cancel` | `create` is `[create-POST]`. `delete`/`cancel` require `--yes`. |
 | `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl` and a `nextActions` PUT template for the documented upload step (the former `--csv`/`--url` conveniences were removed in 0.5.0 — D40d). `delete` `--yes`. |
-| `POST/GET exports` | `exa-agent websets exports create/get` | Overlay-defined (D40e). `create` requires `--format csv\|json`, is `[create-POST]`, and nextActions → `exports get`. Responses are opaque upstream `data`. |
 | `POST/GET/PATCH/DELETE /websets/v0/monitors` | `exa-agent websets monitors create/list/get/update/delete` | `create` is `[create-POST]`. Distinct from top-level `monitor`. |
 | `GET /websets/v0/monitors/{m}/runs[/id]` | `exa-agent websets monitors runs list/get` | Cursor on list. |
 | `GET /websets/v0/events[/id]` | `exa-agent websets events list/get` | List: cursor, `--type`, `--created-before/after`. |
@@ -517,10 +513,6 @@ exa-agent websets enrichments get    WEBSET ENRICHMENT_ID
 exa-agent websets enrichments update WEBSET ENRICHMENT_ID --set path=value
 exa-agent websets enrichments delete WEBSET ENRICHMENT_ID --yes
 exa-agent websets enrichments cancel WEBSET ENRICHMENT_ID --yes
-
-# exports
-exa-agent websets exports create WEBSET --format csv|json       # [create-POST]
-exa-agent websets exports get    WEBSET EXPORT_ID
 
 # imports
 exa-agent websets imports create --set format=csv …                 # [create-POST]; returns uploadUrl + nextActions PUT template (D40d)

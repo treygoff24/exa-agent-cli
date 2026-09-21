@@ -37,8 +37,7 @@ exa
 │   ├── imports create|list|get|update|delete
 │   ├── monitors create|list|get|update|delete|runs list|get
 │   ├── webhooks create|list|get|update|delete|attempts list
-│   ├── events list|get
-│   └── exports schedule|get       # docs-confirmed; runtime/spec validation needed
+│   └── events list|get
 ├── team info                      # /v0/teams/me
 ├── admin keys                     # Team Management API, separate service-key auth
 │   └── create|list|get|update|delete|usage

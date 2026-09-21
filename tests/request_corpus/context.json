@@ -35,7 +35,7 @@
   "warnings": [
     {
       "code": "undocumented_upstream",
-      "message": "The upstream route `/context` for `context` is undocumented as of 2026-09-21 and may have been retired."
+      "message": "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice."
     }
   ],
   "diagnostics": {

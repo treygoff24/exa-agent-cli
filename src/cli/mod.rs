@@ -1367,7 +1367,7 @@ pub struct WebsetsPreviewArgs {
     pub query: Option<String>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10))]
     pub count: Option<u32>,
-    /// Whether to search for a preview list of items.
+    /// Whether to search for preview items; defaults to true when search.count is set.
     #[arg(long, value_name = "true|false")]
     pub search: Option<bool>,
     #[arg(long)]

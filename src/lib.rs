@@ -4036,8 +4036,13 @@ fn build_websets_preview_spec(
     Ok(spec)
 }
 
-fn websets_preview_query(search: Option<bool>) -> Vec<(String, String)> {
+fn websets_preview_query(search: Option<bool>, body: &serde_json::Value) -> Vec<(String, String)> {
     search
+        .or_else(|| {
+            body.pointer("/search/count")
+                .is_some_and(serde_json::Value::is_number)
+                .then_some(true)
+        })
         .map(|search| vec![("search".to_string(), search.to_string())])
         .unwrap_or_default()
 }
@@ -4051,7 +4056,7 @@ fn dispatch_websets_preview(
         .expect("websets preview is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_websets_preview_spec(args, globals)?;
-        let query = websets_preview_query(args.search);
+        let query = websets_preview_query(args.search, &spec.body);
         dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
     })
 }
@@ -8491,9 +8496,15 @@ fn stream_output_mode_from_env(
 }
 
 fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json::Value> {
+    if op.operation_id == "context" {
+        return vec![serde_json::json!({
+            "code": "undocumented_upstream",
+            "message": "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.",
+        })];
+    }
     if matches!(
         op.operation_id,
-        "websets-exports-create" | "websets-exports-get" | "context"
+        "websets-exports-create" | "websets-exports-get"
     ) {
         return vec![serde_json::json!({
             "code": "undocumented_upstream",
@@ -9372,7 +9383,8 @@ fn dispatch_robot_docs(
                     "Use batches list --status completed --all to discover finished batches, then batches get ID for a fresh resultsUrl and download nextAction. Download the short-lived bearer URL directly without your Exa API key.",
                     "Monitor create/update accept repeated --include-domain and --exclude-domain flags. Use --set search.contents.highlights for monitor highlight options.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
-                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`; exports and the standalone `/context` route are absent from the current Exa SDKs, so these commands warn that their upstream routes are undocumented as of 2026-09-21 and may have been retired.",
+                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`; exports are absent from the current Exa SDKs, so these commands warn that their upstream routes are undocumented as of 2026-09-21 and may have been retired.",
+                    "The standalone `/context` route is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
                     "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
                     "Inline search and contents results are under `.data.results[]`. When an envelope has `dataTruncated:true`, read `dataPath`: the spill file root is the former data object, so results are under `.results[]`, not `.data.results[]`.",

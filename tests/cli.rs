@@ -5165,6 +5165,10 @@ fn context_dry_run_defaults_dynamic_tokens_and_validates_range() {
         serde_json::json!({"query":"rust async patterns","tokensNum":"dynamic"})
     );
     assert_eq!(defaulted["warnings"][0]["code"], "undocumented_upstream");
+    assert_eq!(
+        defaulted["warnings"][0]["message"],
+        "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice."
+    );
 
     let dynamic = run_ok_json(&[
         "context",
@@ -7896,8 +7900,6 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
         "AI tools",
         "--count",
         "3",
-        "--search",
-        "true",
         "--dry-run",
         "--compact",
     ]);
@@ -7933,6 +7935,8 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
         "preview",
         "--query",
         "AI tools",
+        "--count",
+        "3",
         "--search",
         "false",
         "--dry-run",
@@ -7942,6 +7946,11 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
         no_item_search["data"]["request"]["query"],
         serde_json::json!([{"name": "search", "value": "false"}])
     );
+    let no_item_search_golden: serde_json::Value = serde_json::from_str(include_str!(
+        "request_corpus/websets-preview-search-false.json"
+    ))
+    .unwrap();
+    assert_eq!(no_item_search, no_item_search_golden);
 
     let preview_missing_query = run(&["websets", "preview", "--count", "3", "--compact"]);
     assert_eq!(preview_missing_query.status.code(), Some(1));

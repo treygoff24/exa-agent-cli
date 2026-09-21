@@ -138,7 +138,7 @@ exa-agent context "how to stream SSE in Rust with ureq"
 
 # Create a Webset (async structured list-building)
 exa-agent websets create --query "AI startups in SF" --count 25
-# Preview its decomposition and search for sample items
+# Preview its decomposition and search for sample items (`--search` defaults to true when search.count is set)
 exa-agent websets preview --query "AI startups in SF" --count 3 --search true
 
 # Create a recurring search monitor
@@ -184,7 +184,7 @@ commands still work.
 
 ### Command surface
 
-- **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream).
+- **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream). The `/context` route is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.
 - **Agent runs** — `agent runs create|get|list|events|cancel|stop|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/beta `max` effort.
 - **Batches** — `batches create|list|get|cancel|delete` (alias `batch`) runs `/search` and `/agent/runs` requests asynchronously. Typed batch commands add the required beta token. Access depends on your team's Batch API entitlement.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.

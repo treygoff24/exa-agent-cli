@@ -171,7 +171,7 @@ argv = ["websets", "monitors", "runs", "list", "monitor_abc123", "--limit", "5"]
 argv = ["websets", "monitors", "update", "monitor_abc123", "--status", "disabled"]
 
 [ops.websets-preview]
-argv = ["websets", "preview", "--query", "AI tools", "--count", "3", "--search", "true"]
+argv = ["websets", "preview", "--query", "AI tools", "--count", "3"]
 
 [ops.websets-searches-cancel]
 argv = ["websets", "searches", "cancel", "webset_abc123", "search_abc123"]

@@ -47,6 +47,9 @@ live.
   `## X.Y.Z — YYYY-MM-DD` per release, with Added/Changed/Fixed.
 - CI: `.github/workflows/ci.yml`, six jobs (lint, msrv, static-linux,
   release-config, test ubuntu, test macos). Public repo, free minutes.
+- Finding the run for a pushed commit: `gh run list --commit SHA` lags the
+  push by several minutes; `gh run list --branch main --json databaseId,headSha`
+  shows it at once. Then `gh run watch ID --exit-status`.
 - Release: push tag `vX.Y.Z`; `.github/workflows/release.yml` (cargo-dist)
   builds six archives (x86_64/aarch64 × linux-gnu, linux-musl, apple-darwin),
   installer script, checksums, and publishes the Homebrew formula

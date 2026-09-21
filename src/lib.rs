@@ -9352,72 +9352,141 @@ fn sort_json_object_keys(value: &mut serde_json::Value) {
     }
 }
 
+const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
+    (
+        "Discover and dry-run",
+        &[
+            "Start with `exa-agent capabilities` to discover command metadata.",
+            "Narrow discovery with `exa-agent capabilities <command-path>`, for example `exa-agent capabilities search`.",
+            "Preview live mutations with `--dry-run --print-request` before sending them.",
+            "When an invocation is rejected, run the `error.suggestedCommand` it names.",
+        ],
+    ),
+    (
+        "Auth and credits",
+        &[
+            "Authenticate with `EXA_API_KEY` or `auth login`; the raw payment flags are the only other auth path. Managed auth and payment headers are rejected.",
+            "Run `exa-agent auth test --json` or `exa-agent doctor --online` before a research task that depends on Exa. These no-spend probes are the only credit preflight the API allows; because Exa exposes no balance endpoint, they reveal credit exhaustion only through a 402 response.",
+            "Exit 13 / `error.code` `insufficient_credits` means the Exa account is out of credits (bare HTTP 402 or `NO_MORE_CREDITS`); a challenge-evidenced raw payment 402 is `payment_required` / exit 2.",
+            "Raw payment modes are pass-through only: `--payment-discovery`, `--x402-payment-stdin`, and `--mpp-payment-stdin` work only with exact nonstreaming `raw POST /search` or `/contents` on the default host.",
+        ],
+    ),
+    (
+        "Reading results and output files",
+        &[
+            "Inline search and contents results are `.data.results[]`: `jq '(.data.results // [])[]'`.",
+            "When an envelope carries `dataTruncated:true`, the data object was spilled to `dataPath` and that file's root is the former `data` object, so read `jq '(.results // [])[]' \"$dataPath\"`.",
+            "`--output FILE` keeps the full envelope in a file; `--max-output-bytes 0` disables spilling.",
+            "Follow `nextActions` to inspect created resources and continue paginated lists. Continuations preserve filters, cursors, and explicit profile/beta settings without copying credentials or overwriting the output file.",
+            "For `--all` lists, use `--ndjson` to stream page envelopes and add `-o FILE` to save every page with a small stdout confirmation. A later failure reports `outputPath`, `outputPages`, and `resumeCursor` in `error.details`; other list-shaped NDJSON emits result items plus a summary, while non-list commands fall back to compact JSON.",
+            "If `--output` fails after an operation succeeds, save the full stdout result carrying `output_write_failed` despite the nonzero exit. Preserve that result instead of repeating a billable create to repair the output path.",
+            "`--raw` preserves HTTP content-decoded body bytes, including gzip decoding, rather than compressed wire bytes. Signed-payment echo redaction still applies.",
+            "Errors are JSON on stderr with stable `error.code` values; run `exa-agent robot-docs errors` for the full dictionary.",
+        ],
+    ),
+    (
+        "Search",
+        &[
+            "Set result count with `--num-results`; search is not cursor-paginated.",
+            "Use the named rich-input controls: search/answer `--output-schema JSON|@file`, search/answer/agent runs create `--system-prompt TEXT|@file`, and contents `--highlights [QUERY|JSON|@file]`.",
+            "Search returns query-aware 800-character highlights by default; use `--no-highlights` for metadata only, or `--text 1500` instead of `--text full` for capped triage text. `--highlights` accepts a character cap or `JSON|@file`; for a shared context budget use `--highlights '{\"dynamic\":true,\"verbosity\":\"medium\"}' --beta dynamic-highlights-2026-08-28`, omitting `maxCharacters` and `numSentences` with `verbosity`.",
+            "`search --stream` requests SSE for synthesized output. Without a final non-null `outputSchema`, upstream returns normal JSON and the envelope warns with `stream_ignored`; `--body`/`--set` overrides determine the final request.",
+            "Use `site:example.gov` inside the query to affect query interpretation; use `--include-domain example.gov` and `--exclude-domain example.com` as typed upstream domain filters.",
+            "Pass hostnames, hostname paths, or wildcard subdomains to `--include-domain`; for broad government discovery, put `site:.gov` in the query rather than passing a bare TLD such as `gov`, then inspect the returned domains. Example: `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
+            "Treat `SOURCE_NOT_AVAILABLE` as a source-access failure, not a zero-result success. Broaden and filter locally with `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`, and cite the accessible publisher rather than a syndicator.",
+            "Valid `--category` values are exactly `company`, `people`, `publication`, `news`, `personal site`, and `financial report`; use a plain query plus `--include-domain github.com` for repository or release lookup. Typed flags accept legacy `research paper` and coerce it to `publication`, while `--body`/`--set` values pass through unchanged.",
+            "`search --type deep-reasoning` is the deep-research mode; the retained `research ...` stub exits with `research_retired` and points there.",
+        ],
+    ),
+    (
+        "Contents and freshness",
+        &[
+            "Content retrieval is cache-first by default. Use `--fresh` for latest or current material, `--cache-only` to forbid live fetching, `--max-age-hours N` for an explicit freshness window, and `--livecrawl-timeout MS` to bound live crawling.",
+            "Retrieve the newest stored page version as of an instant with `--snapshot-as-of YYYY-MM-DD` or an RFC 3339 date-time. Snapshot cannot be combined with live-web, freshness-window, or subpage options.",
+            "Pass URLs positionally or with `--ids`, for example `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; `--text` accepts a bare flag, `full`, or a numeric cap from 1 through 10000.",
+            "Use `contents --chunk-size N --jobs J` for 1-16 workers (default 1); an explicit `--jobs` requires `--chunk-size`.",
+            "Multi-chunk stream bodies are rejected before sending; admitted results stay in input order, drain after failure, and stop before new rounds. `--output` retains every successful rendering with one confirmation; JSON is a sequence of envelopes, and NDJSON keeps records and summaries.",
+            "Contents/fetch and answer/ask live success envelopes add text-aware `outcome` and `contentDiagnostics`. Empty, binary, and unextracted-PDF rows are unusable; zero usable contents rows produce `no_content`, while all-URL crawl failures still exit 10.",
+            "Use Exa as the fast default; for `no_content` or `partial` sources, follow `warnings` and `nextActions` (their `suggestedCommand` names the exact fallback fetch; copy it rather than improvising) or fetch the URL with another tool. Authority-critical text must come from a crawl that returned it, including for uscode.house.gov, govinfo.gov, eCFR, Congress.gov, and agency sites.",
+            "Empty contents error objects use `upstream_reason_unavailable` and suggest retrying or directly fetching the quoted URL.",
+            "The standalone `/context` route works but is undocumented and absent from the official Exa SDKs; it may change or be removed without notice.",
+        ],
+    ),
+    (
+        "Answer",
+        &[
+            "Set `answer --model` to `exa`, `exa-pro`, `exa-research`, or `exa-fast`, and pass a country code with `--user-location`; `--body` and `--set` override named flags.",
+            "Use `answer` to identify sources, then `contents` to read exact page text: `exa-agent answer \"<question>\" --json`, followed by `exa-agent contents <url> --text full --json`. Answer summarizes rather than retrieving full page bodies such as changelogs or release notes, so exact wording must come from contents.",
+        ],
+    ),
+    (
+        "Agent runs",
+        &[
+            "`agent --data-source` accepts `fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`, `particle`, `jinko`, and `polymarket` case-insensitively (max 5) and sends canonical spellings. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; `--body`/`--set` values pass through unchanged.",
+            "`agent --max-cost-dollars` maps `budget.maxCostDollars` and is valid only with omitted, `auto`, or `max` effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; `stopReason` `budget_reached` emits a warning.",
+            "Finish a max-effort run early with its gathered results by running `agent runs stop ID --yes`; the command adds its required beta token. Unlike cancellation, stop returns partial work and charges accrued usage.",
+        ],
+    ),
+    (
+        "Batches",
+        &[
+            "Create batches with `--requests JSON|@file` and optional `--metadata JSON|@file`; every request needs a unique `customId`, method `POST`, URL `/search` or `/agent/runs`, and a nonstreaming object body. Batch commands add their required beta token, and cancel/delete require `--yes`.",
+            "Batch creation never auto-retries, even with an idempotency key, because Exa documents no deduplication guarantee for this beta. Ambiguous creates retain scoped recovery; `recoveryContextRequired` means restore the original private context before investigating or retrying.",
+            "Discover finished batches with `batches list --status completed --all`, then run `batches get ID` for a fresh `resultsUrl` and download `nextAction`. Download that short-lived bearer URL directly without the Exa API key.",
+        ],
+    ),
+    (
+        "Monitors",
+        &[
+            "Pass repeated `--include-domain` and `--exclude-domain` flags to monitor create/update, and use `--set search.contents.highlights` for monitor highlight options.",
+        ],
+    ),
+    (
+        "Websets",
+        &[
+            "Include a Webset's items with `exa-agent websets get WEBSET --expand items`.",
+            "Create an import, then use the upload PUT template in its returned `nextActions`; `websets imports create` accepts neither `--csv` nor `--url`.",
+            "Create and retrieve exports with `exa-agent websets exports create WEBSET --format csv|json`, then `exa-agent websets exports get WEBSET EXPORT_ID`. These routes are absent from the current Exa SDKs and may have been retired, so the commands emit an `undocumented_upstream` warning.",
+        ],
+    ),
+    (
+        "Config and limits",
+        &[
+            "Set `EXA_AGENT_NO_NETWORK` to any value, including empty, to refuse live typed, raw, streaming, `auth test`/`status`, `schema refresh --check`, and `doctor --online` calls before credential resolution and transport. Unset it to allow live calls; dry-run and self-description remain available while it is set.",
+            "`--max-response-bytes N` (config `max_response_bytes`) caps decoded success bodies and entire SSE streams/JSON fallbacks, including gzip, with a 64 MiB default. Exceeding it returns nonretryable `response_too_large` / exit 5; use create recovery rather than repeating an unknown-outcome operation.",
+            "`--connect-timeout DURATION` (config `connect_timeout`) limits connection setup independently of `--timeout`; leaving it unset adds no separate connection cap.",
+            "Empty or relative XDG config/state roots fall back to `HOME`, while explicit `EXA_AGENT_*` paths may be relative. `doctor permissions.state` reports accessible files and writable managed directories without automatic chmod or following child-directory symlinks; fix/undo refuse lock failure, fix dry-run creates nothing, and explicit trace paths use sibling lock files with new files at 0600.",
+        ],
+    ),
+];
+
 fn dispatch_robot_docs(
     sub: &RobotDocsCmd,
     globals: &GlobalArgs,
     pretty: bool,
 ) -> Result<i32, CliError> {
     match sub {
-        RobotDocsCmd::Guide => emit_robot_docs(
-            serde_json::json!({
+        RobotDocsCmd::Guide => {
+            let sections = GUIDE_SECTIONS
+                .iter()
+                .map(|(title, rules)| serde_json::json!({ "title": title, "rules": rules }))
+                .collect::<Vec<_>>();
+            let guidance = GUIDE_SECTIONS
+                .iter()
+                .flat_map(|(_, rules)| rules.iter().copied())
+                .collect::<Vec<_>>();
+            emit_robot_docs(
+                serde_json::json!({
                 "schema": "exa.cli.robot_docs.v1",
                 "ok": true,
                 "section": "guide",
-                "guidance": [
-                    "Use capabilities first to discover command metadata.",
-                    "Use capabilities <command-path> (for example capabilities search) for a small command slice.",
-                    "Use --dry-run --print-request before live mutations.",
-                    "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
-                    "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
-                    "Named output controls include search/answer --output-schema JSON|@file, search/answer/agent runs create --system-prompt TEXT|@file, and contents --highlights [QUERY|JSON|@file].",
-                    "Content retrieval is cache-first by default. Use --fresh when the task says latest or current; --cache-only forbids live fetching, while --max-age-hours N sets an explicit freshness window and --livecrawl-timeout MS bounds live crawling.",
-                    "Use --snapshot-as-of YYYY-MM-DD or an RFC 3339 date-time to retrieve the newest stored page version as of that instant. Snapshot cannot be combined with live-web, freshness-window, or subpage options.",
-                    "Answer --model accepts exa, exa-pro, exa-research, or exa-fast; --user-location supplies a country code. --body and --set override named flags.",
-                    "Search --highlights accepts a character cap or JSON|@file. For a shared context budget use --highlights '{\"dynamic\":true,\"verbosity\":\"medium\"}' --beta dynamic-highlights-2026-08-28; omit maxCharacters and numSentences with verbosity.",
-                    "Search --stream requests SSE for synthesized output. Without a final non-null outputSchema, upstream returns normal JSON and the envelope warns with stream_ignored; --body/--set overrides determine the final request.",
-                    "Agent --data-source accepts fiber, financial_datasets, similarweb, baselayer, affiliate, particle, jinko, and polymarket case-insensitively (max 5) and sends canonical spellings. Legacy fiber_ai and particle_news remain accepted with legacy_value_coerced; --body/--set values pass through unchanged.",
-                    "Agent --max-cost-dollars maps budget.maxCostDollars and is valid only with omitted/auto/max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; stopReason budget_reached emits a warning.",
-                    "Use agent runs stop ID --yes to finish a max-effort run early with gathered results. Unlike cancellation, stop returns partial work and charges accrued usage; the command adds its required beta token.",
-                    "Batches create accepts --requests JSON|@file and --metadata JSON|@file; requests need unique customId values, POST, /search or /agent/runs, and nonstreaming object bodies. Batch commands add their required beta token; cancel/delete require --yes.",
-                    "Batch creation never auto-retries, even with an idempotency key: Exa does not document deduplication for this beta. Ambiguous creates retain scoped recovery; recoveryContextRequired means restore the original private context before investigating or retrying.",
-                    "Use batches list --status completed --all to discover finished batches, then batches get ID for a fresh resultsUrl and download nextAction. Download the short-lived bearer URL directly without your Exa API key.",
-                    "Monitor create/update accept repeated --include-domain and --exclude-domain flags. Use --set search.contents.highlights for monitor highlight options.",
-                    "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
-                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`; exports are absent from the current Exa SDKs, so these commands warn that their upstream routes are undocumented as of 2026-09-21 and may have been retired.",
-                    "The standalone `/context` route is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.",
-                    "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
-                    "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
-                    "Inline search and contents results are under `.data.results[]`. When an envelope has `dataTruncated:true`, read `dataPath`: the spill file root is the former data object, so results are under `.results[]`, not `.data.results[]`.",
-                    "For predictable extraction, use inline `jq '(.data.results // [])[]'`; after auto-spill read `dataPath` and use `jq '(.results // [])[]'`; or pass `--output FILE` for the full envelope / `--max-output-bytes 0` to disable spilling.",
-                    "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
-                    "`--include-domain` accepts hostnames, hostname paths, or wildcard subdomains, not bare TLDs such as `gov`; for broad government discovery put `site:.gov` in the query and inspect the returned domains.",
-                    "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
-                    "SOURCE_NOT_AVAILABLE is not a zero-result success. Broaden and filter locally: `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`; cite the accessible publisher rather than treating a syndicator as the original source.",
-                    "--max-response-bytes N (config max_response_bytes) caps decoded success bodies and entire SSE streams/JSON fallbacks, including gzip; default 64 MiB. Exceeding it returns nonretryable response_too_large/exit 5; use create recovery instead of repeating an unknown-outcome operation.",
-                    "--raw preserves HTTP content-decoded body bytes, including gzip decoding; it is not a compressed wire capture. Signed-payment echo redaction still applies.",
-                    "--connect-timeout DURATION (config connect_timeout) limits connection setup independently of --timeout; unset adds no separate connect cap.",
-                    "contents --chunk-size N --jobs J uses 1-16 workers (default 1); explicit --jobs requires --chunk-size. It rejects multi-chunk stream bodies before sending, preserves input order, drains admitted results on failure, and stops new rounds. --output retains all successful chunk renderings with one confirmation; JSON is a sequence of envelopes, NDJSON keeps records and summaries.",
-                    "Empty/relative XDG config/state roots fall back to HOME; explicit EXA_AGENT_* paths may be relative. doctor permissions.state reports accessible files and writable managed directories without automatic chmod or following child directory symlinks. Fix/undo refuse lock failure; fix dry-run creates nothing. Explicit trace paths use sibling lock files and new-file 0600.",
-                    "Contents accepts positional URLS or `--ids`: `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; text accepts bare, `full`, or numeric caps 1..10000.",
-                    "For --all lists, --ndjson streams page envelopes; add -o FILE to save all pages with a small stdout confirmation. On later failure, error.details reports outputPath, outputPages, and resumeCursor when available. Other list-shaped NDJSON emits result items plus a summary; non-list commands fall back to compact JSON.",
-                    "Use nextActions to inspect created resources and continue paginated lists. Pagination continuations preserve filters, cursors, and explicit profile/beta settings without copying credentials or overwriting your output file.",
-                    "If --output fails after an operation succeeds, save the full stdout result carrying output_write_failed despite the nonzero exit. Do not repeat a billable create just to fix the output path.",
-                    "Contents/fetch and answer/ask live success envelopes add text-aware outcome plus contentDiagnostics. Empty, binary, and unextracted-PDF rows do not count as usable; zero usable contents rows are no_content, while all-URL crawl failures still exit 10.",
-                    "For no_content/partial government sources such as uscode.house.gov, govinfo.gov, eCFR, Congress.gov, or agency sites, follow warnings/nextActions to `parallel-cli extract <url> --full-content --json`; Exa remains the fast default, but authority-critical text must not rely on an empty crawl.",
-                    "Empty contents error objects use upstream_reason_unavailable and suggest retrying or direct-fetching the quoted URL.",
-                    "Exit 13 / error.code insufficient_credits means the Exa account is out of credits (bare HTTP 402 or NO_MORE_CREDITS). A challenge-evidenced raw payment 402 is payment_required / exit 2.",
-                    "`exa-agent auth test --json` and `exa-agent doctor --online` spend nothing and are the only credit preflight the API allows — Exa exposes no balance endpoint, so they report exhaustion only as a 402 on the probe. Run one first when a whole research lane depends on Exa.",
-                    "`answer` summarizes and cannot dig full page bodies such as changelogs or release notes. Chain it: `exa-agent answer \"<question>\" --json` to find the URL, then `exa-agent contents <url> --text full --json` to read the body. Never stop at `answer` when the exact wording matters.",
-                    "There is no `github` search category. Valid --category values are exactly: company, people, publication, news, personal site, financial report. The legacy `research paper` spelling is accepted on typed flags and coerced to `publication`; --body/--set pass through values unchanged. For a repo or release lookup, use a plain query plus `--include-domain github.com` instead of a category.",
-                    "Set EXA_AGENT_NO_NETWORK to any value (including empty) to refuse live typed, raw, streaming, auth test/status, schema refresh --check, and doctor --online before credential resolution and transport; unset it to allow live calls, while dry-run and self-description remain available.",
-                    "Do not pass managed auth or payment headers; use EXA_API_KEY/auth login, or raw payment flags.",
-                    "Raw payment modes are pass-through only: --payment-discovery, --x402-payment-stdin, and --mpp-payment-stdin are limited to exact nonstreaming raw POST /search or /contents on the default host.",
-                    "Errors are JSON on stderr with stable error.code values; run exa-agent robot-docs errors for the full dictionary."
-                ],
-            }),
-            globals,
-            pretty,
-        ),
+                "sections": sections,
+                "guidance": guidance,
+                }),
+                globals,
+                pretty,
+            )
+        }
         RobotDocsCmd::Commands => emit_robot_docs(
             serde_json::json!({
                 "schema": "exa.cli.robot_docs.v1",

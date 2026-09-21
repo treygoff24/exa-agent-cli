@@ -173,6 +173,13 @@ exa-agent doctor                # offline health checks (add --online for a live
 
 `capabilities` lists all 73 commands with each one's HTTP method, path, and metadata (read-only vs. destructive, pagination style, streaming, deprecation, idempotency sensitivity), alongside the full exit-code and error-code dictionaries. Pass a command path (e.g. `exa-agent capabilities search`) to get just that command's entry instead of the full dump.
 
+### Agent skill
+
+The generated agent skill lives at `skills/exa-agent-cli/SKILL.md`. Copy the
+`skills/exa-agent-cli/` directory into your agent's skills folder, such as
+`.claude/skills/` or `~/.codex/skills/`. Maintainers regenerate it with
+`cargo xtask generate-skill` from the offline `robot-docs` guide.
+
 For a hard local-only boundary, set `EXA_AGENT_NO_NETWORK` to any value (including empty).
 Its presence enables the guard; unsetting it is the only off state. Live typed, raw,
 streaming, `auth test`, and `doctor --online` paths then return a structured

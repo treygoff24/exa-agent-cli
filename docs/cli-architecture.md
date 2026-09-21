@@ -200,7 +200,9 @@ Required self-description surfaces:
 
 - `exa capabilities --json`: offline command/operation registry, flags, env, exit codes, schemas, safety, streaming, pagination, deprecations.
 - `exa schema list/show/export/validate-input/refresh`: offline embedded schemas plus live drift check.
-- `exa robot-docs guide`: paste-ready playbook for agents with first-try commands, errors, examples, pagination, and raw fallback.
+- `exa robot-docs guide`: paste-ready playbook for agents, emitted as titled
+  `sections` with co-located `rules`; the additive flat `guidance` list preserves
+  compatibility for existing consumers.
 - `exa doctor`: offline checks by default; `--network` opt-in for auth/connectivity/quota tests.
 
 ## Safety rules

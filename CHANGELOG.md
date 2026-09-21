@@ -121,6 +121,10 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- `robot-docs guide` now emits a co-located `sections` structure while retaining
+  the flattened `guidance` list for compatibility. The generated agent skill is
+  rewritten as agent-facing documentation and now ships at
+  `skills/exa-agent-cli/SKILL.md`.
 - A leading `@` in `contents --highlights` now selects a file. For a literal query
   such as `@openai roadmap`, use `--highlights '{"query":"@openai roadmap"}'`.
 - `agent runs cancel` now requires `--yes` for live calls, like `stop` and `delete`:

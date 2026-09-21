@@ -49,6 +49,17 @@ fn robot_docs_errors_match_capabilities() {
 fn robot_docs_guide_mentions_core_agent_surfaces() {
     let guide = ok_json(&["robot-docs", "guide", "--compact"]);
     assert_eq!(guide["section"], "guide");
+    let flattened = guide["sections"]
+        .as_array()
+        .expect("sections array")
+        .iter()
+        .flat_map(|section| section["rules"].as_array().expect("rules array"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        guide["guidance"].as_array().expect("guidance array"),
+        &flattened
+    );
     let text = guide["guidance"].to_string();
     for needle in [
         "suggestedCommand",
@@ -59,7 +70,7 @@ fn robot_docs_guide_mentions_core_agent_surfaces() {
         ".data.results[]",
         "--include-domain",
         "contents \\\"https://exa.ai\\\" \\\"https://docs.exa.ai\\\" --text 10000",
-        "EXA_AGENT_NO_NETWORK to any value",
+        "EXA_AGENT_NO_NETWORK` to any value",
         "schema refresh --check",
     ] {
         assert!(text.contains(needle), "guide missing {needle}: {text}");

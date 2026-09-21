@@ -90,6 +90,8 @@ enum ConfirmKind {
 struct FieldMeta {
     flag: String,
     body_path: String,
+    #[serde(rename = "in", default = "default_field_location")]
+    request_location: String,
     kind: String,
     #[serde(default)]
     required: bool,
@@ -111,6 +113,10 @@ struct FieldMeta {
     arity: Option<ArityMeta>,
     #[serde(default)]
     input_range: Option<[u64; 2]>,
+}
+
+fn default_field_location() -> String {
+    "body".to_string()
 }
 
 #[derive(Clone, Deserialize)]
@@ -506,6 +512,14 @@ fn collect_schema_paths(
 fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
     let who = || format!("op {oid} field --{}", field.flag);
 
+    if !matches!(field.request_location.as_str(), "body" | "query") {
+        return Err(anyhow!(
+            "{}: unknown request location {:?}",
+            who(),
+            field.request_location
+        ));
+    }
+
     if let Some(item_template) = &field.item_template {
         if field.kind != "str_array" {
             return Err(anyhow!("{}: item_template only valid on str_array", who()));
@@ -515,8 +529,8 @@ fn validate_field(oid: &str, field: &FieldMeta) -> Result<()> {
         }
     }
 
-    if !field.enum_values.is_empty() && field.kind != "str" {
-        return Err(anyhow!("{}: enum_values only valid on str", who()));
+    if !field.enum_values.is_empty() && !matches!(field.kind.as_str(), "str" | "bool") {
+        return Err(anyhow!("{}: enum_values only valid on str or bool", who()));
     }
     if field.enum_values.iter().any(String::is_empty) {
         return Err(anyhow!("{}: enum_values entries cannot be empty", who()));
@@ -600,9 +614,14 @@ fn emit_op(out: &mut String, r: &OpRow) -> Result<()> {
         };
         let arity = arity_literal(Some(f.arity.as_ref().unwrap_or(&default_arity)))?;
         let input_range = input_range_literal(f.input_range)?;
+        let request_location = match f.request_location.as_str() {
+            "body" => "RequestLocation::Body",
+            "query" => "RequestLocation::Query",
+            other => return Err(anyhow!("unknown request location {other:?}")),
+        };
         write!(
             fields,
-            "FieldDef {{ flag: {:?}, body_path: {:?}, kind: {}, required: {}, \
+            "FieldDef {{ flag: {:?}, body_path: {:?}, request_location: {request_location}, kind: {}, required: {}, \
              co_fields: {co_fields}, item_template: {item_template}, enum_values: {enum_values}, range: {range}, \
              input_kind: {input_kind}, input_name: {input_name}, value_name: {value_name}, arity: {arity}, input_range: {input_range} }}, ",
             f.flag,

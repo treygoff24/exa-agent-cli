@@ -864,6 +864,15 @@ flag = "count"
 body_path = "search.count"
 kind = "int"
 
+[[operations."websets-preview".fields]]
+flag = "search"
+body_path = "search"
+in = "query"
+kind = "bool"
+enum_values = ["false", "true"]
+value_name = "true|false"
+arity = { min = 1, max = 1 }
+
 [[operations."getContents".fields]]
 flag = "urls"
 body_path = "urls"

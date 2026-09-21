@@ -372,6 +372,7 @@ pub(crate) fn command_fields(op: &OperationDef) -> Vec<serde_json::Value> {
                 "bodyPath": field.body_path,
                 "kind": field_kind(field.kind),
                 "required": field.required,
+                "in": field.request_location.as_str(),
             });
             if let Some(input_kind) = field.input_kind {
                 value["legacyFlagIsCliFlag"] =

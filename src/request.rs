@@ -133,6 +133,9 @@ fn build_flag_body(
 
     let mut body = Value::Object(Map::new());
     for field in op.fields {
+        if field.request_location != crate::registry::RequestLocation::Body {
+            continue;
+        }
         let raw = flag_values
             .iter()
             .find(|(flag, _)| *flag == field.flag)
@@ -521,6 +524,7 @@ mod tests {
         crate::registry::FieldDef {
             flag: "query",
             body_path: "query",
+            request_location: crate::registry::RequestLocation::Body,
             kind: FieldKind::Str,
             required: true,
             co_fields: &[],
@@ -536,6 +540,7 @@ mod tests {
         crate::registry::FieldDef {
             flag: "text",
             body_path: "contents.text",
+            request_location: crate::registry::RequestLocation::Body,
             kind: FieldKind::Bool,
             required: false,
             co_fields: &[],
@@ -592,6 +597,7 @@ mod tests {
     static CO_FIELDS: &[FieldDef] = &[FieldDef {
         flag: "schedule",
         body_path: "trigger.schedule",
+        request_location: crate::registry::RequestLocation::Body,
         kind: FieldKind::Str,
         required: false,
         co_fields: CO_FIELD_SIBLINGS,
@@ -651,6 +657,7 @@ mod tests {
     static ITEM_TEMPLATE_FIELDS: &[FieldDef] = &[FieldDef {
         flag: "descriptions",
         body_path: "items",
+        request_location: crate::registry::RequestLocation::Body,
         kind: FieldKind::StrArray,
         required: false,
         co_fields: &[],
@@ -667,6 +674,7 @@ mod tests {
     static PLAIN_ARRAY_FIELDS: &[FieldDef] = &[FieldDef {
         flag: "descriptions",
         body_path: "items",
+        request_location: crate::registry::RequestLocation::Body,
         kind: FieldKind::StrArray,
         required: false,
         co_fields: &[],
@@ -755,6 +763,7 @@ mod tests {
         FieldDef {
             flag: "modeled",
             body_path: "sentinel.modeled",
+            request_location: crate::registry::RequestLocation::Body,
             kind: FieldKind::Int,
             required: false,
             co_fields: &[],
@@ -770,6 +779,7 @@ mod tests {
         FieldDef {
             flag: "field-only",
             body_path: "layers.field",
+            request_location: crate::registry::RequestLocation::Body,
             kind: FieldKind::Str,
             required: false,
             co_fields: &[],

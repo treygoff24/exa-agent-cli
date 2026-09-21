@@ -138,6 +138,8 @@ exa-agent context "how to stream SSE in Rust with ureq"
 
 # Create a Webset (async structured list-building)
 exa-agent websets create --query "AI startups in SF" --count 25
+# Preview its decomposition and search for sample items
+exa-agent websets preview --query "AI startups in SF" --count 3 --search true
 
 # Create a recurring search monitor
 exa-agent monitor create --query "AI policy news" --webhook-url https://example.com/hook
@@ -187,7 +189,7 @@ commands still work.
 - **Batches** — `batches create|list|get|cancel|delete` (alias `batch`) runs `/search` and `/agent/runs` requests asynchronously. Typed batch commands add the required beta token. Access depends on your team's Batch API entitlement.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
-- **Websets** — the full tree: websets, searches, items, enrichments, exports, monitors and their runs, imports, webhooks and their delivery attempts, and events.
+- **Websets** — websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events. The retained exports commands warn that their routes are undocumented upstream as of 2026-09-21 and may have been retired.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.

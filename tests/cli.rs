@@ -617,6 +617,8 @@ fn capabilities_publish_named_flag_body_paths() {
         serde_json::json!({"min":1.0,"max":100.0})
     );
     assert_eq!(field("contents", "highlights")["bodyPath"], "highlights");
+    assert_eq!(field("websets preview", "search")["in"], "query");
+    assert_eq!(field("websets preview", "search")["kind"], "boolean");
     assert_eq!(
         json["rawPaymentModes"]["flags"],
         serde_json::json!([
@@ -5162,6 +5164,7 @@ fn context_dry_run_defaults_dynamic_tokens_and_validates_range() {
         defaulted["data"]["request"]["body"],
         serde_json::json!({"query":"rust async patterns","tokensNum":"dynamic"})
     );
+    assert_eq!(defaulted["warnings"][0]["code"], "undocumented_upstream");
 
     let dynamic = run_ok_json(&[
         "context",
@@ -7893,6 +7896,8 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
         "AI tools",
         "--count",
         "3",
+        "--search",
+        "true",
         "--dry-run",
         "--compact",
     ]);
@@ -7921,6 +7926,21 @@ fn websets_create_and_preview_dry_run_build_nested_body_and_precedence() {
     assert_eq!(
         decomposition_only["data"]["request"]["query"],
         serde_json::json!([])
+    );
+
+    let no_item_search = run_ok_json(&[
+        "websets",
+        "preview",
+        "--query",
+        "AI tools",
+        "--search",
+        "false",
+        "--dry-run",
+        "--compact",
+    ]);
+    assert_eq!(
+        no_item_search["data"]["request"]["query"],
+        serde_json::json!([{"name": "search", "value": "false"}])
     );
 
     let preview_missing_query = run(&["websets", "preview", "--count", "3", "--compact"]);
@@ -8697,6 +8717,7 @@ fn websets_exports_preview_and_live_next_action() {
         "/websets/v0/websets/ws_abc/exports"
     );
     assert_eq!(create["data"]["request"]["body"]["format"], "json");
+    assert_eq!(create["warnings"][0]["code"], "undocumented_upstream");
 
     let body_format = run_ok_json(&[
         "websets",
@@ -8743,6 +8764,7 @@ fn websets_exports_preview_and_live_next_action() {
         "/websets/v0/websets/ws_abc/exports/export_abc"
     );
     assert!(get["data"]["request"]["body"].is_null());
+    assert_eq!(get["warnings"][0]["code"], "undocumented_upstream");
 
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/websets/exports-create.json")).unwrap();

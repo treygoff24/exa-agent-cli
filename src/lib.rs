@@ -966,6 +966,7 @@ fn registry_body_path_for_flag(command: &str, flag: &str) -> Option<&'static str
     registry::lookup_by_command(command)?
         .fields
         .iter()
+        .filter(|field| field.request_location == registry::RequestLocation::Body)
         .map(|field| field.body_path)
         .find(|path| *path == camel || path.rsplit('.').next() == Some(camel.as_str()))
 }
@@ -4035,15 +4036,10 @@ fn build_websets_preview_spec(
     Ok(spec)
 }
 
-fn websets_preview_query(body: &serde_json::Value) -> Vec<(String, String)> {
-    if body
-        .pointer("/search/count")
-        .is_some_and(serde_json::Value::is_number)
-    {
-        vec![("search".to_string(), "true".to_string())]
-    } else {
-        Vec::new()
-    }
+fn websets_preview_query(search: Option<bool>) -> Vec<(String, String)> {
+    search
+        .map(|search| vec![("search".to_string(), search.to_string())])
+        .unwrap_or_default()
 }
 
 fn dispatch_websets_preview(
@@ -4055,7 +4051,7 @@ fn dispatch_websets_preview(
         .expect("websets preview is in registry");
     with_typed_error_context(op, globals, || {
         let spec = build_websets_preview_spec(args, globals)?;
-        let query = websets_preview_query(&spec.body);
+        let query = websets_preview_query(args.search);
         dispatch_typed_command_routed(spec, globals, pretty, None, &query, false, None)
     })
 }
@@ -8495,6 +8491,19 @@ fn stream_output_mode_from_env(
 }
 
 fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json::Value> {
+    if matches!(
+        op.operation_id,
+        "websets-exports-create" | "websets-exports-get" | "context"
+    ) {
+        return vec![serde_json::json!({
+            "code": "undocumented_upstream",
+            "message": format!(
+                "The upstream route `{}` for `{}` is undocumented as of 2026-09-21 and may have been retired.",
+                op.api_path,
+                op.command(),
+            ),
+        })];
+    }
     if !op.deprecated {
         return Vec::new();
     }
@@ -9363,7 +9372,7 @@ fn dispatch_robot_docs(
                     "Use batches list --status completed --all to discover finished batches, then batches get ID for a fresh resultsUrl and download nextAction. Download the short-lived bearer URL directly without your Exa API key.",
                     "Monitor create/update accept repeated --include-domain and --exclude-domain flags. Use --set search.contents.highlights for monitor highlight options.",
                     "The upstream Research API is retired; use `exa-agent search --type deep-reasoning` instead of the local research stub.",
-                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
+                    "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`; exports and the standalone `/context` route are absent from the current Exa SDKs, so these commands warn that their upstream routes are undocumented as of 2026-09-21 and may have been retired.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
                     "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
                     "Inline search and contents results are under `.data.results[]`. When an envelope has `dataTruncated:true`, read `dataPath`: the spill file root is the former data object, so results are under `.results[]`, not `.data.results[]`.",
@@ -9604,7 +9613,10 @@ fn validate_registry_body(
 
     if require_required {
         for field in op.fields {
-            if field.required && !body_field_present(body, field.body_path) {
+            if field.request_location == registry::RequestLocation::Body
+                && field.required
+                && !body_field_present(body, field.body_path)
+            {
                 return ValidateInputOutcome {
                     valid: serde_json::Value::Bool(false),
                     details: Some(serde_json::json!({
@@ -9623,6 +9635,9 @@ fn validate_registry_body(
     // FieldKind — so validate-input is genuinely registry-driven, not just a
     // required-presence + two-enum check. Catches e.g. numResults:"five".
     for field in op.fields {
+        if field.request_location != registry::RequestLocation::Body {
+            continue;
+        }
         if let Some(value) = body_value_at_path(body, field.body_path) {
             if let Some(issue) = validate_field_kind(field, value) {
                 return ValidateInputOutcome {
@@ -9636,6 +9651,9 @@ fn validate_registry_body(
     }
 
     for field in op.fields {
+        if field.request_location != registry::RequestLocation::Body {
+            continue;
+        }
         if let Some(value) = body_value_at_path(body, field.body_path) {
             if let Some(issue) = validate_enum_field(op, field, value) {
                 return ValidateInputOutcome {
@@ -9694,6 +9712,9 @@ fn validate_registry_body(
     }
 
     for field in op.fields {
+        if field.request_location != registry::RequestLocation::Body {
+            continue;
+        }
         if let Some(value) = body_value_at_path(body, field.body_path) {
             if let Some(issue) = validate_field_range(field, value) {
                 return ValidateInputOutcome {
@@ -9728,6 +9749,9 @@ fn validate_registry_body(
 fn known_body_paths(op: &registry::OperationDef) -> Vec<&'static str> {
     let mut paths = Vec::new();
     for field in op.fields {
+        if field.request_location != registry::RequestLocation::Body {
+            continue;
+        }
         paths.push(field.body_path);
         for (co_path, _) in field.co_fields {
             paths.push(*co_path);
@@ -11635,6 +11659,7 @@ mod tests {
     static GENERIC_RANGE_FIELDS: &[FieldDef] = &[FieldDef {
         flag: "limit",
         body_path: "limit",
+        request_location: crate::registry::RequestLocation::Body,
         kind: FieldKind::Int,
         required: false,
         co_fields: &[],

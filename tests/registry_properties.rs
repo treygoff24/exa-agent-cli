@@ -656,6 +656,9 @@ fn preview_body(entry: &ManifestEntry, operation_id: &str) -> Value {
 fn constrained_fields(op: &registry::OperationDef) -> Vec<(&'static FieldDef, ConstraintKind)> {
     let mut fields = Vec::new();
     for field in op.fields {
+        if field.request_location != registry::RequestLocation::Body {
+            continue;
+        }
         if field.range.is_some() {
             fields.push((field, ConstraintKind::Range));
         }

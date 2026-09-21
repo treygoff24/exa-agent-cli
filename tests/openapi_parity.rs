@@ -91,6 +91,9 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
         checked.push(format!("{} ({})", op.operation_id, spec.name));
 
         for field in op.fields {
+            if field.request_location != registry::RequestLocation::Body {
+                continue;
+            }
             if let Err(err) = resolve_body_path(&spec.value, schema, field.body_path) {
                 failures.push(format!(
                     "{} field `{}` body_path `{}`: {err}",
@@ -105,7 +108,9 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
         let required_fields: BTreeSet<&str> = op
             .fields
             .iter()
-            .filter(|field| field.required)
+            .filter(|field| {
+                field.request_location == registry::RequestLocation::Body && field.required
+            })
             .map(|field| top_level_segment(field.body_path))
             .collect();
         let externally_sourced = externally_sourced_required(op.operation_id);
@@ -141,6 +146,53 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
     assert!(
         failures.is_empty(),
         "OpenAPI requestBody parity failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn modeled_query_parameters_match_openapi() {
+    let specs = load_specs();
+    let mut checked = Vec::new();
+    let mut failures = Vec::new();
+
+    for op in registry::REGISTRY {
+        for field in op
+            .fields
+            .iter()
+            .filter(|field| field.request_location == registry::RequestLocation::Query)
+        {
+            let Some((spec, operation)) = specs
+                .iter()
+                .find_map(|spec| find_operation(&spec.value, op.operation_id).map(|op| (spec, op)))
+            else {
+                failures.push(format!(
+                    "{} query field `{}` has no vendored OpenAPI operation",
+                    op.operation_id, field.flag
+                ));
+                continue;
+            };
+            let parameter = operation["parameters"].as_array().and_then(|parameters| {
+                parameters.iter().find(|parameter| {
+                    parameter["name"].as_str() == Some(field.body_path)
+                        && parameter["in"].as_str() == Some("query")
+                })
+            });
+            if parameter.is_none() {
+                failures.push(format!(
+                    "{} field `{}` does not match query parameter `{}` in {}",
+                    op.operation_id, field.flag, field.body_path, spec.name
+                ));
+            } else {
+                checked.push(format!("{} --{}", op.operation_id, field.flag));
+            }
+        }
+    }
+
+    assert_eq!(checked, ["websets-preview --search"]);
+    assert!(
+        failures.is_empty(),
+        "OpenAPI query-parameter parity failures:\n{}",
         failures.join("\n")
     );
 }

@@ -74,6 +74,21 @@ pub enum InputKind {
     Argument,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestLocation {
+    Body,
+    Query,
+}
+
+impl RequestLocation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Body => "body",
+            Self::Query => "query",
+        }
+    }
+}
+
 impl InputKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -139,6 +154,8 @@ pub struct FieldDef {
     /// Legacy schema key; retain for one compatibility release.
     pub flag: &'static str,
     pub body_path: &'static str,
+    /// Where the modeled input is sent. `body_path` holds the parameter name for query inputs.
+    pub request_location: RequestLocation,
     pub kind: FieldKind,
     pub required: bool,
     pub co_fields: &'static [(&'static str, ConstValue)],
@@ -184,7 +201,12 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
             "Optional character cap: {name} accepts bare, `full`, or {min}..={max}."
         )),
         Some((min, max)) => Some(format!("{name} accepts {min}..={max}.")),
-        None => Some(format!("Set the `{}` request field.", field.body_path)),
+        None => Some(match field.request_location {
+            RequestLocation::Body => format!("Set the `{}` request field.", field.body_path),
+            RequestLocation::Query => {
+                format!("Set the `{}` query parameter.", field.body_path)
+            }
+        }),
     }
 }
 

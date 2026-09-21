@@ -32,7 +32,12 @@
     "total": 0.0
   },
   "nextActions": [],
-  "warnings": [],
+  "warnings": [
+    {
+      "code": "undocumented_upstream",
+      "message": "The upstream route `/context` for `context` is undocumented as of 2026-09-21 and may have been retired."
+    }
+  ],
   "diagnostics": {
     "durationMs": 0,
     "retries": 0

@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single self-contained binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the whole Websets tree (including exports), and team/key administration — as 73 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single self-contained binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the Websets tree, and team/key administration — as 71 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 
@@ -150,7 +150,7 @@ Dispatch-level body validation runs before credential resolution and network I/O
 These run with no credential and no network call:
 
 ```sh
-exa-agent capabilities --json    # all 73 commands: method, path, read-only/destructive/idempotency-sensitive, full exit-code + error-code dictionaries, embedded spec hash
+exa-agent capabilities --json    # all 71 commands: method, path, read-only/destructive/idempotency-sensitive, full exit-code + error-code dictionaries, embedded spec hash
 exa-agent robot-docs guide        # short paste-ready playbook for agents
 exa-agent schema --help           # embedded API/CLI schema
 exa-agent doctor                  # read-only health checks (add --online for a live probe)

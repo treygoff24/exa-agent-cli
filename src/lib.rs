@@ -370,101 +370,7 @@ fn handle_clap_error(e: clap::Error) -> i32 {
 }
 
 fn public_clap_text(text: String) -> String {
-    let had_export_help = text.contains("--export-format") && text.contains("Global options:");
-    let had_trailing_newline = text.ends_with('\n');
-    let text = text
-        .replace("--export-format", "--format")
-        .replace("<EXPORT_FORMAT>", "<FORMAT>");
-    if !had_export_help {
-        return text;
-    }
-
-    let mut output = Vec::new();
-    let mut in_globals = false;
-    let mut skip_global_format_help = false;
-    for line in text.lines() {
-        if line == "Global options:" {
-            in_globals = true;
-        }
-        if in_globals && line.trim_start().starts_with("--format <FORMAT>") {
-            skip_global_format_help = true;
-            continue;
-        }
-        if skip_global_format_help {
-            if line.starts_with("          ") {
-                continue;
-            }
-            skip_global_format_help = false;
-        }
-        output.push(line);
-    }
-    let mut text = realign_options_block(&output).join("\n");
-    if had_trailing_newline {
-        text.push('\n');
-    }
     text
-}
-
-/// clap lays the local `Options:` table out around `--export-format <EXPORT_FORMAT>`; renaming it
-/// to `--format <FORMAT>` afterwards leaves every description column and wrapped continuation line
-/// indented for a flag that is 14 characters wider. Re-columnize the block.
-fn realign_options_block(lines: &[&str]) -> Vec<String> {
-    let Some(start) = lines.iter().position(|line| *line == "Options:") else {
-        return lines.iter().map(|line| line.to_string()).collect();
-    };
-    let end = lines[start + 1..]
-        .iter()
-        .position(|line| line.trim().is_empty())
-        .map(|offset| start + 1 + offset)
-        .unwrap_or(lines.len());
-
-    let rows: Vec<(usize, usize, &str, &str)> = lines[start + 1..end]
-        .iter()
-        .enumerate()
-        .filter_map(|(offset, line)| {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with('-') {
-                return None;
-            }
-            let indent = line.len() - trimmed.len();
-            let (flags, description) = trimmed.split_once("  ")?;
-            Some((start + 1 + offset, indent, flags, description.trim_start()))
-        })
-        .collect();
-    if rows.is_empty() {
-        return lines.iter().map(|line| line.to_string()).collect();
-    }
-
-    let column = rows
-        .iter()
-        .map(|(_, indent, flags, _)| indent + flags.len())
-        .max()
-        .unwrap_or(0)
-        + 2;
-    let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
-    let mut in_description = false;
-    let mut row_iter = rows.iter().peekable();
-    for (index, line) in out.iter_mut().enumerate().take(end).skip(start + 1) {
-        if row_iter.peek().is_some_and(|(row, ..)| *row == index) {
-            let (_, indent, flags, description) = row_iter.next().expect("peeked row exists");
-            *line = format!(
-                "{:indent$}{flags}{}{description}",
-                "",
-                " ".repeat(column - indent - flags.len())
-            );
-            in_description = true;
-        } else if in_description {
-            // Wrapped description lines can themselves begin with `--`, so identify them by
-            // position in the table rather than by their first character.
-            let trimmed = line.trim_start();
-            if trimmed.is_empty() {
-                in_description = false;
-            } else {
-                *line = format!("{:column$}{trimmed}", "");
-            }
-        }
-    }
-    out
 }
 
 fn search_num_results_args() -> Option<(String, String, Option<String>)> {
@@ -1030,8 +936,7 @@ fn rewrite_argv_value_for(
             .split_whitespace()
             .next()
             .filter(|token| token.starts_with('-'))
-            // clap knows the internal spelling; argv holds the public one.
-            .map(|token| token.replace("--export-format", "--format"))
+            .map(str::to_string)
     });
     let mut replaced = false;
     let mut previous: Option<String> = None;

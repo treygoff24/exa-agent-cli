@@ -1,3 +1,57 @@
+fn documented_count(document: &str, marker: &str, terminator: &str, label: &str) -> usize {
+    assert_eq!(
+        document.matches(marker).count(),
+        1,
+        "{label} count marker must appear exactly once"
+    );
+    let remainder = document
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("{label} count marker is missing"))
+        .1;
+    let count = remainder
+        .split_once(terminator)
+        .unwrap_or_else(|| panic!("{label} count terminator is missing"))
+        .0;
+    count
+        .parse()
+        .unwrap_or_else(|_| panic!("{label} command count is not an integer: {count:?}"))
+}
+
+#[test]
+fn published_command_counts_match_the_registry() {
+    let expected = exa_agent_cli::registry::REGISTRY.len();
+    let agents = include_str!("../AGENTS.md");
+    let readme = include_str!("../README.md");
+
+    assert_eq!(
+        documented_count(
+            agents,
+            "administration — as ",
+            " non-interactive commands",
+            "AGENTS.md overview",
+        ),
+        expected
+    );
+    assert_eq!(
+        documented_count(
+            agents,
+            "exa-agent capabilities --json    # all ",
+            " commands:",
+            "AGENTS.md capabilities",
+        ),
+        expected
+    );
+    assert_eq!(
+        documented_count(
+            readme,
+            "`capabilities` lists all ",
+            " commands",
+            "README.md capabilities",
+        ),
+        expected
+    );
+}
+
 #[test]
 fn release_minimum_and_raw_decoding_are_documented_without_wire_capture_claims() {
     for doc in [

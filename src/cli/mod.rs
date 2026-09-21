@@ -725,6 +725,8 @@ pub struct SearchArgs {
     /// Latest estimated publication date.
     #[arg(long, visible_alias = "published-before", value_name = "ISO")]
     pub end_published_date: Option<String>,
+    #[command(flatten)]
+    pub freshness: ContentFreshnessArgs,
     /// Common mistake: search uses --num-results, not --limit.
     #[arg(
         long,
@@ -759,7 +761,7 @@ fn search_type_flag(value: &Option<SearchType>) -> Option<String> {
 
 impl SearchArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
-        vec![
+        let mut values = vec![
             ("query", Some(self.query.clone())),
             ("output-schema", self.output_schema.clone()),
             ("stream", self.stream.then(|| "true".to_string())),
@@ -777,7 +779,68 @@ impl SearchArgs {
             ("exclude-domain", str_array_flag(&self.exclude_domain)),
             ("start-published-date", self.start_published_date.clone()),
             ("end-published-date", self.end_published_date.clone()),
+        ];
+        values.extend(self.freshness.flag_values());
+        values
+    }
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ContentFreshnessArgs {
+    /// Maximum cached-content age in hours (-1..=720).
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(i64).range(-1..=720),
+        allow_negative_numbers = true,
+        conflicts_with_all = ["fresh", "cache_only"]
+    )]
+    pub max_age_hours: Option<i64>,
+    /// Fetch fresh content (`maxAgeHours: 0`).
+    #[arg(long, conflicts_with_all = ["max_age_hours", "cache_only"])]
+    pub fresh: bool,
+    /// Use cached content only (`maxAgeHours: -1`).
+    #[arg(long, conflicts_with_all = ["max_age_hours", "fresh"])]
+    pub cache_only: bool,
+    /// Live-crawl timeout in milliseconds (1..=90000).
+    #[arg(
+        long,
+        value_name = "MS",
+        value_parser = clap::value_parser!(u32).range(1..=90000)
+    )]
+    pub livecrawl_timeout: Option<u32>,
+    /// Return the newest stored page version as of an RFC 3339 date or date-time.
+    #[arg(long, value_name = "DATE_OR_DATETIME", value_parser = parse_snapshot_as_of)]
+    pub snapshot_as_of: Option<String>,
+}
+
+impl ContentFreshnessArgs {
+    fn flag_values(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            (
+                "max-age-hours",
+                self.max_age_hours.map(|value| value.to_string()),
+            ),
+            ("fresh", self.fresh.then(|| "0".to_string())),
+            ("cache-only", self.cache_only.then(|| "-1".to_string())),
+            (
+                "livecrawl-timeout",
+                self.livecrawl_timeout.map(|value| value.to_string()),
+            ),
+            ("snapshot-as-of", self.snapshot_as_of.clone()),
         ]
+    }
+}
+
+fn parse_snapshot_as_of(raw: &str) -> Result<String, String> {
+    let date_format = time::format_description::parse("[year]-[month]-[day]")
+        .expect("static date format is valid");
+    if time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).is_ok()
+        || time::Date::parse(raw, &date_format).is_ok()
+    {
+        Ok(raw.to_string())
+    } else {
+        Err("must be an RFC 3339 date (YYYY-MM-DD) or date-time".to_string())
     }
 }
 
@@ -828,6 +891,8 @@ pub struct ContentsArgs {
     /// Fetch independent `--chunk-size` chunks with N workers (1-16, default 1 = serial).
     #[arg(long, requires = "chunk_size", value_parser = clap::value_parser!(u32).range(1..=MAX_CONTENTS_JOBS as i64))]
     pub jobs: Option<u32>,
+    #[command(flatten)]
+    pub freshness: ContentFreshnessArgs,
 }
 
 /// Ceiling on `contents --jobs`. Small on purpose: these are billable upstream requests against
@@ -836,13 +901,15 @@ pub const MAX_CONTENTS_JOBS: u32 = 16;
 
 impl ContentsArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
-        vec![
+        let mut values = vec![
             ("urls", str_array_flag(&self.urls)),
             ("ids", str_array_flag(&self.ids)),
             ("text", self.text.clone()),
             ("summary-query", self.summary_query.clone()),
             ("highlights", self.highlights.clone()),
-        ]
+        ];
+        values.extend(self.freshness.flag_values());
+        values
     }
 }
 
@@ -877,6 +944,8 @@ pub struct SimilarArgs {
         allow_negative_numbers = true
     )]
     pub text: Option<String>,
+    #[command(flatten)]
+    pub freshness: ContentFreshnessArgs,
 }
 
 fn similar_num_results_flag(value: &Option<u32>) -> Option<String> {
@@ -889,7 +958,7 @@ fn similar_category_flag(value: &Option<String>) -> Option<String> {
 
 impl SimilarArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
-        vec![
+        let mut values = vec![
             ("url", Some(self.url.clone())),
             ("num-results", similar_num_results_flag(&self.num_results)),
             (
@@ -898,7 +967,9 @@ impl SimilarArgs {
             ),
             ("category", similar_category_flag(&self.category)),
             ("text", self.text.clone()),
-        ]
+        ];
+        values.extend(self.freshness.flag_values());
+        values
     }
 }
 

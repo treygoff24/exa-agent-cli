@@ -634,6 +634,38 @@ value_name = "N|full"
 arity = { min = 0, max = 1 }
 input_range = [1, 10000]
 
+[[operations."findSimilar".fields]]
+flag = "max-age-hours"
+body_path = "contents.maxAgeHours"
+kind = "int"
+range = [-1, 720]
+value_name = "N"
+
+[[operations."findSimilar".fields]]
+flag = "fresh"
+body_path = "contents.maxAgeHours"
+kind = "int"
+arity = { min = 0, max = 0 }
+
+[[operations."findSimilar".fields]]
+flag = "cache-only"
+body_path = "contents.maxAgeHours"
+kind = "int"
+arity = { min = 0, max = 0 }
+
+[[operations."findSimilar".fields]]
+flag = "livecrawl-timeout"
+body_path = "contents.livecrawlTimeout"
+kind = "int"
+range = [1, 90000]
+value_name = "MS"
+
+[[operations."findSimilar".fields]]
+flag = "snapshot-as-of"
+body_path = "contents.snapshotAsOf"
+kind = "str"
+value_name = "DATE_OR_DATETIME"
+
 [[operations."search".fields]]
 flag = "query"
 body_path = "query"
@@ -700,6 +732,38 @@ input_name = "--text"
 value_name = "N|full"
 arity = { min = 0, max = 1 }
 input_range = [1, 10000]
+
+[[operations."search".fields]]
+flag = "max-age-hours"
+body_path = "contents.maxAgeHours"
+kind = "int"
+range = [-1, 720]
+value_name = "N"
+
+[[operations."search".fields]]
+flag = "fresh"
+body_path = "contents.maxAgeHours"
+kind = "int"
+arity = { min = 0, max = 0 }
+
+[[operations."search".fields]]
+flag = "cache-only"
+body_path = "contents.maxAgeHours"
+kind = "int"
+arity = { min = 0, max = 0 }
+
+[[operations."search".fields]]
+flag = "livecrawl-timeout"
+body_path = "contents.livecrawlTimeout"
+kind = "int"
+range = [1, 90000]
+value_name = "MS"
+
+[[operations."search".fields]]
+flag = "snapshot-as-of"
+body_path = "contents.snapshotAsOf"
+kind = "str"
+value_name = "DATE_OR_DATETIME"
 
 [[operations."search".fields]]
 flag = "highlights"
@@ -844,6 +908,38 @@ input_kind = "flag"
 input_name = "--highlights"
 value_name = "QUERY|JSON|@file"
 arity = { min = 0, max = 1 }
+
+[[operations."getContents".fields]]
+flag = "max-age-hours"
+body_path = "maxAgeHours"
+kind = "int"
+range = [-1, 720]
+value_name = "N"
+
+[[operations."getContents".fields]]
+flag = "fresh"
+body_path = "maxAgeHours"
+kind = "int"
+arity = { min = 0, max = 0 }
+
+[[operations."getContents".fields]]
+flag = "cache-only"
+body_path = "maxAgeHours"
+kind = "int"
+arity = { min = 0, max = 0 }
+
+[[operations."getContents".fields]]
+flag = "livecrawl-timeout"
+body_path = "livecrawlTimeout"
+kind = "int"
+range = [1, 90000]
+value_name = "MS"
+
+[[operations."getContents".fields]]
+flag = "snapshot-as-of"
+body_path = "snapshotAsOf"
+kind = "str"
+value_name = "DATE_OR_DATETIME"
 
 [[operations."createAgentRun".fields]]
 flag = "query"

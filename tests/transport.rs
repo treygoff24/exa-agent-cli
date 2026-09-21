@@ -561,6 +561,34 @@ fn disabled_feature_is_not_a_request_to_rotate_valid_credentials() {
 }
 
 #[test]
+fn snapshot_tags_override_their_http_carrier() {
+    for status in [402, 403] {
+        for tag in [
+            "SNAPSHOT_NOT_ON_PLAN",
+            "SNAPSHOT_NOT_IN_CONTRACT",
+            "SNAPSHOT_TRIAL_EXHAUSTED",
+            "SNAPSHOT_TRIAL_CAP_EXCEEDED",
+        ] {
+            let body = serde_json::json!({ "tag": tag }).to_string();
+            let err = classify_http_status(status, body.as_bytes(), &[]);
+            assert!(matches!(err, CliError::Auth(_)), "{status} {tag}");
+            assert_eq!(err.diag().code, "feature_not_enabled", "{status} {tag}");
+            assert!(!err.diag().retryable, "{status} {tag}");
+            assert_eq!(err.diag().http_status, Some(status), "{status} {tag}");
+        }
+
+        let body = br#"{"tag":"SNAPSHOT_RATE_LIMIT_EXCEEDED"}"#;
+        let headers = [("Retry-After".to_string(), "3".to_string())];
+        let err = classify_http_status(status, body, &headers);
+        assert!(matches!(err, CliError::RateLimit(_)), "{status}");
+        assert_eq!(err.diag().code, "rate_limited", "{status}");
+        assert!(err.diag().retryable, "{status}");
+        assert_eq!(err.diag().http_status, Some(status), "{status}");
+        assert_eq!(err.diag().details.as_ref().unwrap()["retryAfterMs"], 3000);
+    }
+}
+
+#[test]
 fn batch_create_never_automatically_replays_an_unconfirmed_request() {
     let globals = parse_globals(&["--idempotency-key", "batch-request-1", "--retry", "2"]);
     let credential = auth::resolve_api_credential(

@@ -3126,6 +3126,204 @@ fn contents_dry_run_is_a_request_preview_without_outcome() {
 }
 
 #[test]
+fn content_freshness_flags_map_to_each_command_body() {
+    for (command, content_path) in [
+        (vec!["search", "query"], "contents"),
+        (vec!["contents", "https://example.com"], ""),
+        (vec!["similar", "https://example.com"], "contents"),
+    ] {
+        for (flag_args, field, expected) in [
+            (
+                vec!["--max-age-hours", "24"],
+                "maxAgeHours",
+                serde_json::json!(24),
+            ),
+            (vec!["--fresh"], "maxAgeHours", serde_json::json!(0)),
+            (vec!["--cache-only"], "maxAgeHours", serde_json::json!(-1)),
+            (
+                vec!["--livecrawl-timeout", "1200"],
+                "livecrawlTimeout",
+                serde_json::json!(1200),
+            ),
+            (
+                vec!["--snapshot-as-of", "2026-09-01T12:30:00Z"],
+                "snapshotAsOf",
+                serde_json::json!("2026-09-01T12:30:00Z"),
+            ),
+        ] {
+            let mut args = command.clone();
+            args.extend(flag_args);
+            args.extend(["--dry-run", "--print-request", "--compact"]);
+            let preview = run_ok_json(&args);
+            let body = &preview["data"]["request"]["body"];
+            let actual = if content_path.is_empty() {
+                &body[field]
+            } else {
+                &body[content_path][field]
+            };
+            assert_eq!(actual, &expected, "{args:?}");
+        }
+    }
+}
+
+#[test]
+fn content_freshness_parser_enforces_ranges_dates_and_exclusivity() {
+    parses(&["search", "q", "--snapshot-as-of", "2026-09-01"]);
+    parses(&[
+        "contents",
+        "https://example.com",
+        "--snapshot-as-of",
+        "2026-09-01T12:30:00-05:00",
+    ]);
+    assert!(
+        parse_err(&["search", "q", "--snapshot-as-of", "09/01/2026"])
+            .to_string()
+            .contains("RFC 3339")
+    );
+    assert!(parse_err(&["search", "q", "--max-age-hours", "721"])
+        .to_string()
+        .contains("720"));
+    assert!(parse_err(&["search", "q", "--livecrawl-timeout", "0"])
+        .to_string()
+        .contains("1..=90000"));
+    for pair in [
+        ["--fresh", "--cache-only"],
+        ["--fresh", "--max-age-hours"],
+        ["--cache-only", "--max-age-hours"],
+    ] {
+        let mut args = vec!["search", "q", pair[0], pair[1]];
+        if pair[1] == "--max-age-hours" {
+            args.push("24");
+        }
+        assert!(parse_err(&args).to_string().contains("cannot be used with"));
+    }
+}
+
+#[test]
+fn snapshot_rejects_all_merged_body_conflicts() {
+    for command in [
+        vec!["search", "query"],
+        vec!["contents", "https://example.com"],
+        vec!["similar", "https://example.com"],
+    ] {
+        for typed_conflict in [
+            vec!["--fresh"],
+            vec!["--cache-only"],
+            vec!["--max-age-hours", "24"],
+            vec!["--livecrawl-timeout", "1000"],
+        ] {
+            let mut args = command.clone();
+            args.extend(["--snapshot-as-of", "2026-09-01"]);
+            args.extend(typed_conflict);
+            args.extend(["--dry-run", "--compact"]);
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}");
+            assert_eq!(
+                stderr_json(&output)["error"]["code"],
+                "invalid_flag_combination",
+                "{args:?}"
+            );
+        }
+
+        let nested = command[0] != "contents";
+        for (field, value) in [
+            ("maxAgeHours", "24"),
+            ("livecrawl", r#""always""#),
+            ("livecrawlTimeout", "1000"),
+            ("subpages", "1"),
+        ] {
+            let prefix = if nested { "contents." } else { "" };
+            let mut args: Vec<String> = command.iter().map(ToString::to_string).collect();
+            args.extend([
+                "--set".into(),
+                format!("{prefix}snapshotAsOf=\"2026-09-01\""),
+                "--set".into(),
+                format!("{prefix}{field}={value}"),
+                "--dry-run".into(),
+                "--compact".into(),
+            ]);
+            let output = run_owned(&args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}");
+            let error = stderr_json(&output);
+            assert_eq!(error["error"]["code"], "invalid_flag_combination");
+            assert!(
+                error["error"]["message"].as_str().unwrap().contains(field),
+                "{args:?}: {error}"
+            );
+        }
+    }
+
+    for (typed, field) in [
+        (vec!["--type", "deep"], "type=deep"),
+        (vec!["--category", "news"], "category"),
+    ] {
+        let mut args = vec!["search", "query", "--snapshot-as-of", "2026-09-01"];
+        args.extend(typed);
+        args.extend(["--dry-run", "--compact"]);
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(stderr_json(&output)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(field));
+    }
+    for (field, value, expected) in [
+        ("type", r#""deep""#, "type=deep"),
+        ("category", r#""news""#, "category"),
+    ] {
+        let args = [
+            "search",
+            "query",
+            "--set",
+            r#"contents.snapshotAsOf="2026-09-01""#,
+            "--set",
+            &format!("{field}={value}"),
+            "--dry-run",
+            "--compact",
+        ];
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(stderr_json(&output)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(expected));
+    }
+    for search_type in ["auto", "fast", "instant"] {
+        let preview = run_ok_json(&[
+            "search",
+            "query",
+            "--snapshot-as-of",
+            "2026-09-01",
+            "--type",
+            search_type,
+            "--dry-run",
+            "--compact",
+        ]);
+        assert_eq!(preview["ok"], true, "{search_type}");
+    }
+}
+
+#[test]
+fn merged_livecrawl_emits_deprecation_warning() {
+    let preview = run_ok_json(&[
+        "search",
+        "query",
+        "--set",
+        r#"contents.livecrawl="always""#,
+        "--dry-run",
+        "--compact",
+    ]);
+    assert!(preview["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| {
+            warning["code"] == "deprecated_upstream"
+                && warning["message"].as_str().unwrap().contains("maxAgeHours")
+        }));
+}
+
+#[test]
 fn search_and_similar_text_share_normalization_boundaries() {
     for command in ["search", "similar"] {
         let mut valid = vec![command, "https://example.com", "--text"];

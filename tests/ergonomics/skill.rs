@@ -21,4 +21,16 @@ fn generated_skill_is_the_robot_docs_golden() {
         expected.push_str("\n```\n");
     }
     assert_eq!(SKILL, expected);
+    for required in [
+        "Use --fresh when the task says latest or current",
+        "--snapshot-as-of",
+        "results are under `.results[]`, not `.data.results[]`",
+        "`--output FILE` for the full envelope",
+        "`--max-output-bytes 0` to disable spilling",
+    ] {
+        assert!(
+            SKILL.contains(required),
+            "missing skill guidance: {required}"
+        );
+    }
 }

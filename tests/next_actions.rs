@@ -157,6 +157,68 @@ fn preview(action: &str) -> Value {
     run(&args, true)
 }
 
+fn assert_all_exa_actions_parse(envelope: &Value) -> usize {
+    let commands = envelope["nextActions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|action| action["command"].as_str())
+        .chain(
+            envelope["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|warning| warning["suggestedCommand"].as_str()),
+        );
+    let mut parsed = 0;
+    for command in commands {
+        let argv = words(command);
+        if argv.first().map(String::as_str) != Some("exa-agent") {
+            continue;
+        }
+        exa_agent_cli::cli::Cli::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("unparseable emitted command `{command}`: {error}"));
+        parsed += 1;
+    }
+    parsed
+}
+
+#[test]
+fn warning_derived_recovery_actions_parse_through_the_real_cli() {
+    let (url, handle) = server(json!({
+        "results": [{"url":"https://a.test","text":"ok"}],
+        "statuses": [
+            {"id":"https://a.test","status":"success"},
+            {"id":"https://b.test","status":"error","error":{"tag":"CRAWL_TIMEOUT"}}
+        ]
+    }));
+    let response = run(
+        &[
+            "contents",
+            "https://a.test",
+            "https://b.test",
+            "--base-url",
+            &url,
+            "--api-key",
+            "fixture-secret",
+            "--json",
+        ],
+        false,
+    );
+    handle.join().unwrap();
+    let suggested = response["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["suggestedCommand"].is_string())
+        .count();
+    assert!(
+        suggested > 0,
+        "fixture emitted no warning recovery: {response}"
+    );
+    assert_eq!(assert_all_exa_actions_parse(&response), suggested * 2);
+}
+
 #[test]
 fn async_create_followups_use_returned_ids_and_quote_shell_metacharacters() {
     for (command, api_path, id, expected_paths) in [

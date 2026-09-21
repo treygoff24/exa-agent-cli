@@ -131,6 +131,54 @@ fn corpus_matches_goldens() {
     );
 }
 
+#[test]
+fn content_freshness_request_corpus_matches_golden() {
+    let expected: BTreeMap<String, Value> = serde_json::from_str(
+        &fs::read_to_string("tests/request_corpus/content-freshness.json")
+            .expect("read content freshness golden"),
+    )
+    .expect("parse content freshness golden");
+    let mut seen = BTreeSet::new();
+    for (command, base) in [
+        ("search", vec!["search", "q"]),
+        ("contents", vec!["contents", "https://example.com"]),
+        ("similar", vec!["similar", "https://example.com"]),
+    ] {
+        for (name, flags) in [
+            ("max-age-hours", vec!["--max-age-hours", "24"]),
+            ("fresh", vec!["--fresh"]),
+            ("cache-only", vec!["--cache-only"]),
+            ("livecrawl-timeout", vec!["--livecrawl-timeout", "1200"]),
+            ("snapshot-as-of", vec!["--snapshot-as-of", "2026-09-01"]),
+        ] {
+            let key = format!("{command}-{name}");
+            let mut argv: Vec<String> = base.iter().map(ToString::to_string).collect();
+            argv.extend(flags.iter().map(ToString::to_string));
+            let entry = CorpusEntry {
+                argv,
+                env: BTreeMap::new(),
+                stdin: None,
+            };
+            let output = run_preview(&entry);
+            assert!(
+                output.status.success(),
+                "{key}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let actual: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
+            assert_eq!(
+                actual.pointer("/data/request/body").expect("preview body"),
+                expected
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("missing {key} golden")),
+                "{key}"
+            );
+            seen.insert(key);
+        }
+    }
+    assert_eq!(seen, expected.keys().cloned().collect());
+}
+
 fn load_manifest() -> Manifest {
     toml::from_str(
         &fs::read_to_string(MANIFEST)

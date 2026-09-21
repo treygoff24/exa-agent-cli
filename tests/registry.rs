@@ -90,6 +90,39 @@ fn capabilities_covers_every_operation() {
         .any(|command| command == "macro show"));
 }
 
+#[test]
+fn capabilities_publish_content_freshness_body_paths() {
+    let caps = capabilities();
+    for (command, prefix) in [
+        ("search", "contents."),
+        ("contents", ""),
+        ("similar", "contents."),
+    ] {
+        let fields = caps["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == command)
+            .unwrap_or_else(|| panic!("missing {command} capability"))["fields"]
+            .as_array()
+            .unwrap();
+        for (flag, body_field) in [
+            ("max-age-hours", "maxAgeHours"),
+            ("fresh", "maxAgeHours"),
+            ("cache-only", "maxAgeHours"),
+            ("livecrawl-timeout", "livecrawlTimeout"),
+            ("snapshot-as-of", "snapshotAsOf"),
+        ] {
+            assert!(
+                fields.iter().any(|field| {
+                    field["flag"] == flag && field["bodyPath"] == format!("{prefix}{body_field}")
+                }),
+                "{command} --{flag}"
+            );
+        }
+    }
+}
+
 /// Admin operations live in the service namespace and nowhere else (D4).
 #[test]
 fn admin_ops_are_service_namespace() {

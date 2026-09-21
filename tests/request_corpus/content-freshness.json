@@ -1,0 +1,17 @@
+{
+  "search-max-age-hours": {"query":"q","contents":{"maxAgeHours":24,"highlights":{"query":"q","maxCharacters":800}}},
+  "search-fresh": {"query":"q","contents":{"maxAgeHours":0,"highlights":{"query":"q","maxCharacters":800}}},
+  "search-cache-only": {"query":"q","contents":{"maxAgeHours":-1,"highlights":{"query":"q","maxCharacters":800}}},
+  "search-livecrawl-timeout": {"query":"q","contents":{"livecrawlTimeout":1200,"highlights":{"query":"q","maxCharacters":800}}},
+  "search-snapshot-as-of": {"query":"q","contents":{"snapshotAsOf":"2026-09-01","highlights":{"query":"q","maxCharacters":800}}},
+  "contents-max-age-hours": {"urls":["https://example.com"],"maxAgeHours":24},
+  "contents-fresh": {"urls":["https://example.com"],"maxAgeHours":0},
+  "contents-cache-only": {"urls":["https://example.com"],"maxAgeHours":-1},
+  "contents-livecrawl-timeout": {"urls":["https://example.com"],"livecrawlTimeout":1200},
+  "contents-snapshot-as-of": {"urls":["https://example.com"],"snapshotAsOf":"2026-09-01"},
+  "similar-max-age-hours": {"url":"https://example.com","contents":{"maxAgeHours":24}},
+  "similar-fresh": {"url":"https://example.com","contents":{"maxAgeHours":0}},
+  "similar-cache-only": {"url":"https://example.com","contents":{"maxAgeHours":-1}},
+  "similar-livecrawl-timeout": {"url":"https://example.com","contents":{"livecrawlTimeout":1200}},
+  "similar-snapshot-as-of": {"url":"https://example.com","contents":{"snapshotAsOf":"2026-09-01"}}
+}

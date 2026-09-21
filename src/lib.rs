@@ -2009,6 +2009,7 @@ fn dispatch_fetch(args: &FetchArgs, globals: &GlobalArgs, pretty: bool) -> Resul
             highlights: None,
             chunk_size: None,
             jobs: None,
+            freshness: Default::default(),
         };
         let spec = build_contents_spec(&contents_args, globals)?;
         let specs = chunk_contents_specs(spec, None)?;
@@ -6124,9 +6125,62 @@ fn build_typed_spec(
         request::deep_merge(&mut body, spec.body);
         spec.body = body;
     }
+    validate_snapshot_options(op, &spec.body)?;
     validate_content_options(op, &spec.body)?;
     validate_highlights_beta(op, &spec.body, globals)?;
     Ok(spec)
+}
+
+fn validate_snapshot_options(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+) -> Result<(), CliError> {
+    let (snapshot_path, content_prefix) = match op.command().as_str() {
+        "search" | "similar" => ("contents.snapshotAsOf", "contents."),
+        "contents" => ("snapshotAsOf", ""),
+        _ => return Ok(()),
+    };
+    if !body_field_present(body, snapshot_path) {
+        return Ok(());
+    }
+
+    for field in ["maxAgeHours", "livecrawl", "livecrawlTimeout", "subpages"] {
+        let conflicting_path = format!("{content_prefix}{field}");
+        if body_field_present(body, &conflicting_path) {
+            return Err(snapshot_conflict(snapshot_path, &conflicting_path));
+        }
+    }
+
+    if op.command() == "search" {
+        if let Some(search_type) = body_value_at_path(body, "type")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !matches!(*value, "auto" | "fast" | "instant"))
+        {
+            return Err(snapshot_conflict(
+                snapshot_path,
+                &format!("type={search_type}"),
+            ));
+        }
+        if body_field_present(body, "category") {
+            return Err(snapshot_conflict(snapshot_path, "category"));
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_conflict(snapshot_path: &str, conflicting_field: &str) -> CliError {
+    CliError::Usage(
+        Diag::new(
+            "invalid_flag_combination",
+            format!(
+                "`{snapshot_path}` cannot be combined with `{conflicting_field}` because Snapshot uses stored page versions only"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "field": snapshot_path,
+            "conflictingField": conflicting_field,
+        })),
+    )
 }
 
 fn validate_highlights_beta(
@@ -8458,6 +8512,18 @@ fn request_body_warnings(
             })]
         })
         .unwrap_or_default();
+    let livecrawl_path = match op.command().as_str() {
+        "search" | "similar" => Some("contents.livecrawl"),
+        "contents" => Some("livecrawl"),
+        _ => None,
+    };
+    if livecrawl_path.is_some_and(|path| body_field_present(body, path)) {
+        warnings.push(serde_json::json!({
+            "code": "deprecated_upstream",
+            "message": "`livecrawl` is deprecated upstream; use `maxAgeHours` for content freshness control.",
+            "replacement": "--max-age-hours N",
+        }));
+    }
     if op.command() == "search"
         && body.get("stream").and_then(serde_json::Value::as_bool) == Some(true)
         && body
@@ -9268,6 +9334,8 @@ fn dispatch_robot_docs(
                     "Search is not cursor-paginated: use --num-results and follow error.suggestedCommand when an invocation is rejected.",
                     "Search returns query-aware 800-char highlights by default; use --no-highlights for metadata only, or --text 1500 instead of --text full for capped triage text.",
                     "Named output controls include search/answer --output-schema JSON|@file, search/answer/agent runs create --system-prompt TEXT|@file, and contents --highlights [QUERY|JSON|@file].",
+                    "Content retrieval is cache-first by default. Use --fresh when the task says latest or current; --cache-only forbids live fetching, while --max-age-hours N sets an explicit freshness window and --livecrawl-timeout MS bounds live crawling.",
+                    "Use --snapshot-as-of YYYY-MM-DD or an RFC 3339 date-time to retrieve the newest stored page version as of that instant. Snapshot cannot be combined with live-web, freshness-window, or subpage options.",
                     "Answer --model accepts exa, exa-pro, exa-research, or exa-fast; --user-location supplies a country code. --body and --set override named flags.",
                     "Search --highlights accepts a character cap or JSON|@file. For a shared context budget use --highlights '{\"dynamic\":true,\"verbosity\":\"medium\"}' --beta dynamic-highlights-2026-08-28; omit maxCharacters and numSentences with verbosity.",
                     "Search --stream requests SSE for synthesized output. Without a final non-null outputSchema, upstream returns normal JSON and the envelope warns with stream_ignored; --body/--set overrides determine the final request.",
@@ -9282,8 +9350,8 @@ fn dispatch_robot_docs(
                     "Websets exports use `exa-agent websets exports create WEBSET --format csv|json` followed by `exa-agent websets exports get WEBSET EXPORT_ID`.",
                     "Use `exa-agent websets get WEBSET --expand items` when the webset response should include its items.",
                     "Websets imports create no longer accepts `--csv` or `--url`; create the import, then follow its returned `nextActions` upload PUT template.",
-                    "Inline search and contents results are under `.data.results[]`; use the null-safe iterator `(.data.results // [])[]`, and inspect `ok`, `warnings`, and `dataPath` before treating an empty iterator as zero results. Verify with `exa-agent search \"rust async runtimes\" --num-results 1 --json | jq '(.data.results // [])[] | {title,url}'`.",
-                    "Global output control is `--max-output-bytes N`; use `--max-output-bytes 0` to keep the full data payload on stdout, or `-o FILE` to write complete output when the default spill cap is too small.",
+                    "Inline search and contents results are under `.data.results[]`. When an envelope has `dataTruncated:true`, read `dataPath`: the spill file root is the former data object, so results are under `.results[]`, not `.data.results[]`.",
+                    "For predictable extraction, use inline `jq '(.data.results // [])[]'`; after auto-spill read `dataPath` and use `jq '(.results // [])[]'`; or pass `--output FILE` for the full envelope / `--max-output-bytes 0` to disable spilling.",
                     "A `site:example.gov` term lives inside the search query and affects query interpretation; `--include-domain example.gov`/`--exclude-domain example.com` are typed upstream domain filters.",
                     "`--include-domain` accepts hostnames, hostname paths, or wildcard subdomains, not bare TLDs such as `gov`; for broad government discovery put `site:.gov` in the query and inspect the returned domains.",
                     "Filter search with `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
@@ -12523,6 +12591,7 @@ mod tests {
                 exclude_domain: vec!["blocked.example".into()],
                 start_published_date: Some("2024-01-01".into()),
                 end_published_date: Some("2024-12-31".into()),
+                freshness: Default::default(),
                 limit: Some("10".into()),
                 count: Some("11".into()),
                 all: true,
@@ -12547,6 +12616,11 @@ mod tests {
                 ("exclude-domain", Some(r#"["blocked.example"]"#.to_string()),),
                 ("start-published-date", Some("2024-01-01".to_string())),
                 ("end-published-date", Some("2024-12-31".to_string())),
+                ("max-age-hours", None),
+                ("fresh", None),
+                ("cache-only", None),
+                ("livecrawl-timeout", None),
+                ("snapshot-as-of", None),
             ]
         );
 
@@ -12559,6 +12633,7 @@ mod tests {
                 highlights: None,
                 chunk_size: Some(10),
                 jobs: None,
+                freshness: Default::default(),
             }
             .into_flag_values(),
             vec![
@@ -12567,6 +12642,11 @@ mod tests {
                 ("text", Some(String::new())),
                 ("summary-query", Some("summarize".to_string())),
                 ("highlights", None),
+                ("max-age-hours", None),
+                ("fresh", None),
+                ("cache-only", None),
+                ("livecrawl-timeout", None),
+                ("snapshot-as-of", None),
             ]
         );
 
@@ -12597,6 +12677,7 @@ mod tests {
                 exclude_source_domain: true,
                 category: Some("publication".into()),
                 text: Some("1500".into()),
+                freshness: Default::default(),
             }
             .into_flag_values(),
             vec![
@@ -12605,6 +12686,11 @@ mod tests {
                 ("exclude-source-domain", Some("true".to_string())),
                 ("category", Some("publication".to_string())),
                 ("text", Some("1500".to_string())),
+                ("max-age-hours", None),
+                ("fresh", None),
+                ("cache-only", None),
+                ("livecrawl-timeout", None),
+                ("snapshot-as-of", None),
             ]
         );
         assert_eq!(
@@ -12614,6 +12700,7 @@ mod tests {
                 exclude_source_domain: false,
                 category: None,
                 text: None,
+                freshness: Default::default(),
             }
             .into_flag_values(),
             vec![
@@ -12622,6 +12709,11 @@ mod tests {
                 ("exclude-source-domain", None),
                 ("category", None),
                 ("text", None),
+                ("max-age-hours", None),
+                ("fresh", None),
+                ("cache-only", None),
+                ("livecrawl-timeout", None),
+                ("snapshot-as-of", None),
             ]
         );
 
@@ -12676,6 +12768,7 @@ mod tests {
                     exclude_domain: Vec::new(),
                     start_published_date: None,
                     end_published_date: None,
+                    freshness: Default::default(),
                     limit: None,
                     count: None,
                     all: false,
@@ -12695,6 +12788,7 @@ mod tests {
                     highlights: None,
                     chunk_size: None,
                     jobs: None,
+                    freshness: Default::default(),
                 }
                 .into_flag_values()
             ),
@@ -12718,6 +12812,7 @@ mod tests {
                     exclude_source_domain: false,
                     category: None,
                     text: None,
+                    freshness: Default::default(),
                 }
                 .into_flag_values()
             ),

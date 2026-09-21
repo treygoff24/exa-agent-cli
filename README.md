@@ -115,6 +115,10 @@ exa-agent search "rust async runtimes" --num-results 5
 # Search returns query-aware highlights capped at 800 chars/result by default; --highlights N
 # for a different cap, --no-highlights for metadata only, or --text / --text 1500 / --text full
 # for page text.
+# Search, contents, and similar are cache-first by default. Use --fresh for latest/current tasks,
+# --cache-only, --max-age-hours N, or --livecrawl-timeout MS for explicit freshness behavior.
+exa-agent search "current AI policy" --fresh --text 1500
+exa-agent search "AI policy" --snapshot-as-of 2026-09-01
 
 # Cited answer
 exa-agent answer "what changed in the EU AI Act in 2025?"
@@ -126,6 +130,8 @@ exa-agent search "fusion energy" --highlights '{"dynamic":true,"verbosity":"medi
 # Page contents
 exa-agent contents https://exa.ai https://docs.exa.ai --text
 # Contents accepts positional URLS or `--ids`. Text accepts bare, full, or N (1..10000).
+# --snapshot-as-of accepts an RFC 3339 date or date-time and cannot be combined with freshness,
+# live-crawl, or subpage options.
 
 # Code/docs context for a coding agent
 exa-agent context "how to stream SSE in Rust with ureq"

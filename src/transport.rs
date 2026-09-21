@@ -1364,6 +1364,26 @@ fn classify_http_status_with_payment_mode(
     if status == 402 && payment_mode && has_payment_challenge(headers) {
         return payment_required_error(status, headers);
     }
+    let upstream_tag = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("tag").and_then(Value::as_str).map(str::to_owned));
+    if matches!(
+        upstream_tag.as_deref(),
+        Some(
+            "SNAPSHOT_NOT_ON_PLAN"
+                | "SNAPSHOT_NOT_IN_CONTRACT"
+                | "SNAPSHOT_TRIAL_EXHAUSTED"
+                | "SNAPSHOT_TRIAL_CAP_EXCEEDED"
+        )
+    ) {
+        let mut diag = upstream_error_diag("feature_not_enabled", status, body);
+        diag.http_status = Some(status);
+        diag.retryable = false;
+        return CliError::Auth(diag);
+    }
+    if upstream_tag.as_deref() == Some("SNAPSHOT_RATE_LIMIT_EXCEEDED") {
+        return rate_limit_error(status, body, headers);
+    }
     // Credit exhaustion is a billing state, not a bad request, bad key, or rate limit, but only
     // Exa's 4xx client/account responses are allowed to carry that meaning.
     if (400..=499).contains(&status) && body_signals_credit_exhaustion(body) {
@@ -1408,20 +1428,7 @@ fn classify_http_status_with_payment_mode(
             diag.retryable = false;
             CliError::Conflict(diag)
         }
-        429 => {
-            let retry_after_ms = headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
-                .and_then(|(_, v)| v.parse::<u64>().ok())
-                .map(|secs| secs.saturating_mul(1000));
-            let mut diag = upstream_error_diag("rate_limited", status, body);
-            diag.http_status = Some(status);
-            diag.retryable = true;
-            if let Some(ms) = retry_after_ms {
-                diag = diag_with_detail(diag, "retryAfterMs", serde_json::Value::from(ms));
-            }
-            CliError::RateLimit(diag)
-        }
+        429 => rate_limit_error(status, body, headers),
         500..=599 => {
             let mut diag = upstream_error_diag("upstream_error", status, body);
             diag.http_status = Some(status);
@@ -1441,6 +1448,21 @@ fn classify_http_status_with_payment_mode(
             CliError::Upstream(diag)
         }
     }
+}
+
+fn rate_limit_error(status: u16, body: &[u8], headers: &[(String, String)]) -> CliError {
+    let retry_after_ms = headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1000));
+    let mut diag = upstream_error_diag("rate_limited", status, body);
+    diag.http_status = Some(status);
+    diag.retryable = true;
+    if let Some(milliseconds) = retry_after_ms {
+        diag = diag_with_detail(diag, "retryAfterMs", serde_json::Value::from(milliseconds));
+    }
+    CliError::RateLimit(diag)
 }
 
 fn has_payment_challenge(headers: &[(String, String)]) -> bool {

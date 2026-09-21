@@ -6,6 +6,35 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Typed content-freshness flags on `search`, `contents`, and `similar`:
+  `--max-age-hours N` (-1..=720), `--fresh` (`maxAgeHours: 0`, always crawl),
+  `--cache-only` (`maxAgeHours: -1`), and `--livecrawl-timeout MS`. The default stays
+  cache-first and the request body is unchanged when none of the flags are given. A merged
+  body carrying the deprecated `livecrawl` field warns, and `livecrawl` with `maxAgeHours`
+  is rejected locally. The `contents` recovery hints now emit a `--fresh` that actually
+  parses; every emitted `nextActions` and `suggestedCommand` is parsed through the real
+  command tree in tests, including warning-derived ones.
+- Exa Snapshot support: `--snapshot-as-of DATE_OR_DATETIME` on `search`, `contents`, and
+  `similar` (nested under `contents` for search/similar, top-level for contents). Snapshot
+  conflicts are rejected on the merged body: `maxAgeHours`, `livecrawl`, `livecrawlTimeout`,
+  `subpages`, and for `search` any `category` or a `type` other than `auto`/`fast`/`instant`.
+  Snapshot plan, contract, and trial error tags classify as `feature_not_enabled` on 402/403;
+  `SNAPSHOT_RATE_LIMIT_EXCEEDED` classifies as a rate limit. Snapshot access remains subject
+  to Exa plan entitlements.
+- `websets preview --search <true|false>`, sent as the URL query parameter the corrected
+  upstream spec now declares. It defaults to `true` when the body carries `search.count`,
+  which preserves the previous behaviour. `capabilities` reports request placement (`in`)
+  for query parameters.
+- Vendored specs re-verified 2026-09-21: the public spec kept 64 operations and gained
+  `snapshotAsOf`, explicit 503 `SERVICE_OVERLOADED` responses on the four core endpoints,
+  and a factored stream/output schema set; the admin spec changed in prose only.
+  `xtask vendor-spec` now normalizes the admin YAML in Rust (`serde_yaml_ng`, dev-tool only)
+  instead of shelling out to Ruby, so the re-vendor runs on hosts without Ruby. The shipped
+  binary still carries no YAML parser.
+- `websets exports create|get` and `context` warn (`undocumented_upstream`) that their routes
+  are no longer documented by Exa as of 2026-09-21 and are absent from the official SDKs.
+  The exports route returned a route-level 404 on a live probe and may have been retired;
+  `/context` still works. Both stay available pending an upstream statement.
 - Batch create, list, get, cancel, and delete commands, plus early Agent run stop.
   Batch wrappers are validated locally over the merged body (`--requests`, `--body`,
   `--set`, or a preset may supply `requests`), completed-list filters survive
@@ -42,6 +71,11 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- The generated agent skill now explains the auto-spill envelope: when output crosses
+  `--max-output-bytes`, `data` is `null` and the file at `dataPath` holds the former `data`
+  object, so results live at `.results` there (or pass `--output FILE` / `--max-output-bytes 0`
+  for the inline shape). Extractors that read `.data.results` from the spill file returned
+  nothing.
 - Healthy doctor test fixtures explicitly create private managed directories;
   writable-directory diagnostics remain report-only.
 - Chunked contents rejects `stream:true` before sending or touching output, and

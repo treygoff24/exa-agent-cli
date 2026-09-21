@@ -27,8 +27,7 @@ All three install the `exa-agent` binary. Verify with `exa-agent --version`.
 
 ### Platforms and release artifacts
 
-The 0.7.0 release configuration targets six prebuilt archives. These additions
-remain Unreleased. Windows is a deliberate non-goal.
+The 0.7.0 release targets six prebuilt archives. Windows is a deliberate non-goal.
 
 | Platform | Target triple | Linkage |
 | --- | --- | --- |

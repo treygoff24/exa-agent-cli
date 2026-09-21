@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+## 0.7.0 — 2026-09-21
+
 ### Added
 
 - Typed content-freshness flags on `search`, `contents`, and `similar`:

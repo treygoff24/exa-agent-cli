@@ -224,13 +224,16 @@ fn temp_path(name: &str) -> PathBuf {
 /// cannot be reassigned to another fixture, and every connect is refused.
 fn closed_local_base_url() -> (rustix::fd::OwnedFd, String) {
     use rustix::net::{AddressFamily, Ipv4Addr, SocketAddrV4, SocketFlags, SocketType};
-    let socket = rustix::net::socket_with(
-        AddressFamily::INET,
-        SocketType::STREAM,
-        SocketFlags::CLOEXEC,
-        None,
-    )
-    .unwrap();
+    // `SOCK_CLOEXEC` exists only on Linux-family kernels; elsewhere (macOS included) rustix
+    // has no `SocketFlags::CLOEXEC`, so the flag is set with `fcntl` after creation instead.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let flags = SocketFlags::CLOEXEC;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let flags = SocketFlags::empty();
+    let socket =
+        rustix::net::socket_with(AddressFamily::INET, SocketType::STREAM, flags, None).unwrap();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC).unwrap();
     rustix::net::bind(&socket, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
     let addr = rustix::net::getsockname(&socket).unwrap();
     let addr = SocketAddrV4::try_from(addr).unwrap();

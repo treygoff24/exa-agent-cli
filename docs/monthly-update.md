@@ -70,8 +70,7 @@ that skill leaves abstract. Networked commands are marked below; publication is 
 
 ## Latest local cycle
 
-- 2026-10-07: 0.8.0 installed and verified locally; Forgejo source updated. GitHub
-  and crates.io publication remain pending. The full gate passed 690 tests,
+- 2026-10-07: 0.8.0 release preparation and local verification. The full gate passed 690 tests,
   `cargo publish --locked --dry-run` passed, and installed provenance and package
   identity were checked. Live search accepted objective, location, and larger
   content caps; contents returned usable text. These checks cost $0.008. No paid

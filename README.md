@@ -13,10 +13,8 @@ crate is `exa-agent-cli`.
 brew install treygoff24/tap/exa-agent
 ```
 
-The source and locally verified candidate are **0.8.0**. GitHub releases and
-crates.io publication are pending; package-manager and latest-release installers
-below retrieve published artifacts, which may have an earlier version. Check
-`exa-agent --version` before using the new flags.
+Version **0.8.0** adds Ultra agent runs, search objectives, location hints, and
+larger content limits. Check `exa-agent --version` after installing or upgrading.
 
 ## Quick example
 

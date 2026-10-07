@@ -4,8 +4,7 @@ Notable changes, newest first.
 
 ## Unreleased
 
-The 0.8.0 candidate is verified locally. Public release and registry publication
-are pending; these entries are not a claim of published availability.
+## 0.8.0 — 2026-10-07
 
 ### Added
 

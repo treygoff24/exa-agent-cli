@@ -67,6 +67,8 @@ that skill leaves abstract. Networked commands are marked below; publication is 
 - Local install: `cargo build --release --bin exa-agent`, then
   `install -m 0755 "$CARGO_TARGET_DIR/release/exa-agent" ~/.local/bin/exa-agent`.
   On the estate the shim at `~/.local/bin/estate-shims/exa-agent` wraps it.
+  On the Mac the shim finds the `cargo install` copy in `~/.cargo/bin`; after a
+  release, upgrade it with `cargo install exa-agent-cli --locked --version X.Y.Z`.
 - Pool skill to refresh when the playbook changes: `exa-agent-cli` in the
   skill library (it points at `exa-agent robot-docs guide`, so it only needs
   edits when the estate auth ritual or the "rules that bite" change).
@@ -86,7 +88,8 @@ that skill leaves abstract. Networked commands are marked below; publication is 
 - The earlier validation and fallback papercuts were resolved with current
   evidence. Detailed receipts are retained locally in `work/oct07/RESULT.md`,
   `work/STATE.md`, and the installation/review reports under
-  `work/oct07/`. These ignored files are not distributed with the repository.
+  `work/oct07/` of the checkout that prepared the release. These ignored files
+  are not distributed with the repository and are absent from the Mac checkout.
 
 ### 0.8.0 publication
 

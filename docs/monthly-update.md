@@ -71,7 +71,7 @@ that skill leaves abstract. Networked commands are marked below; publication is 
   skill library (it points at `exa-agent robot-docs guide`, so it only needs
   edits when the estate auth ritual or the "rules that bite" change).
 
-## Latest local cycle
+## Latest published cycle
 
 - 2026-10-07: 0.8.0 release preparation and local verification. The full gate passed 690 tests,
   `cargo publish --locked --dry-run` passed, and installed provenance and package
@@ -88,27 +88,15 @@ that skill leaves abstract. Networked commands are marked below; publication is 
   `work/STATE.md`, and the installation/review reports under
   `work/oct07/`. These ignored files are not distributed with the repository.
 
-### 0.8.0 release handoff
+### 0.8.0 publication
 
-Publication is pending. Trey will publish from the Mac, which holds the crates.io
-credential. GitHub main received the release preparation; its Rust 1.85 Clippy
-check found a boolean simplification missed by stable Clippy. The fix is on
-Forgejo main and needs to reach GitHub before tagging.
-
-After preserving any local work, fast-forward the Mac checkout from Forgejo.
-Push the updated `main` to GitHub and wait for all six CI jobs to pass. Then:
-
-```sh
-git tag -a v0.8.0 -m 'Release 0.8.0'
-git push origin refs/tags/v0.8.0
-git push github refs/tags/v0.8.0
-EXA_AGENT_NO_NETWORK=1 cargo publish --locked
-```
-
-Watch the release workflow through Homebrew publication. Verify the six platform
-archives and their checksums, the shell installer, and crates.io version 0.8.0.
-Run `exa-agent --version` and offline `capabilities --json` from an installed
-release artifact. The Exa network guard does not prevent Cargo registry uploads.
+Published 2026-10-07 from the Mac. The Rust 1.85 Clippy fix reached GitHub main
+and all six CI jobs passed; tag `v0.8.0` is on Forgejo and GitHub. The release
+workflow built six archives and the shell installer, and published the Homebrew
+formula. All archive checksums verify, and crates.io serves 0.8.0. The
+downloaded aarch64-apple-darwin archive reports `exa-agent 0.8.0` and lists 71
+commands in offline `capabilities --json`. The Mac's `cargo install` copy was
+upgraded from crates.io; offline `doctor` reports only stale spill files.
 
 ## Previous published cycle
 

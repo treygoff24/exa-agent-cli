@@ -9855,9 +9855,9 @@ fn request_contract_issue(
     let issue = |field: &str, message: &str| serde_json::json!({"issue":"invalid_value", "field":field, "message":message});
     if op.command() == "search" {
         if let Some(objective) = body.get("objective").filter(|value| !value.is_null()) {
-            if !objective
+            if objective
                 .as_str()
-                .is_some_and(|value| value.chars().count() <= 4096)
+                .is_none_or(|value| value.chars().count() > 4096)
             {
                 return Some(issue(
                     "objective",

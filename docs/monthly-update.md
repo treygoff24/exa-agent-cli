@@ -29,6 +29,9 @@ that skill leaves abstract. Networked commands are marked below; publication is 
 - Full gate: `EXA_AGENT_NO_NETWORK=1 cargo xtask ci` (fmt, clippy `-D
   warnings`, tests). The coordinator runs it once on the integrated candidate;
   worker lanes stop at targeted checks through `testrun`.
+- Before release, also run `cargo +1.85 clippy --locked --all-features
+  --all-targets -- -D warnings`. Current stable Clippy does not catch every lint
+  enforced by the minimum supported Rust version.
 - On the devbox cell, build output must live in this repo's managed cache
   directory: `export CARGO_TARGET_DIR="$(estate-build-cache path)"` (a
   per-repo path under `~/.cache/cargo-targets/managed-v1/`; the `rustc-gate`
@@ -84,6 +87,28 @@ that skill leaves abstract. Networked commands are marked below; publication is 
   evidence. Detailed receipts are retained locally in `work/oct07/RESULT.md`,
   `work/STATE.md`, and the installation/review reports under
   `work/oct07/`. These ignored files are not distributed with the repository.
+
+### 0.8.0 release handoff
+
+Publication is pending. Trey will publish from the Mac, which holds the crates.io
+credential. GitHub main received the release preparation; its Rust 1.85 Clippy
+check found a boolean simplification missed by stable Clippy. The fix is on
+Forgejo main and needs to reach GitHub before tagging.
+
+After preserving any local work, fast-forward the Mac checkout from Forgejo.
+Push the updated `main` to GitHub and wait for all six CI jobs to pass. Then:
+
+```sh
+git tag -a v0.8.0 -m 'Release 0.8.0'
+git push origin refs/tags/v0.8.0
+git push github refs/tags/v0.8.0
+EXA_AGENT_NO_NETWORK=1 cargo publish --locked
+```
+
+Watch the release workflow through Homebrew publication. Verify the six platform
+archives and their checksums, the shell installer, and crates.io version 0.8.0.
+Run `exa-agent --version` and offline `capabilities --json` from an installed
+release artifact. The Exa network guard does not prevent Cargo registry uploads.
 
 ## Previous published cycle
 

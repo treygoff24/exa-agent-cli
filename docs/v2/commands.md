@@ -1,9 +1,15 @@
-# v2 Commands & Flags
+# Commands and flags: design and current notes
 
-Date: 2026-06-29
-Status: design reference for the `exa-agent` command tree and flag taxonomy. Output shape, exit codes, envelopes, pagination, batch, and streaming are owned by [`contracts.md`](contracts.md) and are referenced, not restated. Locked product decisions live in [`decisions.md`](decisions.md) and win on any conflict.
+Original design: 2026-06-29. Current behavior notes updated for the local 0.8.0 candidate.
 
-Binary/command name is `exa-agent` everywhere (D2). Crate is `exa-agent-cli`. Default output is **auto** (D3): JSON envelope when stdout is not a TTY, human when it is — so the agent-shaped examples below omit `--json` and still get parseable output.
+The command tree and per-command blocks retain design targets. They are not a
+complete help transcript. Some flags below remain body/set-only or unimplemented;
+use installed `--help` and `capabilities --json` before invoking them. Public
+0.8.0 publication is pending.
+
+Status: design reference for the `exa-agent` command tree and flag taxonomy. Output shape, exit codes, envelopes, pagination, batch, and streaming are owned by [`contracts.md`](contracts.md) and are referenced, not restated. Historical product decisions live in [`decisions.md`](decisions.md); current credential storage and release status are documented in the [README](../../README.md).
+
+Binary/command name is `exa-agent` everywhere (D2). Crate is `exa-agent-cli`. Default output is **auto** (D3): JSON envelope when stdout is not a TTY, human when it is: so the agent-shaped examples below omit `--json` and still get parseable output.
 
 ---
 
@@ -34,6 +40,7 @@ exa-agent
 │       ├── list                   # GET    /agent/runs
 │       ├── get                    # GET    /agent/runs/{id}
 │       ├── events                 # GET    /agent/runs/{id}/events
+│       ├── stop                   # POST   /agent/runs/{id}/stop                  [--yes]
 │       ├── cancel                 # POST   /agent/runs/{id}/cancel
 │       └── delete                 # DELETE /agent/runs/{id}                [--yes]
 ├── research                       # RETIRED upstream (0.5.0): local stub, exits 1 with
@@ -113,8 +120,8 @@ exa-agent
 ├── auth
 │   ├── status
 │   ├── test                       # network auth probe
-│   ├── login                      # store key in OS keyring (reads stdin; never echoes)
-│   └── logout                     # clear the keyring entry for the active profile
+│   ├── login                      # store key in plaintext 0600 credentials file (reads stdin; never echoes)
+│   └── logout                     # clear the stored credential for the active profile
 ├── config
 │   ├── list | get | set | unset
 │   ├── path
@@ -124,17 +131,19 @@ exa-agent
 └── raw                            # escape hatch: METHOD PATH [--body ...]
 ```
 
-Macros `ask` and `fetch` are top-level (§6); `describe` is a documented alias of `capabilities`. The configurable preset/macro registry (`preset show`, `macro show`) is **deferred** post-v1 (D12).
+Macros `ask` and `fetch` are top-level (§6); `describe` is a documented alias of `capabilities`. The shipped preset/macro registry supports `preset list|show` and `macro list|show` (D12 activation).
 
 Current registry: 71 commands; use `exa-agent capabilities --json` for the exact running surface.
 
 ### Why this shape (unchanged from lane-e)
 
-- `search` / `contents` / `similar` / `answer` / `context` are top-level — Exa's core synchronous primitives.
+- `search` / `contents` / `similar` / `answer` / `context` are top-level: Exa's core synchronous primitives.
 - `agent` is top-level because `/agent/runs` is an async workflow API (runs, events, cancel/delete, SSE, structured output).
-- `monitor` (top-level `/monitors`) and `websets monitors` (`/websets/v0/monitors`) are kept **separate** — same noun, different API families. Do not collapse. Because they differ only by singular/plural+nesting (a predictable agent mistype), the CLI ships a **custom did-you-mean**: a bare `exa-agent monitors …` (plural, nonexistent) and `monitor` invoked with webset-shaped args both emit `did you mean 'exa-agent monitor' (Search Monitors, /monitors) or 'exa-agent websets monitors' (Websets monitors, /websets/v0/monitors)?`, and each group's `--help`/`about` names the sibling + its API path.
+
+`monitor` (top-level `/monitors`) and `websets monitors` (`/websets/v0/monitors`) are kept **separate**: same noun, different API families. Do not collapse. Because they differ only by singular/plural+nesting (a predictable agent mistype), the CLI ships a **custom did-you-mean**: a bare `exa-agent monitors …` (plural, nonexistent) and `monitor` invoked with webset-shaped args both emit `did you mean 'exa-agent monitor' (Search Monitors, /monitors) or 'exa-agent websets monitors' (Websets monitors, /websets/v0/monitors)?`, and each group's `--help`/`about` names the sibling + its API path.
+
 - `admin` is walled off (D4): separate credential, separate host, confirm-by-id deletes.
-- `raw` is mandatory to avoid false completeness — any endpoint Exa ships before the registry catches up is still callable with the same auth/output/error contracts.
+- `raw` is mandatory to avoid false completeness: any endpoint Exa ships before the registry catches up is still callable with the same auth/output/error contracts.
 
 ---
 
@@ -142,7 +151,8 @@ Current registry: 71 commands; use `exa-agent capabilities --json` for the exact
 
 > The HTTP method per operation (PATCH vs POST vs PUT) is registry-driven (D17) and exposed per-command in `capabilities --json`; a uniform `update` verb abstracts it rather than hiding it.
 
-Every official Exa operation maps to exactly one canonical command. `[create-POST]` marks operations subject to the no-auto-retry rule (D7 / contracts §7).
+Every supported documented Exa operation maps to one canonical command. The
+SDK-only beta Agent Monitor family is deliberately untyped. `[create-POST]` marks operations subject to the no-auto-retry rule (D7 / contracts §7).
 
 | Official operation | Canonical command | Notes |
 |---|---|---|
@@ -150,8 +160,8 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `POST /contents` | `exa-agent contents URL...` | URLs are positional. The legacy `urls` self-description body-field key is not a CLI spelling (`legacyFlagIsCliFlag: false`); `inputKind: argument` and `name: URLS` are authoritative. Accepts positional URLS or `--ids` (mutually exclusive). 1..100 urls/ids; >100 needs `--chunk-size`. Top-level `text/highlights/summary` upstream. |
 | `POST /findSimilar` | `exa-agent similar URL` | **Deprecated upstream**; warns on stderr, suggests `exa-agent search --similar-to URL`. Kept for breadth. |
 | `POST /answer` | `exa-agent answer QUESTION` | `--text`, `--output-schema`, `--stream`. Returns `data.answer` + `data.citations`. |
-| `POST /context` | `exa-agent context QUERY` | Exa Code. **Docs-only** — not in the OpenAPI, so it is an **overlay-defined** op (D22). `--tokens dynamic|N` (50..100000). Returns `data.response` + counts. |
-| `POST /monitors` | `exa-agent monitor create` | `[create-POST]`. Returns `webhookSecret` once — capture with `--secret-output FILE`. |
+| `POST /context` | `exa-agent context QUERY` | Exa Code. **Docs-only**: not in the OpenAPI, so it is an **overlay-defined** op (D22). `--tokens dynamic|N` (50..100000). Returns `data.response` + counts. |
+| `POST /monitors` | `exa-agent monitor create` | `[create-POST]`. Returns `webhookSecret` once: capture with `--secret-output FILE`. |
 | `GET /monitors` | `exa-agent monitor list` | Cursor: `--limit/--cursor/--all`. Filters: status/name/metadata. |
 | `GET/PATCH/DELETE /monitors/{id}` | `exa-agent monitor get/update/delete` | `delete` requires `--yes`. `update` takes `--set`/`--body`/named flags. |
 | `POST /monitors/{id}/trigger` | `exa-agent monitor trigger ID` | Mutating but cheap; supports `--dry-run --print-request`. |
@@ -161,6 +171,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET /agent/runs` | `exa-agent agent runs list` | Cursor. |
 | `GET /agent/runs/{id}` | `exa-agent agent runs get ID` | Status read; surface `stopReason`. |
 | `GET /agent/runs/{id}/events` | `exa-agent agent runs events ID` | JSON list by default; `--stream` for SSE replay; `--last-event-id`. |
+| `POST /agent/runs/{id}/stop` | `exa-agent agent runs stop ID --yes` | Completes Ultra early with accrued results and charges; no beta header required. |
 | `POST /agent/runs/{id}/cancel` | `exa-agent agent runs cancel ID --yes` | Discards gathered results; returns terminal run if already done. |
 | `DELETE /agent/runs/{id}` | `exa-agent agent runs delete ID --yes` | Destructive. |
 | `/research/v1` (all verbs) | `exa-agent research …` (stub) | **Retired upstream** (HTTP 410, 2026-08). Local stub errors with `research_retired` and the deep-reasoning replacement; see D40. |
@@ -171,7 +182,7 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 | `GET/DELETE /websets/v0/websets/{w}/items` | `exa-agent websets items list/get/delete` | List: `--limit/--cursor/--all`, `--source-id`. `delete` `--yes`. |
 | `POST/GET/cancel searches` | `exa-agent websets searches create/get/cancel` | `create` is `[create-POST]`. |
 | `POST/GET/PATCH/DELETE/cancel enrichments` | `exa-agent websets enrichments create/get/update/delete/cancel` | `create` is `[create-POST]`. `delete`/`cancel` require `--yes`. |
-| `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl` and a `nextActions` PUT template for the documented upload step (the former `--csv`/`--url` conveniences were removed in 0.5.0 — D40d). `delete` `--yes`. |
+| `POST/GET/PATCH/DELETE imports` | `exa-agent websets imports create/list/get/update/delete` | `create` is `[create-POST]`, returns `uploadUrl` and a `nextActions` PUT template for the documented upload step (the former `--csv`/`--url` conveniences were removed in 0.5.0: D40d). `delete` `--yes`. |
 | `POST/GET/PATCH/DELETE /websets/v0/monitors` | `exa-agent websets monitors create/list/get/update/delete` | `create` is `[create-POST]`. Distinct from top-level `monitor`. |
 | `GET /websets/v0/monitors/{m}/runs[/id]` | `exa-agent websets monitors runs list/get` | Cursor on list. |
 | `GET /websets/v0/events[/id]` | `exa-agent websets events list/get` | List: cursor, `--type`, `--created-before/after`. |
@@ -190,9 +201,9 @@ Every official Exa operation maps to exactly one canonical command. `[create-POS
 
 ## 3. Universal flags
 
-Work on every command unless explicitly irrelevant. Output flags follow D6 / contracts §2 — do not add `--raw-response`, `--raw-sse`, or `--format raw`.
+Work on every command unless explicitly irrelevant. Output flags follow D6 / contracts §2: do not add `--raw-response`, `--raw-sse`, or `--format raw`.
 
-### Output & format (D6, contracts §2)
+### Output and format (D6, contracts §2)
 
 | Flag | Meaning |
 |---|---|
@@ -216,12 +227,12 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 | `--trace FILE` | Redacted request/response trace to FILE (secrets redacted, contracts §12). |
 | `--no-color` | Disable ANSI; auto-honored for `NO_COLOR`/`CI`/`TERM=dumb`/non-TTY/non-human format. |
 
-### Auth & transport
+### Auth and transport
 
 | Flag | Meaning |
 |---|---|
 | `--profile NAME` | Select config profile (D11/D12). |
-| `--api-key KEY` | One-shot key; **never persisted** (D11). ⚠️ Leaks into `ps`/shell history/agent transcript — prefer `--api-key-stdin` in untrusted shells. |
+| `--api-key KEY` | One-shot key; **never persisted** (D11). Leaks into `ps`/shell history/agent transcript: prefer `--api-key-stdin` in untrusted shells. |
 | `--api-key-stdin` | Read the one-shot key from stdin instead of argv (no process-table leak). |
 | `--base-url URL` | Override API host (default `https://api.exa.ai`). |
 | `--header 'Name: value'` | Extra header; repeatable; managed auth, payment, and secret headers are refused/redacted. |
@@ -230,20 +241,20 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 | `--x402-payment-stdin` / `--mpp-payment-stdin` | Raw-only signed payment pass-through for exact nonstreaming `POST /search` or `/contents`. Reads the complete payment header value from stdin; conflicts with API/service credentials and other stdin body/input. Raw output has no envelope/payment metadata and replaces exact submitted payment credential echoes with `<redacted>`. |
 | `--timeout DURATION` / `--connect-timeout DURATION` | Whole-request / connection-setup budgets, e.g. `30s`. Config keys `timeout` / `connect_timeout`; unset connect timeout adds no separate cap. |
 | `--max-response-bytes N` | Decoded success body/whole-stream cap, including gzip and JSON fallback. Default 64 MiB; config `max_response_bytes`; positive only. Exceeded cap: nonretryable `response_too_large`, exit 5; malformed/zero input: exit 1. |
-| `--retry N` | Retry count for retryable failures (default 2). Auto-retry applies only to GETs, network (exit-4), 429, 5xx — **never** un-keyed create-POSTs (D7, contracts §7). |
+| `--retry N` | Retry count for retryable failures (default 2). Auto-retry applies only to GETs, network (exit-4), 429, 5xx: **never** un-keyed create-POSTs (D7, contracts §7). |
 | `--retry-after` | Honor `Retry-After` on 429 (default on). |
 | `--idempotency-key KEY` | Client idempotency key. Required to make a create-POST auto-retryable (D7). |
 
-### Request assembly & preview
+### Request assembly and preview
 
 | Flag | Meaning |
 |---|---|
 | `--input FILE\|-` | Read body / query list / URL list / rows from file or stdin. |
 | `--input-format text\|json\|jsonl\|csv\|auto` | Interpretation of `--input`. |
-| `--body JSON\|@file\|-` | Whole request body, **deep-merged over** named-flag values — fixed precedence, last-writer-wins per JSON path: `registry defaults < named flags < --body < --set` (architecture §4). Not a silent override of flags: the resolved body is always inspectable via `--print-request`. (`--body -` reads stdin, and is refused when stdin is a TTY → exit 11, never blocks.) |
+| `--body JSON\|@file\|-` | Whole request body, **deep-merged over** named-flag values: fixed precedence, last-writer-wins per JSON path: `registry defaults < named flags < --body < --set` (architecture §4). Not a silent override of flags: the resolved body is always inspectable via `--print-request`. (`--body -` reads stdin, and is refused when stdin is a TTY → exit 11, never blocks.) |
 | `--set path=value` | Patch one body field; repeatable; always applied **last**. e.g. `--set contents.text.maxCharacters=1000`. |
-| `--print-request` | Print the redacted upstream request to stdout and exit 0 **without** calling the API (short-circuits before transport — no network, no quota). |
-| `--dry-run` | **Local, no-network** preview — equivalent to `--print-request` on every command (read or mutating). It never spends a request. A genuine *server-side* preview that costs an upstream call is always a distinct, explicitly-named path (`websets preview`, or upstream `dry_run: true` on `monitor batch`), never `--dry-run`. |
+| `--print-request` | Print the redacted upstream request to stdout and exit 0 **without** calling the API (short-circuits before transport: no network, no quota). |
+| `--dry-run` | **Local, no-network** preview: equivalent to `--print-request` on every command (read or mutating). It never spends a request. A genuine *server-side* preview that costs an upstream call is always a distinct, explicitly-named path (`websets preview`, or upstream `dry_run: true` on `monitor batch`), never `--dry-run`. |
 
 ### Pagination (cursor-list commands only, contracts §10)
 
@@ -273,22 +284,32 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 
 Normalization happens at the parse boundary and in post-parse coercion so the rest of the program sees canonical values (design-principle "Input forgiveness"; architecture §6):
 
-- **Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--enrichment-format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
-- **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..1000000`; `--highlights[=N]` accepts a character cap `1..1000000`.
-- **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
-- **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
+**Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--enrichment-format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
+
+- Content flags are forgiving. `--text[=N|full]` accepts bare, `full`, or a character cap `1..1000000`; `--highlights[=N]` accepts a character cap `1..1000000`.
+
+**Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
+
+- IDs are opaque: Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
 
 ---
 
 ## 4. Per-command flag reference
 
-Universal flags (§3) are assumed throughout; only command-specific flags are listed. Local validation guards run **before** the API call and exit 1 (usage) with a copy-pasteable `suggestedCommand`.
+Universal flags (§3) are assumed throughout; only command-specific flags are listed.
+Ordinary typed requests forward unknown body fields for compatibility. Strict
+`schema validate-input` and stored presets reject unknown fields where the
+request structure is modeled. Preset defaults
+merge before flags, body, and set; required-field and cross-field checks use the
+final resolved request. `schema validate-input` reports input validity in `valid`;
+an exit-0 report can carry `valid: false`. `valid: null` means structural
+validation is unsupported for an operation without modeled fields. Local validation guards run **before** the API call and exit 1 (usage) with a copy-pasteable `suggestedCommand`.
 
 > The per-command blocks below are design targets and may drift from what has shipped. `exa-agent capabilities [COMMAND]` reflects the actual flags, types, and metadata of the running binary and is the source of truth when this document and the binary disagree.
 
-**Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand` — the agent never has to guess the next call.
+**Success-path `nextActions` (contracts §4).** Async-create and cursor-paginated commands populate the envelope's `nextActions[]` with paste-ready follow-ups carrying the returned id: e.g. `agent run`/`agent runs create` → `agent runs get <id>` + `agent runs events <id> --stream`; `websets create` → `websets get <id>` (+ `websets items list <id> --all`); `monitor create` → `monitor get <id>`; any `--all`-capable list that stops at `--max-pages` → the `--cursor <next>` continuation. This is the success-path analogue of an error's `suggestedCommand`: the agent never has to guess the next call.
 
-### `search` — `POST /search`
+### `search`: `POST /search`
 
 ```text
 exa-agent search QUERY
@@ -336,7 +357,9 @@ exa-agent search QUERY
 Guards:
 - `--all` → exit 1: `Use --num-results N (1..100); --all is only for cursor-paginated list commands.`
 - `--limit` on `search` → exit 1 did-you-mean: `search isn't cursor-paginated; use --num-results N (1..100).` (`--limit` is page size on list commands only; never silently aliased to `--num-results`, D20).
-- `--count` on `search` → exit 1 did-you-mean: `search uses --num-results N (1..100); --count is the Websets result-count flag.` (Reciprocal of the websets guard below — the result-count flag is `--num-results` on `search` and `--count` on `websets` creates; neither is aliased, both redirect, D20.)
+
+`--count` on `search` → exit 1 did-you-mean: `search uses --num-results N (1..100); --count is the Websets result-count flag.` (Reciprocal of the websets guard below: the result-count flag is `--num-results` on `search` and `--count` on `websets` creates; neither is aliased, both redirect, D20.)
+
 - `--livecrawl` + `--max-age-hours` → exit 1 (upstream forbids sending both).
 - `--category company` with `--start/end-published-date` or `--exclude-domain` → exit 1 (unsupported; upstream may 400).
 - `--category people` with `--start/end-published-date` or `--exclude-domain` → exit 1; `--include-domain` accepts LinkedIn domains only.
@@ -347,11 +370,13 @@ Guards:
 - Deprecated knobs (`--livecrawl`, `--context*`) used → non-fatal `warnings[]` with replacement.
 
 Query/domain distinction:
-- `site:agency.gov` is text inside `QUERY`; it participates in Exa's query interpretation and ranking. Use it when the site constraint is part of what the query means, and keep it quoted with the rest of the query: `exa-agent search "site:congress.gov clean air act" ...`.
+
+`site:agency.gov` is text inside `QUERY`; it participates in Exa's query interpretation and ranking. Use it when the site constraint is part of what the query means, and keep it quoted with the rest of the query: `exa-agent search "site:congress.gov clean air act" ...`.
+
 - `--include-domain agency.gov` and `--exclude-domain example.com` populate the typed upstream `includeDomains[]`/`excludeDomains[]` filters independently of query wording. Use them for a hard allow/deny domain set, repeat the flag for multiple domains, and do not put `site:` in the flag value.
 - `similar --exclude-source-domain` is narrower: it excludes the source URL's own domain for similarity search. It is not an alias for `search --exclude-domain`.
 
-### `contents` — `POST /contents`
+### `contents`: `POST /contents`
 
 ```text
 exa-agent contents URL...
@@ -375,11 +400,12 @@ Guards:
 - >100 urls/ids without `--chunk-size` → exit 1 with the exact `--chunk-size 100` command.
 - `--stream` → exit 1 (contents does not stream).
 - `--livecrawl` + `--max-age-hours` → exit 1.
-- Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; a batch with mixed outcomes exits 0 with `url_failed` warnings and `outcome: "partial"`, while a batch where every item fails exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
+Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; a batch with mixed outcomes exits 0 with `url_failed` warnings and `outcome: "partial"`, while a batch where every item fails exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
 - `outcome` is text-aware: empty, whitespace-only, gzip/PDF-signature, or control-heavy rows do not count as usable. `contentDiagnostics[]` summarizes the exact status/error/HTTP fields Exa returned and labels empty/binary/PDF rows; `warnings[]` and `nextActions[]` always provide a fallback when outcome is not `full`.
-- Government/primary-source fallback: Exa is the fast default, but its crawler can return `no_content`/`partial` for `uscode.house.gov`, `govinfo.gov`, eCFR, Congress.gov, and agency sites. For authority-critical statutory or regulatory text, follow the emitted action: `firecrawl scrape 'URL' --max-age 0`. This is an upstream crawl boundary, not content the CLI can safely reconstruct. PDFs are reported as `pdf_unextracted` because Exa returns extracted JSON text, not trustworthy raw PDF bytes; the CLI does not direct-download outside the Exa request path.
 
-### `similar` — `POST /findSimilar` (deprecated upstream)
+Government/primary-source fallback: Exa is the fast default, but its crawler can return `no_content`/`partial` for `uscode.house.gov`, `govinfo.gov`, eCFR, Congress.gov, and agency sites. For authority-critical statutory or regulatory text, follow the emitted action: `firecrawl scrape 'URL' --max-age 0`. This is an upstream crawl boundary, not content the CLI can safely reconstruct. PDFs are reported as `pdf_unextracted` because Exa returns extracted JSON text, not trustworthy raw PDF bytes; the CLI does not direct-download outside the Exa request path.
+
+### `similar`: `POST /findSimilar` (deprecated upstream)
 
 ```text
 exa-agent similar URL
@@ -394,7 +420,7 @@ Deprecated `includeText`/`excludeText` body fields are ignored by `similar` for 
 
 Help banner (stderr): `Deprecated upstream: prefer 'exa-agent search --similar-to URL "..."'. Kept for full API coverage.` Emits a non-fatal `warnings[]` entry on every call.
 
-### `answer` — `POST /answer`
+### `answer`: `POST /answer`
 
 ```text
 exa-agent answer QUESTION
@@ -412,16 +438,19 @@ Returns `data.answer`, `data.citations`, `costDollars`. `--stream --ndjson` emit
 
 Search and answer location body objects accept country-only or paired coordinates with optional country. Unknown object fields are rejected.
 
-### `context` — `POST /context` (Exa Code)
+### `context`: `POST /context` (undocumented compatibility route)
 
 ```text
 exa-agent context QUERY
   --tokens dynamic|N           # tokensNum; default dynamic; exact range 50..100000
 ```
 
+The retained route emits `undocumented_upstream` and may change or disappear.
+Offline request validation does not establish current live support.
+
 Returns `data.response`, `data.resultsCount`, `data.searchTime`, `data.outputTokens`, `costDollars`. Query max 2000 chars (exit 1 if exceeded).
 
-### `agent run` / `agent runs create` — `POST /agent/runs` [create-POST]
+### `agent run` / `agent runs create`: `POST /agent/runs` [create-POST]
 
 ```text
 exa-agent agent run QUERY
@@ -457,12 +486,14 @@ Guards / notes:
 - Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --limit 10` (D7, contracts §7).
 - `--data-source` count > 5 → exit 1.
 - Typed `--data-source` values are case-insensitive and sent with canonical spelling; invalid values exit 1 with the accepted set. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; explicit `--body`/`--set` values pass through unchanged.
-- `--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. Ultra requires an explicit $1..$100 cap as CLI safety policy, even though upstream accepts a time-only budget. `--max-duration-seconds` is an optional soft wall-clock limit for Ultra, in 300..10800 seconds. Upstream stops starting work as the limit approaches; this is separate from the local request timeout. Ultra and `stop` require no beta header. Legacy `max` fails locally with an exact Ultra migration command.
+
+`--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. Ultra requires an explicit $1..$100 cap as CLI safety policy, even though upstream accepts a time-only budget. `--max-duration-seconds` is an optional soft wall-clock limit for Ultra, in 300..10800 seconds. Upstream stops starting work as the limit approaches; this is separate from the local request timeout. Ultra and `stop` require no beta header. Legacy `max` fails locally with an exact Ultra migration command.
+
 - Surface `stopReason` in output; `budget_reached` and `time_limit_reached` emit matching warnings so agents can inspect incomplete runs.
 
 The SDK-only beta `/agent/monitors` family (nine operations) is deliberately not exposed as typed commands: it has no public documented spec or contract. This is separate from the documented top-level `monitor` and `websets monitors` families.
 
-### `research` — `/research/v1` (retired upstream)
+### `research`: `/research/v1` (retired upstream)
 
 ```text
 exa-agent research create QUERY
@@ -472,7 +503,7 @@ exa-agent research get RESEARCH_ID
 
 All three verbs are local stubs: they make no network call, exit 1 with `research_retired`, and are absent from `capabilities`. `create` suggests `exa-agent search "QUERY" --type deep-reasoning`; `list` and `get` suggest `exa-agent search --help`, while `get` preserves the supplied id in `error.details.researchId`.
 
-### `monitor` — top-level Search Monitors `/monitors`
+### `monitor`: top-level Search Monitors `/monitors`
 
 ```text
 exa-agent monitor create   --name NAME --query QUERY --schedule CRON
@@ -490,9 +521,13 @@ exa-agent monitor runs get  ID RUN_ID
 
 Guard: `monitor create` with `--webhook-url` but no `--secret-output` and a non-TTY → `warnings[]`: the `webhookSecret` is returned once and will be lost unless captured.
 
-### `websets` — `/websets/v0/websets`
+### `websets`: `/websets/v0/websets`
 
-Websets mutation metadata keys are at most 250 characters after body/set overrides. Agent and Batch metadata are not subject to this Websets constraint.
+Metadata keys are limited to 250 Unicode characters on Webset create/update,
+search create, enrichment create/update, import create, and webhook create/update.
+Validation follows body/set overrides and includes nested enrichment metadata on
+Webset creation. Agent/Batch metadata is outside this Websets rule. Nested
+`search.metadata` is not defined by the upstream Webset creation schema.
 
 ```text
 exa-agent websets create   --query TEXT --count N
@@ -505,7 +540,7 @@ exa-agent websets cancel   ID --yes                                  # discards 
 exa-agent websets preview  --query TEXT --criteria TEXT --count N    # plan before create
 ```
 
-Guard: `--num-results` or `--limit` on a `websets create`/`searches create`/`preview` → exit 1 did-you-mean: `Websets use --count N; --num-results is the search flag.` (Reciprocal of the `search` guard; result-count is `--count` here, `--num-results` on `search` — neither aliased, both redirect.)
+Guard: `--num-results` or `--limit` on a `websets create`/`searches create`/`preview` → exit 1 did-you-mean: `Websets use --count N; --num-results is the search flag.` (Reciprocal of the `search` guard; result-count is `--count` here, `--num-results` on `search`: neither aliased, both redirect.)
 
 Sub-resources (every create/update accepts `--body @file` + `--set`):
 
@@ -565,9 +600,9 @@ exa-agent team             # bare invocation runs `info` directly (the only chil
 exa-agent team info        # GET /websets/v0/teams/me; concurrency/quota; read-only
 ```
 
-### `admin keys` — GATED (D4)
+### `admin keys`: GATED (D4)
 
-Uses `EXA_SERVICE_KEY` (never `EXA_API_KEY`) and the admin host `EXA_ADMIN_BASE_URL` (default `https://admin-api.exa.ai/team-management`). A separate keyring scope. The CLI **refuses** to use a normal API key as a service key or vice versa, with an actionable error.
+Uses `EXA_SERVICE_KEY` (never `EXA_API_KEY`) and the admin host `EXA_ADMIN_BASE_URL` (default `https://admin-api.exa.ai/team-management`). A separate credential namespace. The CLI **refuses** to use a normal API key as a service key or vice versa, with an actionable error.
 
 ```text
 exa-agent admin keys create   --name NAME --rate-limit N --budget-cents N   # [create-POST]; response is metadata only
@@ -581,8 +616,8 @@ exa-agent admin keys usage    KEY_ID --start-date ISO --end-date ISO --group-by 
 Guards / notes:
 - `delete` without `--confirm <key-id>` (or a mismatched id) → exit 9 (safety). Confirm-by-id, not a bare `--yes`.
 - A normal `EXA_API_KEY` presented where a service key is required (or vice versa) → exit 2 (auth) with the exact env-var fix.
-- `create` returns key **metadata only** (`id`, `name`, `rateLimit`, `budgetCents`, `isOverBudget`, `teamId`, `userId`, `createdAt`) — no raw secret in the response per the team-management spec. If runtime shows a one-time secret, display once and require explicit `--secret-output FILE`.
-- `usage` lookback ≤ 180 days; `--group-by` is currently reserved upstream (does not change response shape). `rateLimit` units are documented inconsistently (per-second vs per-minute) — surface verbatim as returned, do not normalize.
+- `create` returns key **metadata only** (`id`, `name`, `rateLimit`, `budgetCents`, `isOverBudget`, `teamId`, `userId`, `createdAt`): no raw secret in the response per the team-management spec. If runtime shows a one-time secret, display once and require explicit `--secret-output FILE`.
+- `usage` lookback ≤ 180 days; `--group-by` is currently reserved upstream (does not change response shape). `rateLimit` units are documented inconsistently (per-second vs per-minute): surface verbatim as returned, do not normalize.
 
 ### Self-description surfaces (offline; no network unless stated)
 
@@ -605,8 +640,8 @@ exa-agent doctor --check config.parse,key.present,base-url,spec.hash,tty.discipl
                                    # detector ids are published in `capabilities.doctor.detectors`
 exa-agent auth status              # {authenticated, source, profile, key_fingerprint, can_admin, warnings[]}
 exa-agent auth test                # network auth probe
-exa-agent auth login               # store key in OS keyring; reads stdin; never echoes (D11)
-exa-agent auth logout              # clear the keyring entry for the active profile (best-effort)
+exa-agent auth login               # store key in plaintext 0600 credentials file; reads stdin; never echoes
+exa-agent auth logout              # clear the stored credential for the active profile (best-effort)
 exa-agent config list [--effective]   get PATH   set PATH VALUE   unset PATH
 exa-agent config path
 exa-agent config profiles list | show NAME | use NAME | create NAME | delete NAME
@@ -616,10 +651,13 @@ exa-agent --payment-discovery raw POST /search --body @request.json
 ```
 
 Notes:
-- `capabilities`, `schema show/list`, and default `doctor` never touch the network (D8/D9). Set `EXA_AGENT_NO_NETWORK` to any value for generated docs and local probes: presence refuses every networked path before credentials/transport, while dry-run and self-description remain available; unset it to allow live calls.
-- `doctor` is diagnose-and-suggest only — no `--fix`/undo/backup machinery in v1 (D8). Every `fail`/`warn` finding names its exact fix command. Output is `exa.cli.doctor.v1` (contracts §15) with the **linter-style exit dictionary 0 = healthy / 1 = findings / 4 = refused-unsafe** — deliberately *not* the §6 categories, so a `doctor` exit can't be confused with a real `auth`(2)/`config`(3) failure. The detector ids + exit dictionary are published in `capabilities.doctor`.
-- `auth logout` clears the keyring entry for the active profile (best-effort; no error if absent).
-- Config stores profile metadata and env-var names, never plaintext keys by default (D11).
+
+`capabilities`, `schema show/list`, and default `doctor` never touch the network (D8/D9). Set `EXA_AGENT_NO_NETWORK` to any value for generated docs and local probes: presence refuses every networked path before credentials/transport, while dry-run and self-description remain available; unset it to allow live calls.
+
+`doctor` is read-only by default. Explicit `--fix` repairs config formatting and permissions after backup; `--undo` restores the latest config backup. `--fix --allow-auth` permits credential-file permission repair, and `--fix --allow-delete` permits stale spill deletion. Undo is config-only. Every `fail`/`warn` finding names its exact fix command. Output is `exa.cli.doctor.v1` (contracts §15) with the **linter-style exit dictionary 0 = healthy / 1 = findings / 4 = refused-unsafe**: deliberately *not* the §6 categories, so a `doctor` exit can't be confused with a real `auth`(2)/`config`(3) failure. The detector ids + exit dictionary are published in `capabilities.doctor`.
+
+- `auth logout` clears the stored credential for the active profile (best-effort; no error if absent).
+- Config stores profile metadata and env-var names. `auth login` stores the secret separately in a plaintext 0600 credentials file; no artifact uses an OS keyring.
 
 ---
 

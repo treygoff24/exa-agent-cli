@@ -1,5 +1,10 @@
 # Agent-first CLI architecture
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 Date: 2026-06-29
 
 ## Design stance

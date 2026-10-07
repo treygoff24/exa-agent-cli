@@ -1,5 +1,28 @@
 # v2 Decisions (locked)
 
+Decision history and implementation notes are maintained together. Original
+rulings and dates below are preserved; a design decision is not proof that it
+shipped. Current usage and publication status are in the
+[README](../../README.md).
+
+## Current implementation notes (2026-10-07)
+
+- D11/D15 keyring design has not shipped. `auth login` writes a plaintext 0600
+  credentials file on every platform; the `keyring` Cargo feature is inert.
+  API and service credentials remain separate. Prefer environment variables.
+- D12 presets and macro inspection are active. Stored preset structure rejects
+  unknown fields where request fields are modeled; required fields and cross-field constraints use the final
+  merged request. Ordinary typed requests forward unknown body fields for
+  upstream compatibility; strict `schema validate-input` rejects them where
+  request fields are modeled.
+- D40 export support was removed under D41. `/context` remains with an
+  undocumented-upstream warning; offline checks do not prove live support.
+- D42 is implemented in the local 0.8.0 candidate. Metadata-key limits apply
+  only to supported Websets mutations and nested enrichment metadata on Webset
+  creation. Agent/Batch metadata is outside this Websets rule; nested
+  `search.metadata` is not defined by the upstream Webset creation schema.
+  Public publication is pending.
+
 Date: 2026-06-29
 Status: these supersede the open questions in the v1 `docs/` set. Where v1 and v2 disagree, v2 wins.
 

@@ -1,35 +1,62 @@
-# Why a CLI when the Exa MCP exists?
+# Why a CLI when SDKs and MCP exist?
 
-The Exa MCP is good at what it does. For a Claude Desktop or Cursor user who wants web search in their assistant, it is the right level of simplicity. We built `exa-agent` because we kept wanting things from the Exa API that an MCP server, by its nature, is not positioned to give an autonomous coding agent.
+`exa-agent` makes Exa usable from shell workflows and unattended agents. An SDK
+fits application code; an MCP connects an assistant to a tool server. A CLI gives
+the caller files, pipes, and process exit codes without requiring either integration.
 
-## 1. Surface coverage
+## Choose the interface for the job
 
-The MCP exposes 4 tools: `web_search_exa`, `web_fetch_exa`, `web_search_advanced_exa`, and `agent_run`. That covers `/search`, `/contents`, and the Agent API.
+| Interface | Useful when | What the caller manages |
+| --- | --- | --- |
+| Exa SDK | Exa requests are part of an application | Application code, SDK dependencies, and result handling |
+| Exa MCP | An assistant needs Exa tools | Tool-server setup and the assistant's handling of results |
+| `exa-agent` | A script or coding agent needs inspectable requests and saved output | One binary, an API key, and command invocations |
 
-The Exa Public API (spec 2.0.0) also has: `/answer`, `/findSimilar`, `/context` (exa-code), search Monitors (create/list/get/update/delete/trigger, plus runs), the Websets tree (websets, items, searches, enrichments, imports, monitors, webhooks, webhook attempts, events), and the Team Management API for key administration. None of that is reachable through the MCP today.
+The CLI has 71 API commands across search, contents, answer, agent runs, batches,
+monitors, Websets, and key administration. `capabilities --json` describes the
+installed surface offline. `raw METHOD PATH` supports requests that the typed
+commands do not model. SDK-only beta Agent Monitors are deliberately omitted from
+the typed surface, and the retained `/context` route is undocumented upstream.
 
-`exa-agent` wraps all of it: 67 generated API commands across ~20 namespaces, generated at build time from the committed OpenAPI spec, plus a `raw` passthrough so anything Exa ships tomorrow is usable before we model it. When an agent's job is "stand up a Webset, attach an enrichment, wire a webhook, monitor it weekly," the MCP has no verbs for any of those sentences.
+```sh
+exa-agent capabilities websets create --json
+exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
+```
 
-## 2. Context-window economics
+## Keep result size under the caller's control
 
-An MCP tool call has exactly one place to put its result: the model's context window. There is no cap and no overflow valve. A fat crawl or a 50-result search lands in context whole, and every tool's schema sits in context for the life of the session whether it gets used or not.
+Search defaults to query-aware highlights rather than full page text. Inline
+`data` over 48 KiB spills automatically to a JSON file; the envelope carries
+`dataPath`, a hash, and diagnostics. `--max-output-bytes` changes the threshold.
+An explicit `--output FILE` saves the complete selected output instead.
 
-A CLI has a filesystem, and `exa-agent`'s defaults are built around that. Output over 48 KiB spills to a pretty-printed file automatically, and the envelope in context carries the path, a hash, and diagnostics instead of the payload (`--max-output-bytes` tunes it, `-o FILE` redirects it entirely). Search results default to query-aware highlights rather than full text; bare `--text` is capped, and the caps are flags, not surprises. Nothing about the tool is in context until the agent invokes it.
+```sh
+exa-agent search "fusion energy demonstration projects" --num-results 10 --json
+exa-agent contents 'https://exa.ai' --text 1500 --output page.json --json
+```
 
-We measured this before building: early sessions with uncapped output were burning 24–44 KB of context per call on payloads the model skimmed once and never needed again. For a human reading one search in a chat window that cost is invisible. For an agent doing forty calls across a long task, it is the difference between finishing and compacting.
+This lets an agent read only the result fields it needs while retaining the full
+response on disk. Tool-result size in an MCP depends on the server and host;
+there is no need to assume every MCP loads an unlimited response into context.
 
-## 3. An agent-grade contract
+## Handle failures and mutations predictably
 
-The MCP returns what the server returns. `exa-agent` commits to a contract an autonomous caller can build on:
+Structured JSON success uses `exa.cli.response.v1`; errors use
+`exa.cli.error.v1` on stderr with stable exit codes and `error.code` values.
+Streaming, raw, human, and chunked output have their own shapes. Signed-payment
+raw output redacts exact submitted payment credential echoes.
 
-- One JSON envelope schema (`exa.cli.response.v1`) on every structured success response, with a published error-code dictionary and stable exit codes. (`raw` mode prints upstream bytes as-is; streaming and human-format output differ by design.)
-- Offline self-description: `capabilities --json`, `schema`, and `robot-docs` let an agent learn the full surface with zero network calls and zero tokens of preloaded schema.
-- Mutation safety: create-POSTs are never auto-retried without an idempotency key; an ambiguous create leaves a pending-run record and a recovery command instead of a maybe-duplicate.
-- Destructive-operation gates: deletes and key admin require explicit confirmation flags, and `capabilities` labels every command's blast radius so an agent can know before it acts.
-- Cost visibility: every structured success envelope carries `costDollars`, so an agent (or its supervisor) can meter spend per call.
+Create-POSTs are never automatically retried without an idempotency key. Batch
+creates are never retried even with a key because Exa does not document Batch
+deduplication. An ambiguous create retains recovery information. Deletes and
+cancels require confirmation, and `capabilities` describes command safety before
+execution. Upstream cost information is exposed when available; the caller can
+also cap typed Ultra runs explicitly.
 
-This is what any of us would want from a tool our unattended agents drive hundreds of times a day. It is a different set of requirements than "give my chat assistant web search," and it pulls toward a different shape.
+```sh
+exa-agent agent run "Map fusion demonstration projects" --effort ultra --max-cost-dollars 5 --max-duration-seconds 600 --dry-run --print-request
+```
 
-## Same API, different users
-
-The MCP's primary user is a person with an assistant; `exa-agent`'s primary user is a program. The MCP optimizes for install friction and works beautifully there. The CLI optimizes for full surface, bounded context, and contractual behavior under automation, and pays for it with a `brew install` and an API key.
+The CLI adds these automation contracts to Exa's API. It still depends on Exa
+credentials, account entitlements, and upstream availability. See the
+[README](../README.md) for installation, output details, and troubleshooting.

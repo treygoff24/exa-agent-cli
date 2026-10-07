@@ -1,5 +1,11 @@
 # exa-agent — v2 design set
 
+The June 2026 design and decision history is preserved here. Some reference files
+have later additions; original plans and keyring proposals describe their dated
+design, not the current implementation. Use the [current README](../../README.md),
+installed `--help`, and `capabilities --json` for current behavior.
+
+
 Date: 2026-06-29 (design); shipped as 0.1.0 on 2026-07-06.
 Status: this is the canonical design record for the Rust rebuild of the Exa agent CLI, written before implementation and kept as-is for traceability. It supersedes the v1 docs in `docs/`. The implementation described here shipped in the [0.1.0 release](../../CHANGELOG.md); where this document and the shipped binary might drift, prefer `exa-agent capabilities --json`, which is generated from the code.
 
@@ -80,4 +86,4 @@ A second review audited the whole set against the `rust-agent-cli` skill (five p
 
 ## Source material
 
-The v1 research corpus — primary-source Exa snapshots and the five subagent lane reports — stays in [`work/research/`](../../work/research/). `commands.md` carries [`lane-e-cli-taxonomy.md`](../../work/research/lane-e-cli-taxonomy.md) forward.
+The v1 research corpus — primary-source Exa snapshots and the five subagent lane reports — stays in `work/research/` (ignored local evidence, not distributed). `commands.md` carries `work/research/lane-e-cli-taxonomy.md` (local evidence) forward.

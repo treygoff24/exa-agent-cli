@@ -1,5 +1,10 @@
 # Reviewing source: `rust-agent-cli` skill audit
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../../../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 Date: 2026-06-29
 
 **Status: actioned.** All must-fixes, should-fixes, nice-to-haves, and both doc-to-doc contradictions below were applied to the v2 set and ratified as decisions **D23–D39** in [`../decisions.md`](../decisions.md). This document is retained as the review record; where a finding cites a doc section, that section now reflects the fix.

@@ -1,8 +1,13 @@
 # v2 Architecture (Rust)
 
+The architecture retains the original design and later runtime notes. Current
+credential storage differs from the original keyring plan; section 8 below
+describes the shipped file-backed behavior. Installed help and capabilities
+identify the running command surface.
+
 Date: 2026-06-29
 
-Status: implements [`decisions.md`](decisions.md) (D1–D22) and [`contracts.md`](contracts.md). Where this doc and a decision/contract disagree, the decision/contract wins and the gap is logged in [Open seams](#open-seams). Schema ids, field names, and exit codes below are copied from `contracts.md` verbatim — they are not re-litigated here.
+Status: implements [`decisions.md`](decisions.md) (D1–D22) and [`contracts.md`](contracts.md). Where this doc and a decision/contract disagree, the decision/contract wins and the gap is logged in [Open seams](#open-seams). Schema ids, field names, and exit codes below are copied from `contracts.md` verbatim: they are not re-litigated here.
 
 This is the build-shape of `exa-agent`: how a single static binary turns an agent's first-guess command into a request, runs it through one auth/retry/redaction chokepoint, and emits a stable envelope keyed off a registry generated from the embedded Exa OpenAPI snapshot.
 
@@ -42,7 +47,7 @@ exa-agent-cli/
 │   │   ├── envelope.rs          #   Response/Error/Event/Capabilities structs (§7)
 │   │   ├── format.rs            #   OutputMode resolution, human renderer, ndjson
 │   │   └── sink.rs              #   stdout=data / stderr=diagnostics; --output / auto-spill
-│   ├── auth.rs                  # credential precedence, keyring scopes (§8)
+│   ├── auth.rs                  # credential precedence and storage (§8)
 │   ├── config.rs                # TOML config, profile selection (§8)
 │   ├── doctor.rs                # read-only detectors (§9)
 │   ├── redaction.rs             # secret scrubbing, shared by transport + output + trace (§10)
@@ -53,7 +58,7 @@ exa-agent-cli/
 
 Module grouping rationale (lean, not flat): `cli` is the only place clap types live; `registry` is the only place the generated table lives; `transport` is the only place an HTTP call happens; `output` is the only place bytes reach stdout/stderr. Everything else (`auth`, `config`, `doctor`, `redaction`, `error`, `state`, `request`, `exec`) is a single flat file until it earns a directory. Eleven units for the full Exa surface is on the lean side of the line.
 
-**Dispatch is generic and registry-driven — there is no `src/commands/` per-command-handler layer.** `cli/mod.rs::dispatch` maps the parsed `Command` to its `OperationDef` (via `cli_path`), then calls `request::build_request` → `exec::run`; the typed `cli/<group>.rs` structs only *collect* flags (clap types, no logic). The handful of commands that aren't a uniform API call — `capabilities`, `schema`, `robot-docs`, `doctor`, `config`, `auth`, the `ask`/`fetch` macros — are small functions dispatched directly from `cli/mod.rs` (the macros expand to a canonical `Command` and re-enter dispatch). So the SKILL's "`src/commands/`" slot is satisfied by `request.rs` + `exec.rs` + the generic dispatch table rather than N hand-written handlers; "a handler returns a `Plan`" (§5) means *the generic dispatch path* produces a `Plan`, not that per-command handler modules exist.
+**Dispatch is generic and registry-driven: there is no `src/commands/` per-command-handler layer.** `cli/mod.rs::dispatch` maps the parsed `Command` to its `OperationDef` (via `cli_path`), then calls `request::build_request` → `exec::run`; the typed `cli/<group>.rs` structs only *collect* flags (clap types, no logic). The handful of commands that aren't a uniform API call: `capabilities`, `schema`, `robot-docs`, `doctor`, `config`, `auth`, the `ask`/`fetch` macros: are small functions dispatched directly from `cli/mod.rs` (the macros expand to a canonical `Command` and re-enter dispatch). So the SKILL's "`src/commands/`" slot is satisfied by `request.rs` + `exec.rs` + the generic dispatch table rather than N hand-written handlers; "a handler returns a `Plan`" (§5) means *the generic dispatch path* produces a `Plan`, not that per-command handler modules exist.
 
 ---
 
@@ -63,38 +68,38 @@ Module grouping rationale (lean, not flat): `cli` is the only place clap types l
 |---|---|---|
 | `clap` | `derive`, `env`, `wrap_help` | Args + subcommands + `ValueEnum`; built-in did-you-mean suggestions satisfy the intent-inference axiom (D13); `env` lets fixed flags fall back to env vars natively. |
 | `serde`, `serde_json` | `serde/derive`, `serde_json/preserve_order` | Envelope (de)serialization. `preserve_order` (indexmap-backed) keeps upstream `data` key order stable so identical upstream bytes serialize identically (contracts §12). |
-| `ureq` | `tls` (rustls) , `gzip` | Blocking HTTP. **No async runtime at all** — see note below. rustls → static-binary friendly, no OpenSSL. Its `Read`-based response body is exactly what SSE line-parsing wants. |
+| `ureq` | `tls` (rustls) , `gzip` | Blocking HTTP. **No async runtime at all**: see note below. rustls → static-binary friendly, no OpenSSL. Its `Read`-based response body is exactly what SSE line-parsing wants. |
 | `toml` | `serde` | Config file parse/serialize (§8). |
-| `directories` | — | XDG/OS config + state dir resolution (config, pending-run JSONL, auto-spill). |
-| `keyring` | feature-gated `keyring` | Optional OS keyring (Keychain / secret-service / Win cred mgr). Behind a cargo feature so a minimal musl build can drop it (env-first still works). |
-| `thiserror` | — | `CliError` enum → category → exit code (§10). Typed errors, not `anyhow`, on the hot path because exit-code mapping is load-bearing. |
-| `ulid` | — | `request.requestId` (`req_local_01J…`, contracts §4); seedable for `SOURCE_DATE_EPOCH` golden determinism. |
-| `jiff` | — | HTTP-date `Retry-After` parsing and any CLI-emitted timestamp; `SOURCE_DATE_EPOCH`-aware. |
-| `humantime` | — | `--timeout 30s` / `--page-delay 250ms` duration flags. |
-| `ctrlc` | — | Installs the SIGINT handler that sets the interrupt flag polled by the SSE read loop (§5/D21) → exit 12. Keeps the no-async-runtime story intact (no `tokio::signal`). |
-| `tempfile` | — | Atomic temp-file-then-`persist`(rename) for `--output` / auto-spill payloads under the state dir (§7). The pending-run JSONL itself uses plain `O_APPEND` (§5), not temp+rename. |
+| `directories` |: | XDG/OS config + state dir resolution (config, pending-run JSONL, auto-spill). |
+| `keyring` feature | reserved, inert feature | Does not enable an OS keyring; every artifact uses plaintext credential-file storage. |
+| `thiserror` |: | `CliError` enum → category → exit code (§10). Typed errors, not `anyhow`, on the hot path because exit-code mapping is load-bearing. |
+| `ulid` |: | `request.requestId` (`req_local_01J…`, contracts §4); seedable for `SOURCE_DATE_EPOCH` golden determinism. |
+| `jiff` |: | HTTP-date `Retry-After` parsing and any CLI-emitted timestamp; `SOURCE_DATE_EPOCH`-aware. |
+| `humantime` |: | `--timeout 30s` / `--page-delay 250ms` duration flags. |
+| `ctrlc` |: | Installs the SIGINT handler that sets the interrupt flag polled by the SSE read loop (§5/D21) → exit 12. Keeps the no-async-runtime story intact (no `tokio::signal`). |
+| `tempfile` |: | Atomic temp-file-then-`persist`(rename) for `--output` / auto-spill payloads under the state dir (§7). The pending-run JSONL itself uses plain `O_APPEND` (§5), not temp+rename. |
 
 Build-dependencies (not in the shipped binary): `serde_json` to parse the committed normalized snapshot `openapi/exa-openapi.json` (the YAML→JSON normalization runs once in the `xtask` build tool via `serde_norway`, never in `build.rs` or the binary, D21), `toml` to parse the overlay, `sha2` to compute the embedded-spec SHA-256 at build time, `anyhow` for build-script ergonomics (exit codes don't matter in `build.rs`).
 
 Dev-dependencies: `insta` (golden snapshots for the surfaces frozen in contracts §14), `assert_cmd` + `predicates` (drive the real binary; assert stdout/stderr discipline and exit codes).
 
-**Deliberately excluded.** `tokio` / `futures` / `async-std` — this is a per-call CLI; every operation is one blocking request (or one blocking SSE read loop), so an async runtime is pure cost (binary size, compile time, a reactor we'd never multiplex). A full OpenAPI client generator (`progenitor`, `openapi-generator`) — D1 rejects codegen; we parse the spec to a *data table*, not a client. `sqlite`/`sled` — D5 forbids a cache; the only persistence is an append-only JSONL. `regex` — redaction is a targeted key-prefix scan + header-name set, not pattern soup.
+**Deliberately excluded.** `tokio` / `futures` / `async-std`: this is a per-call CLI; every operation is one blocking request (or one blocking SSE read loop), so an async runtime is pure cost (binary size, compile time, a reactor we'd never multiplex). A full OpenAPI client generator (`progenitor`, `openapi-generator`): D1 rejects codegen; we parse the spec to a *data table*, not a client. `sqlite`/`sled`: D5 forbids a cache; the only persistence is an append-only JSONL. `regex`: redaction is a targeted key-prefix scan + header-name set, not pattern soup.
 
-**Note — `ureq` over `reqwest::blocking` (a justified divergence from the brief's suggested default).** The brief suggested blocking `reqwest`. I chose `ureq` because `reqwest::blocking` is a synchronous *façade over an internal current-thread tokio runtime* — it drags `tokio` + `hyper` into the dependency tree and binary even though we never write `async`. `ureq` has no runtime, the smallest dep tree of the rustls blocking clients, and a plain `Read` body for SSE. The whole client sits behind a one-method `Transport` trait (§5), so this is reversible: if we later need reqwest's richer proxy/multipart handling, we swap one impl and nothing above transport changes. Logged in [Open seams](#open-seams).
+**Note: `ureq` over `reqwest::blocking` (a justified divergence from the brief's suggested default).** The brief suggested blocking `reqwest`. I chose `ureq` because `reqwest::blocking` is a synchronous *façade over an internal current-thread tokio runtime*: it drags `tokio` + `hyper` into the dependency tree and binary even though we never write `async`. `ureq` has no runtime, the smallest dep tree of the rustls blocking clients, and a plain `Read` body for SSE. The whole client sits behind a one-method `Transport` trait (§5), so this is reversible: if we later need reqwest's richer proxy/multipart handling, we swap one impl and nothing above transport changes. Logged in [Open seams](#open-seams).
 
-`#![forbid(unsafe_code)]` is set at the crate root. It is crate-local — rustls's crypto backend contains `unsafe` in *its* code, which is fine; our code has none.
+`#![forbid(unsafe_code)]` is set at the crate root. It is crate-local: rustls's crypto backend contains `unsafe` in *its* code, which is fine; our code has none.
 
 ---
 
 ## 3. Build-time registry codegen (D9)
 
-The registry is generated from **committed inputs**: `openapi/exa-openapi.json` (the public Exa OpenAPI, fetched as JSON by `xtask vendor-spec`, D21/D22), `openapi/team-management.json` (the separate admin-keys spec, host `admin-api.exa.ai`), and `openapi/overlay.toml` (CLI-specific metadata vanilla OpenAPI cannot express — `dangerous`, idempotency-sensitivity, cursor field names, the CLI command path — **plus full definitions for real-but-docs-only operations such as `/context`**, D22). `build.rs` merges them.
+The registry is generated from **committed inputs**: `openapi/exa-openapi.json` (the public Exa OpenAPI, fetched as JSON by `xtask vendor-spec`, D21/D22), `openapi/team-management.json` (the separate admin-keys spec, host `admin-api.exa.ai`), and `openapi/overlay.toml` (CLI-specific metadata vanilla OpenAPI cannot express: `dangerous`, idempotency-sensitivity, cursor field names, the CLI command path: **plus full definitions for real-but-docs-only operations such as `/context`**, D22). `build.rs` merges them.
 
 **Generated const Rust for the hot path; embedded bytes for the cold path.** Two artifacts, by access frequency:
 
-1. **`$OUT_DIR/registry.rs`** — a `static REGISTRY: &[OperationDef]` of plain `const`-friendly types (`&'static str`, small enums, `&'static [FieldDef]`). `include!`'d into `src/registry/generated.rs` so the consts name the local types. This is read on **every** invocation (command routing, `capabilities`, flag→field mapping) and must cost nothing — no startup parse, compile-time-checked, branch-predictable. A parsed-at-startup blob (postcard/rkyv `include_bytes!` + deserialize) was rejected for the hot path: it trades a clean zero-cost table for a startup allocation we don't need at this size (a few dozen operations).
+1. **`$OUT_DIR/registry.rs`**: a `static REGISTRY: &[OperationDef]` of plain `const`-friendly types (`&'static str`, small enums, `&'static [FieldDef]`). `include!`'d into `src/registry/generated.rs` so the consts name the local types. This is read on **every** invocation (command routing, `capabilities`, flag→field mapping) and must cost nothing: no startup parse, compile-time-checked, branch-predictable. A parsed-at-startup blob (postcard/rkyv `include_bytes!` + deserialize) was rejected for the hot path: it trades a clean zero-cost table for a startup allocation we don't need at this size (a few dozen operations).
 
-2. **`include_bytes!("../openapi/exa-openapi.json")`** — the normalized JSON snapshot, embedded whole and parsed with `serde_json` on cold paths (no YAML parser in the binary, D21). Used only on **cold** paths: computing/serving the spec for `schema export`, and full JSON-Schema validation of `--body` / `schema validate-input`. The SHA-256 is computed at build time over these exact bytes and emitted as `pub const EMBEDDED_SPEC_SHA256: &str`, alongside `SPEC_VERSION`/`SPEC_TITLE`/`SPEC_URL` pulled from the spec's `info` block + overlay. `capabilities --json` reads the const SHA (contracts §13) — no runtime hashing on the common path. `build.rs` also bakes **binary provenance** — `GIT_SHA`, `BUILD_DATE`, and the `TARGET` triple (from the `TARGET` env Cargo sets) — into consts surfaced as `capabilities.build` and `--version` (and reported by the `binary.version` detector), so an agent or `doctor` can tell a stale build from a release without network. `SOURCE_DATE_EPOCH` is honored for `BUILD_DATE` to keep reproducible builds reproducible.
+2. **`include_bytes!("../openapi/exa-openapi.json")`**: the normalized JSON snapshot, embedded whole and parsed with `serde_json` on cold paths (no YAML parser in the binary, D21). Used only on **cold** paths: computing/serving the spec for `schema export`, and full JSON-Schema validation of `--body` / `schema validate-input`. The SHA-256 is computed at build time over these exact bytes and emitted as `pub const EMBEDDED_SPEC_SHA256: &str`, alongside `SPEC_VERSION`/`SPEC_TITLE`/`SPEC_URL` pulled from the spec's `info` block + overlay. `capabilities --json` reads the const SHA (contracts §13): no runtime hashing on the common path. `build.rs` also bakes **binary provenance**: `GIT_SHA`, `BUILD_DATE`, and the `TARGET` triple (from the `TARGET` env Cargo sets): into consts surfaced as `capabilities.build` and `--version` (and reported by the `binary.version` detector), so an agent or `doctor` can tell a stale build from a release without network. `SOURCE_DATE_EPOCH` is honored for `BUILD_DATE` to keep reproducible builds reproducible.
 
 Each `OperationDef` carries exactly what the contracts need plus the internal metadata commands route on:
 
@@ -124,7 +129,7 @@ pub struct FieldDef {
 
 `supportsRawBody` and `supportsPrintRequest` in `capabilities` are universally `true` (every operation accepts `--body`/`--set` and `--print-request`), so they're emitted as constants rather than per-op fields. The per-command **blast-radius triad** in `capabilities --json` (contracts §13) is derived here: `readOnly` = `read_only`, `idempotencySensitive` = `idempotency_sensitive`, `destructive` = `dangerous || method == DELETE`, `requiresConfirm` = `dangerous`. Surfacing `idempotencySensitive` is what lets an agent see *before calling* which creates need `--idempotency-key`.
 
-**Merge precedence & deterministic codegen.** When the overlay and a spec disagree, the rule is fixed: **overlay wins** on the CLI-only metadata it owns (`cli_path`, `dangerous`, `idempotency_sensitive`, cursor field names, `namespace`); the **spec wins** on `method`/`api_path`/field shapes — *unless* the op is overlay-*defined* (e.g. `/context`), in which case the overlay supplies all `OperationDef` fields. `build.rs` emits operations sorted by `(namespace, cli_path)` and fields by declaration order. The fixed-environment registry check compares normalized capabilities output (excluding build provenance) twice; it is the supported reproducibility guarantee for the uncommitted `OUT_DIR` artifact.
+**Merge precedence & deterministic codegen.** When the overlay and a spec disagree, the rule is fixed: **overlay wins** on the CLI-only metadata it owns (`cli_path`, `dangerous`, `idempotency_sensitive`, cursor field names, `namespace`); the **spec wins** on `method`/`api_path`/field shapes: *unless* the op is overlay-*defined* (e.g. `/context`), in which case the overlay supplies all `OperationDef` fields. `build.rs` emits operations sorted by `(namespace, cli_path)` and fields by declaration order. The fixed-environment registry check compares normalized capabilities output (excluding build provenance) twice; it is the supported reproducibility guarantee for the uncommitted `OUT_DIR` artifact.
 
 **Drift is never on the hot path (D9).** `schema refresh --check` fetches the live spec and diffs it against the embedded snapshot; a CI job runs it. The running binary trusts its embedded snapshot and surfaces the SHA so an agent can detect staleness itself. A `tests/` consistency test asserts three invariants: (a) every `OperationDef.cli_path` resolves to a real clap subcommand and vice versa; (b) the set of `idempotency_sensitive` operations equals the create-POST list in contracts §7 exactly; (c) every `dangerous` op's handler requires `--yes`/`--confirm`. These keep the hand-written surface and the generated table from drifting apart.
 
@@ -138,7 +143,7 @@ One function turns a parsed command into an upstream request body, regardless of
 registry field defaults  <  named flags  <  --body JSON|@file|-  <  --set path=value (repeatable)
 ```
 
-Named flags map onto body fields through `OperationDef.fields`: each `Some(flag value)` is written to its `body_path` with the declared `kind`. `--body` supplies a whole JSON object (parsed, then deep-merged over the flag-built object). Each `--set users.0.name=value` applies a single dotted-path assignment over the result (JSON-Pointer-style traversal, creating intermediate objects/arrays). This ordering means an agent can take a fully flag-driven command and surgically override one nested field with `--set` without restating the rest — and `--body` is the escape hatch for fields no flag models yet (D1's raw-passthrough guarantee, at the field level).
+Named flags map onto body fields through `OperationDef.fields`: each `Some(flag value)` is written to its `body_path` with the declared `kind`. `--body` supplies a whole JSON object (parsed, then deep-merged over the flag-built object). Each `--set users.0.name=value` applies a single dotted-path assignment over the result (JSON-Pointer-style traversal, creating intermediate objects/arrays). This ordering means an agent can take a fully flag-driven command and surgically override one nested field with `--set` without restating the rest: and `--body` is the escape hatch for fields no flag models yet (D1's raw-passthrough guarantee, at the field level).
 
 ```rust
 pub struct RequestSpec {
@@ -151,9 +156,9 @@ pub struct RequestSpec {
 fn build_request(op, flags, body_opt, sets) -> Result<RequestSpec, CliError> { /* merge in the order above */ }
 ```
 
-**Stdin inputs are read through one guarded helper.** `--body -`, `--body @file`, and `--input -`/`@file` all go through a shared `read_input` that **rejects `-` when `stdin().is_terminal()`** (returning `CliError::NoInput` → exit 11 with a `suggestedCommand`) instead of blocking on an empty TTY — the agent-hang footgun the SKILL's non-interactivity rule forbids. A missing `@file` is likewise `NoInput`, not a panic. This mirrors the meticulous stdout TTY-detection (§7) on the stdin side.
+**Stdin inputs are read through one guarded helper.** `--body -`, `--body @file`, and `--input -`/`@file` all go through a shared `read_input` that **rejects `-` when `stdin().is_terminal()`** (returning `CliError::NoInput` → exit 11 with a `suggestedCommand`) instead of blocking on an empty TTY: the agent-hang footgun the SKILL's non-interactivity rule forbids. A missing `@file` is likewise `NoInput`, not a panic. This mirrors the meticulous stdout TTY-detection (§7) on the stdin side.
 
-`--print-request` and `--dry-run` short-circuit here, *before* transport: serialize the `RequestSpec` (method, resolved URL, headers with secrets redacted, body) to the chosen format and return exit 0 without sending — no network, no quota. Local validation runs at the end of this stage: required-field presence and `Enum` membership come from `FieldDef` (cheap, every call); a full JSON-Schema check of a hand-supplied `--body` (cold path) parses the component schema out of the embedded spec bytes. A validation failure is a `CliError::Usage` → exit 1 with a `suggestedCommand`.
+`--print-request` and `--dry-run` short-circuit here, *before* transport: serialize the `RequestSpec` (method, resolved URL, headers with secrets redacted, body) to the chosen format and return exit 0 without sending: no network, no quota. Local validation runs at the end of this stage: required-field presence and `Enum` membership come from `FieldDef` (cheap, every call); a full JSON-Schema check of a hand-supplied `--body` (cold path) parses the component schema out of the embedded spec bytes. A validation failure is a `CliError::Usage` → exit 1 with a `suggestedCommand`.
 
 ---
 
@@ -169,10 +174,13 @@ pub trait Transport {
 
 `exec.rs` sits above it and owns orchestration so command handlers stay thin: a handler returns a `Plan { op, request_spec, output_intent }`; `exec::run(plan)` selects single-shot, paginated (`--all`, §10), or streamed (§8) and feeds results to `output`. Everything below happens inside `send`/`exec`:
 
-- **Auth injection.** The resolved credential (§8) becomes the `Authorization` header here and *only* here. `OperationDef.namespace` selects which credential (api vs service key) and which base URL (default vs `EXA_ADMIN_BASE_URL`, D4). A user `--header` can add headers but cannot override the managed `Authorization` — attempting to is a usage error, so an agent can't accidentally (or a prompt-injected agent maliciously) swap the key.
-- **Idempotency-key forwarding (the other half of D7).** For an `idempotency_sensitive` op, a supplied `--idempotency-key KEY` is injected upstream **here** as an `Idempotency-Key: KEY` header (same chokepoint as `Authorization`). This — not the local flag alone — is what makes a keyed auto-retry non-double-billing: the local flag flips `keyed` in `classify` below, and the *same value* rides the wire so Exa dedups the retry server-side. (Whether Exa honors this header is a carry-over validation, contracts §7; if it does not, keyed auto-retry is disabled and the key is used only for the pending-run record.) The key value is **not** secret and is not redacted, but it is never logged with the body.
-- **Wall-clock `--timeout`.** Applied here via the `ureq` agent's call timeout; it bounds **each attempt**, and the `--retry` budget multiplies it. Exhaustion maps to `CliError::Network` (exit 4). It composes with the ≤250 ms SSE read-timeout (the read-timeout governs interrupt latency within a stream; `--timeout` governs total per-attempt wall-clock).
-- **Retry classification (encodes D7).** `RetryPolicy::classify(op, outcome, has_idempotency_key)` is the single authority on whether to retry:
+**Auth injection.** The resolved credential (§8) becomes the `Authorization` header here and *only* here. `OperationDef.namespace` selects which credential (api vs service key) and which base URL (default vs `EXA_ADMIN_BASE_URL`, D4). A user `--header` can add headers but cannot override the managed `Authorization`: attempting to is a usage error, so an agent can't accidentally (or a prompt-injected agent maliciously) swap the key.
+
+**Idempotency-key forwarding (the other half of D7).** For an `idempotency_sensitive` op, a supplied `--idempotency-key KEY` is injected upstream **here** as an `Idempotency-Key: KEY` header (same chokepoint as `Authorization`). This: not the local flag alone: is what makes a keyed auto-retry non-double-billing: the local flag flips `keyed` in `classify` below, and the *same value* rides the wire so Exa dedups the retry server-side. (Whether Exa honors this header is a carry-over validation, contracts §7; if it does not, keyed auto-retry is disabled and the key is used only for the pending-run record.) The key value is **not** secret and is not redacted, but it is never logged with the body.
+
+**Wall-clock `--timeout`.** Applied here via the `ureq` agent's call timeout; it bounds **each attempt**, and the `--retry` budget multiplies it. Exhaustion maps to `CliError::Network` (exit 4). It composes with the ≤250 ms SSE read-timeout (the read-timeout governs interrupt latency within a stream; `--timeout` governs total per-attempt wall-clock).
+
+- Retry classification (encodes D7). `RetryPolicy::classify(op, outcome, has_idempotency_key)` is the single authority on whether to retry:
 
   ```rust
   fn classify(op: &OperationDef, outcome: &Outcome, keyed: bool) -> Decision {
@@ -193,13 +201,16 @@ pub trait Transport {
   }
   ```
 
-  Idempotent GETs, network failures, 429, and 5xx retry up to `--retry N` (default 2). A create-POST without `--idempotency-key` is excluded by the first branch — the rule cannot be bypassed by a command because no command sees this decision. On `FailAmbiguous`, `exec` writes a pending-run record and sets the error's `suggestedCommand` to the exact recovery (`agent runs list --since …` or re-issue with `--idempotency-key`), per contracts §7.
+  Idempotent GETs, network failures, 429, and 5xx retry up to `--retry N` (default 2). A create-POST without `--idempotency-key` is excluded by the first branch: the rule cannot be bypassed by a command because no command sees this decision. On `FailAmbiguous`, `exec` writes a pending-run record and sets the error's `suggestedCommand` to the exact recovery (`agent runs list --since …` or re-issue with `--idempotency-key`), per contracts §7.
 
-  **Pending-run write contract (`state.rs`).** This breadcrumb is written at the worst possible moment — an ambiguous *billable* create — so the write is crash-safe by construction: one newline-terminated `exa.cli.pending_run.v1` JSON object appended with a single `O_APPEND` write (atomic for a sub-`PIPE_BUF` line on a local fs, so concurrent agents firing creates can't interleave torn lines), `flush`ed before the process exits. The CLI **never reads the file back** — recovery is delegated to `agent runs list` — so there is no torn-line parse risk on our side; the file is an append-only audit log bounded/rotated at N records (oldest dropped) so it can't grow unbounded. Full-file rewrites are never needed; if one were ever added it would use temp+rename+fsync (`tempfile`) per the state-and-persistence rules.
-- **429 / `Retry-After`.** Parsed as integer seconds or HTTP-date (`jiff`); `--retry-after` (default on) honors it, capped by remaining `--retry` budget. Exhaustion → exit 6 `rate_limit`.
-- **Redaction.** The trace writer and any error built here are wrapped by `redaction` (§10) so a leaked key is structurally impossible: `--trace FILE` records the request/response with the `Authorization` value and known secret headers/fields scrubbed to `last4`/fingerprint.
-- **SSE streaming** (`stream.rs`). For `--stream` on a streaming op, the response body `Read` is parsed line-by-line into events. The `Read` uses a short read timeout (≤250 ms) so the `ctrlc`-set interrupt flag is polled promptly — SIGINT exits 12 within ~1s even when the upstream stalls mid-stream, preserving the last `eventId`. `exec` maps them to the format table in contracts §8 (`--raw` → exact SSE bytes; `--ndjson` → one `exa.cli.event.v1` per line then a terminal `exa.cli.response.v1`; `--format json` → accumulate, emit only the terminal envelope; human/TTY → progressive render to stdout, diagnostics to stderr). A broken stream → exit 12 + error envelope carrying the last observed `eventId`; `--last-event-id` resumes.
-- **Outcome → envelope / error → exit.** A 2xx becomes a success `Response` envelope; a non-2xx or transport failure becomes a `CliError` whose `category()` is the exit code (§10). HTTP status lives in `error.httpStatus`; the exit code is the CLI *category*, never the raw HTTP code (contracts §6).
+  **Pending-run write contract (`state.rs`).** This breadcrumb is written at the worst possible moment: an ambiguous *billable* create: so the write is crash-safe by construction: one newline-terminated `exa.cli.pending_run.v1` JSON object appended with a single `O_APPEND` write (atomic for a sub-`PIPE_BUF` line on a local fs, so concurrent agents firing creates can't interleave torn lines), `flush`ed before the process exits. The CLI **never reads the file back**: recovery is delegated to `agent runs list`: so there is no torn-line parse risk on our side; the file is an append-only audit log bounded/rotated at N records (oldest dropped) so it can't grow unbounded. Full-file rewrites are never needed; if one were ever added it would use temp+rename+fsync (`tempfile`) per the state-and-persistence rules.
+
+- 429 / `Retry-After`. Parsed as integer seconds or HTTP-date (`jiff`); `--retry-after` (default on) honors it, capped by remaining `--retry` budget. Exhaustion → exit 6 `rate_limit`.
+- Redaction. The trace writer and any error built here are wrapped by `redaction` (§10) so a leaked key is structurally impossible: `--trace FILE` records the request/response with the `Authorization` value and known secret headers/fields scrubbed to `last4`/fingerprint.
+
+**SSE streaming** (`stream.rs`). For `--stream` on a streaming op, the response body `Read` is parsed line-by-line into events. The `Read` uses a short read timeout (≤250 ms) so the `ctrlc`-set interrupt flag is polled promptly: SIGINT exits 12 within ~1s even when the upstream stalls mid-stream, preserving the last `eventId`. `exec` maps them to the format table in contracts §8 (`--raw` → exact SSE bytes; `--ndjson` → one `exa.cli.event.v1` per line then a terminal `exa.cli.response.v1`; `--format json` → accumulate, emit only the terminal envelope; human/TTY → progressive render to stdout, diagnostics to stderr). A broken stream → exit 12 + error envelope carrying the last observed `eventId`; `--last-event-id` resumes.
+
+**Outcome → envelope / error → exit.** A 2xx becomes a success `Response` envelope; a non-2xx or transport failure becomes a `CliError` whose `category()` is the exit code (§10). HTTP status lives in `error.httpStatus`; the exit code is the CLI *category*, never the raw HTTP code (contracts §6).
 
 ---
 
@@ -256,10 +267,14 @@ enum Command {
 }
 ```
 
-- **`ValueEnum` for every fixed-set flag** (`--format`, `--type`, `--category`, `--livecrawl`, `--effort`, `--input-format`, …), each with **`ignore_case = true`** so `--type Fast`/`--format JSON`/`--effort Medium` resolve to the canonical lowercase spelling. `--category` is a `ValueEnum` with multi-word variants (`#[value(name = "research paper")]`), not a free string, so its typos get suggestions too. This makes an invalid choice self-documenting — clap's error lists the valid values — and gives the registry consistency test a typed surface to check enum membership against `FieldDef::Enum`.
-- **Input forgiveness lives in the parser/normalization layer** (design-principle "Input forgiveness"), so the rest of the program sees only canonical values: bare `--text` normalizes to `true`, while `--text N` and `--text full` normalize to `text.maxCharacters` or uncapped text; `--text false`, `--text true`, and `--text 0` reject instead of acting like booleans; `--highlights[=N]` normalizes to a `contents.highlights` options object; fixed enums use `ValueEnum` with `ignore_case = true`; a custom positional parser flags placeholder literals (`<id>`, `$VAR`, `YOUR_*`, `…`) as `CliError::Usage`/`placeholder_argument` (exit 1) naming the discovery step rather than forwarding the literal upstream. Opaque Exa ids get no prefix-coercion (documented non-feature). Coercion is total and deterministic — unambiguous inputs normalize, genuinely ambiguous ones reject with options.
-- **Arg-conflict rules are local validation** (exit 1, no network). `conflicts_with` / `conflicts_with_all` / `required_unless_present` encode the static rules (positional URLS vs `--ids`, `--pretty` vs `--compact`); they fail before any request, which is the cheapest possible feedback loop. The dynamic ones that depend on the registry (`--all` on a non-cursor op, contracts §10) are checked in `exec` because clap can't see the operation's pagination style.
-- **The suggestion engine *is* the intent-inference axiom — but its output is captured, not leaked.** clap's built-in did-you-mean (on by default) handles `exa-agent serch` → "did you mean `search`?" and `--num-reslts` → "did you mean `--num-results`?" with zero code. We do not hand-roll a suggestion table. But clap prints that text itself and exits **2** by default — which would violate both the stdout/stderr-JSON discipline and the exit dictionary (2 = auth). So `lib.rs::run` parses with **`Cli::try_parse_from`** and intercepts the `clap::Error`: `DisplayHelp`/`DisplayVersion` pass through to stdout at exit 0; every other `ErrorKind` is converted to a `CliError::Usage` (exit **1**), rendered as `exa.cli.error.v1` on stderr, with clap's `error.kind()` → our `error.code` (`UnknownArgument`→`unknown_flag`, `InvalidValue`→`invalid_value`, `MissingRequiredArgument`→`missing_required_argument`, etc.) and clap's nearest-candidate suggestion mirrored into `error.details.didYouMean`. clap's native exit 2 and raw text never reach the surface. Our `suggestedCommand` is then reserved for *semantic* corrections clap can't know (the dynamic ones, e.g. "use `--num-results 100`, not `--all`"). Pinned by `golden_parse_error_envelope`.
+**`ValueEnum` for every fixed-set flag** (`--format`, `--type`, `--category`, `--livecrawl`, `--effort`, `--input-format`, …), each with **`ignore_case = true`** so `--type Fast`/`--format JSON`/`--effort Medium` resolve to the canonical lowercase spelling. `--category` is a `ValueEnum` with multi-word variants (`#[value(name = "research paper")]`), not a free string, so its typos get suggestions too. This makes an invalid choice self-documenting: clap's error lists the valid values: and gives the registry consistency test a typed surface to check enum membership against `FieldDef::Enum`.
+
+**Input forgiveness lives in the parser/normalization layer** (design-principle "Input forgiveness"), so the rest of the program sees only canonical values: bare `--text` normalizes to `true`, while `--text N` and `--text full` normalize to `text.maxCharacters` or uncapped text; `--text false`, `--text true`, and `--text 0` reject instead of acting like booleans; `--highlights[=N]` normalizes to a `contents.highlights` options object; fixed enums use `ValueEnum` with `ignore_case = true`; a custom positional parser flags placeholder literals (`<id>`, `$VAR`, `YOUR_*`, `…`) as `CliError::Usage`/`placeholder_argument` (exit 1) naming the discovery step rather than forwarding the literal upstream. Opaque Exa ids get no prefix-coercion (documented non-feature). Coercion is total and deterministic: unambiguous inputs normalize, genuinely ambiguous ones reject with options.
+
+**Arg-conflict rules are local validation** (exit 1, no network). `conflicts_with` / `conflicts_with_all` / `required_unless_present` encode the static rules (positional URLS vs `--ids`, `--pretty` vs `--compact`); they fail before any request, which is the cheapest possible feedback loop. The dynamic ones that depend on the registry (`--all` on a non-cursor op, contracts §10) are checked in `exec` because clap can't see the operation's pagination style.
+
+**The suggestion engine *is* the intent-inference axiom: but its output is captured, not leaked.** clap's built-in did-you-mean (on by default) handles `exa-agent serch` → "did you mean `search`?" and `--num-reslts` → "did you mean `--num-results`?" with zero code. We do not hand-roll a suggestion table. But clap prints that text itself and exits **2** by default: which would violate both the stdout/stderr-JSON discipline and the exit dictionary (2 = auth). So `lib.rs::run` parses with **`Cli::try_parse_from`** and intercepts the `clap::Error`: `DisplayHelp`/`DisplayVersion` pass through to stdout at exit 0; every other `ErrorKind` is converted to a `CliError::Usage` (exit **1**), rendered as `exa.cli.error.v1` on stderr, with clap's `error.kind()` → our `error.code` (`UnknownArgument`→`unknown_flag`, `InvalidValue`→`invalid_value`, `MissingRequiredArgument`→`missing_required_argument`, etc.) and clap's nearest-candidate suggestion mirrored into `error.details.didYouMean`. clap's native exit 2 and raw text never reach the surface. Our `suggestedCommand` is then reserved for *semantic* corrections clap can't know (the dynamic ones, e.g. "use `--num-results 100`, not `--all`"). Pinned by `golden_parse_error_envelope`.
+
 - The `--json`/`--ndjson`/`--raw` booleans plus `--format` collapse to one `OutputMode` in §7; clap only collects them.
 
 ---
@@ -273,7 +288,7 @@ enum OutputMode { Human, Json, Ndjson, Raw }
 fn resolve_mode(g: &GlobalArgs, env_output: Option<&str>, stdout_is_tty: bool) -> OutputMode { /* §2 precedence */ }
 ```
 
-**The envelope serializer guarantees stable field order** by being plain `#[derive(Serialize)]` structs whose field declaration order *is* the wire order — no map, no sorting pass. The structs mirror contracts §4/§5/§8/§13 field-for-field:
+**The envelope serializer guarantees stable field order** by being plain `#[derive(Serialize)]` structs whose field declaration order *is* the wire order: no map, no sorting pass. The structs mirror contracts §4/§5/§8/§13 field-for-field:
 
 ```rust
 #[derive(Serialize)]
@@ -307,19 +322,22 @@ struct Response {
 
 ## 8. Auth & config
 
-**Credential precedence (D11), resolved in `auth.rs`:** `--api-key`/`--api-key-stdin` (one-shot, never written anywhere) > `EXA_API_KEY` env > OS keyring (`exa-agent:api:<profile>`) > config metadata. The service key is the parallel chain — `--service-key` > `EXA_SERVICE_KEY` > keyring `exa-agent:service:<profile>` — and the `admin` namespace (D4) reads *only* that chain. `OperationDef.namespace` decides which chain transport pulls from, so the everyday search key can never be sent to the admin host and vice versa. The CLI refuses to use an api key where a service key is required (and the reverse) with an actionable error (`key_scope_mismatch`, exit 2), keyed off a cheap shape check on the credential.
+Credential resolution in `auth.rs` checks one-shot flags/stdin, the configured
+profile's environment-variable name or default `EXA_API_KEY`/`EXA_SERVICE_KEY`,
+and the credential file. API and service namespaces remain separate. The
+shipped dispatcher supplies no OS keyring implementation; the `keyring` feature
+is inert on every artifact. `auth login` stores plaintext credentials at
+`~/.config/exa-agent-cli/credentials.json` with mode 0600. Prefer environment
+variables for ordinary use.
 
-**The two auth failures are distinct codes (contracts §5.1).** When the ladder resolves *nothing*, that is a local `not_authenticated` (exit 2) whose `details.checked` lists every rung that was tried (`["--api-key", "EXA_API_KEY", "keyring:exa-agent:api:default", "config"]`) and whose `suggestedCommand` names the exact fix (`export EXA_API_KEY=…` or `exa-agent auth login`). When a credential *was* sent but Exa rejected it (401/403 — revoked/expired), that is `reauth_required` (exit 2) — a different code so an agent branches "set a key" vs "rotate the key" instead of guessing. Both are golden-pinned.
+`not_authenticated` (exit 2) means no credential resolved and reports the checked
+sources. `reauth_required` means upstream rejected a credential. Neither should
+be confused with `feature_not_enabled`, which means account access is missing.
+The `Secret` type's display, debug, and serialization redact its value.
 
-```rust
-fn resolve_credential(ns: Namespace, g: &GlobalArgs, cfg: &Config) -> Result<Secret, CliError> {
-    // ns selects EXA_API_KEY / EXA_SERVICE_KEY env, keyring scope, and refusal rules
-}
-```
-
-`Secret` is a newtype whose `Debug`/`Display` print only `last4`/fingerprint, so it cannot be logged in full even by accident — redaction's last line of defense. Keyring access goes through a `Keyring` trait (the same seam pattern as `Transport`), so tests inject an in-memory fake and `cargo test` never touches a real Keychain/secret-service daemon; the musl build compiles a stub impl (env-first auth only, D15). **Keyring reads are best-effort and must not block:** a read that would raise an OS prompt (e.g. macOS Keychain's allow-access dialog on first use by a new binary) fails fast and falls through to the next ladder rung — ultimately to the structured `not_authenticated` error — rather than hanging a per-call agent. This is what keeps the env-first ladder genuinely headless even on a keyring-backed profile.
-
-**Config file (minimal per D12).** TOML at project `.exa-agent-cli.toml` then user `$XDG_CONFIG_HOME/exa-agent-cli/config.toml`. It stores base-url, default format, timeout, retry, and profile *metadata and env-var names* — **never plaintext keys** (D11). `--profile X` selects a `[profiles.X]` block; `EXA_PROFILE` is the env default.
+Config stores profile metadata, environment-variable names, base URL, format,
+and transport settings separately from stored secrets. `--profile` selects a
+profile; `EXA_PROFILE` supplies the default selection.
 
 ```toml
 base_url = "https://api.exa.ai"
@@ -367,12 +385,12 @@ Detector list (all read-only):
 | `service-key.scope` | service key, if configured, isn't an api key (shape) | `export EXA_SERVICE_KEY=…` (must be a service key, not an `EXA_API_KEY`) |
 | `base-url` | base-url is a well-formed absolute https URL | `exa-agent config set base_url …` |
 | `spec.hash` | embedded-spec SHA matches the committed snapshot | `exa-agent schema refresh --check` |
-| `binary.version` | reports version + embedded spec version | — |
-| `tty.discipline` | self-check: non-TTY run emits clean JSON, no ANSI on stdout | — |
-| `auth.online` | *(`--online` only)* a billing-free auth probe succeeds — `POST /search` with an empty body (auth is validated before the body, so a good key returns 400 `INVALID_REQUEST_BODY` and a bad one 401/403; 5xx/429 → inconclusive/warn). Not a GET to `/v0/teams/me`, which upstream does not serve (see D22). | `exa-agent auth test` |
+| `binary.version` | reports version + embedded spec version |: |
+| `tty.discipline` | self-check: non-TTY run emits clean JSON, no ANSI on stdout |: |
+| `auth.online` | *(`--online` only)* a billing-free auth probe succeeds: `POST /search` with an empty body (auth is validated before the body, so a good key returns 400 `INVALID_REQUEST_BODY` and a bad one 401/403; 5xx/429 → inconclusive/warn). Not a GET to `/v0/teams/me`, which upstream does not serve (see D22). | `exa-agent auth test` |
 | `connectivity` | *(`--online` only)* base-url reachable, TLS valid | `exa-agent doctor --online` |
 
-`doctor --json` emits an `exa.cli.doctor.v1` report (contracts §15): the findings array in stable order, each finding keeping its own `category` for granularity. The **exit code is doctor-local, not the §6 categories** — `0` healthy (no `Fail`), `1` findings present, `4` refused-unsafe (a detector or fixer that couldn't safely complete) — so a `doctor` exit can never be mistaken for a real `auth`(2)/`config`(3)/`network`(4) failure from another command. The detector ids, fixers, required safety flags, and exit dictionary are published in `capabilities.doctor` (contracts §13). `actions[]` records planned/fixed/skipped/refused/restored work; `backupPath` identifies the reversible config snapshot.
+`doctor --json` emits an `exa.cli.doctor.v1` report (contracts §15): the findings array in stable order, each finding keeping its own `category` for granularity. The **exit code is doctor-local, not the §6 categories**: `0` healthy (no `Fail`), `1` findings present, `4` refused-unsafe (a detector or fixer that couldn't safely complete): so a `doctor` exit can never be mistaken for a real `auth`(2)/`config`(3)/`network`(4) failure from another command. The detector ids, fixers, required safety flags, and exit dictionary are published in `capabilities.doctor` (contracts §13). `actions[]` records planned/fixed/skipped/refused/restored work; `backupPath` identifies the reversible config snapshot.
 
 ---
 
@@ -402,9 +420,9 @@ impl CliError {
 }
 ```
 
-`Diag` carries the contract fields: `code` (a stable machine string from the published §5.1 dictionary, not free-form), `message` (one line, names what failed and where), `details` (incl. the optional `didYouMean`/`checked`/`retryAfterMs`), `see`, `http_status`, `upstream_request_id`, `retryable`, and `suggested_command`. `retryable` is computed from the same `RetryPolicy` logic transport uses (so the envelope's fine signal and transport's behavior never disagree) and is `false` for every un-keyed create failure (D7). `lib.rs::run()` is the single funnel: it (1) intercepts `clap::Error` from `try_parse_from` — `DisplayHelp`/`DisplayVersion` → stdout, exit 0; any other kind → `CliError::Usage` (exit 1) so clap's default exit 2 never leaks (§6) — and (2) is the only place that converts a `CliError` into bytes, serializing the envelope to **stderr** (stdout stays empty, contracts §5) and returning `category()` as the process exit code. A static test asserts every `error.code` the binary can emit is a member of the §5.1 dictionary.
+`Diag` carries the contract fields: `code` (a stable machine string from the published §5.1 dictionary, not free-form), `message` (one line, names what failed and where), `details` (incl. the optional `didYouMean`/`checked`/`retryAfterMs`), `see`, `http_status`, `upstream_request_id`, `retryable`, and `suggested_command`. `retryable` is computed from the same `RetryPolicy` logic transport uses (so the envelope's fine signal and transport's behavior never disagree) and is `false` for every un-keyed create failure (D7). `lib.rs::run()` is the single funnel: it (1) intercepts `clap::Error` from `try_parse_from`: `DisplayHelp`/`DisplayVersion` → stdout, exit 0; any other kind → `CliError::Usage` (exit 1) so clap's default exit 2 never leaks (§6): and (2) is the only place that converts a `CliError` into bytes, serializing the envelope to **stderr** (stdout stays empty, contracts §5) and returning `category()` as the process exit code. A static test asserts every `error.code` the binary can emit is a member of the §5.1 dictionary.
 
-**Redaction sits at the serialization boundary, not at each call site**, which is what makes "no error can leak a key" structural rather than a discipline we hope holds. Every `Diag` field — including `suggested_command` and `details` — passes through `redaction::scrub` on its way into the envelope, and the `Secret` newtype (§8) can't render in full anywhere. The scrub is a targeted pass: replace any value matching the Exa key prefix shape with `last4`, and blank known secret headers (`Authorization`, webhook-signing headers) by name. Because it runs at one boundary, adding a new error variant can't reintroduce a leak.
+**Redaction sits at the serialization boundary, not at each call site**, which is what makes "no error can leak a key" structural rather than a discipline we hope holds. Every `Diag` field: including `suggested_command` and `details`: passes through `redaction::scrub` on its way into the envelope, and the `Secret` newtype (§8) can't render in full anywhere. The scrub is a targeted pass: replace any value matching the Exa key prefix shape with `last4`, and blank known secret headers (`Authorization`, webhook-signing headers) by name. Because it runs at one boundary, adding a new error variant can't reintroduce a leak.
 
 ---
 

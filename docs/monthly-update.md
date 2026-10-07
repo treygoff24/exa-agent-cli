@@ -2,8 +2,7 @@
 
 Cycle skill: `cli-monthly-update` (skill pool; `claude-skill add
 cli-monthly-update` activates it for this repo). This file holds only what
-that skill leaves abstract. Every command below is offline unless it says
-live.
+that skill leaves abstract. Networked commands are marked below; publication is a separate authorized step.
 
 ## Upstream
 
@@ -22,7 +21,7 @@ live.
   absent from the public spec diff; `/context` and retired Websets routes were
   caught this way in 2026-09.
 - Papercut search: `papercuts list --all --status open --format md
-  --limit 300`, then filter text for `exa-agent`, `exa`, `EXA_API_KEY`;
+  --limit 0`, then filter text for `exa-agent`, `exa`, `EXA_API_KEY`;
   tags in use are `exa-agent`, `research`, `research-tools`.
 
 ## Build and gate
@@ -44,14 +43,17 @@ live.
 - Emitted-command parse invariant: `tests/next_actions.rs` parses every
   `nextAction` and warning-derived command through `Cli::try_parse_from`.
   Extend it when a new command family emits hints.
-- Live smoke with a cost ceiling: `cargo xtask smoke --budget 0.05`.
+- Live smoke with a cost ceiling: `cargo xtask smoke --budget 0.05`. This sends
+  requests; unset `EXA_AGENT_NO_NETWORK` only for an intentionally live run.
 
 ## Ship
 
 - Version in `Cargo.toml`; `CHANGELOG.md` keeps `## Unreleased` on top and
-  `## X.Y.Z — YYYY-MM-DD` per release, with Added/Changed/Fixed.
+  dated version headings per release, with Added/Changed/Fixed.
 - CI: `.github/workflows/ci.yml`, six jobs (lint, msrv, static-linux,
   release-config, test ubuntu, test macos). Public repo, free minutes.
+- GitHub reads below use the network. GitHub pushes, tags, releases, and registry
+  publication require explicit authorization; local verification does not publish.
 - Finding the run for a pushed commit: `gh run list --commit SHA` lags the
   push by several minutes; `gh run list --branch main --json databaseId,headSha`
   shows it at once. Then `gh run watch ID --exit-status`.
@@ -66,10 +68,26 @@ live.
   skill library (it points at `exa-agent robot-docs guide`, so it only needs
   edits when the estate auth ritual or the "rules that bite" change).
 
-## Last cycle
+## Latest local cycle
 
-- 2026-09-21: released 0.7.0 (`2e6038e`, tag `v0.7.0`). Resolved
-  `exa-wl1` by removing the two retired Websets commands in this commit.
-  Carried forward: bead `exa-7fc` (`--dry-run` skips registry range validation;
-  non-string `type` bypasses the Snapshot conflict check), papercut
-  `pc2_5d400e3f9250ca3b` (503 fallback guidance, research-skill matter).
+- 2026-10-07: 0.8.0 installed and verified locally; Forgejo source updated. GitHub
+  and crates.io publication remain pending. The full gate passed 690 tests,
+  `cargo publish --locked --dry-run` passed, and installed provenance and package
+  identity were checked. Live search accepted objective, location, and larger
+  content caps; contents returned usable text. These checks cost $0.008. No paid
+  Ultra run or live Agent/Websets mutation was performed.
+- Added Ultra/duration budgets, objective, country/JSON/paired-coordinate location,
+  1,000,000-character content caps, and Macrobond. Fixed preset/schema validation,
+  safe migration hints, supported Websets metadata-key limits, and Firecrawl
+  recovery for government content. SDK-only beta Agent Monitors remain untyped;
+  deprecated filters get no new typed flags.
+- The earlier validation and fallback papercuts were resolved with current
+  evidence. Detailed receipts are retained locally in `work/oct07/RESULT.md`,
+  `work/STATE.md`, and the installation/review reports under
+  `work/oct07/`. These ignored files are not distributed with the repository.
+
+## Previous published cycle
+
+- 2026-09-21: released 0.7.0 (tag `v0.7.0`). The subsequent local maintenance
+  removed the two retired Websets export commands. The 0.7.0 release record is
+  preserved in [CHANGELOG.md](../CHANGELOG.md).

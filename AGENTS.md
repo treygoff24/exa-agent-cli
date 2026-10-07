@@ -79,11 +79,13 @@ self-description commands still work.
 
 - Search `--objective TEXT` is a broader goal separate from the query, at most
   4,096 characters. Search and answer accept `--user-location COUNTRY|JSON` plus paired
-  `--latitude` (-90..90) and `--longitude` (-180..180) hints.
+  `--latitude` (-90..90) and `--longitude` (-180..180) hints. Use `--longitude=-122.4194` for a negative value. Preview with `--dry-run --print-request --json` and inspect the final location object.
 - Agent `--effort ultra` requires an explicit `--max-cost-dollars` ($1..$100) as
   typed-command CLI safety policy; raw is a pass-through escape hatch. Optional
   `--max-duration-seconds` is a soft wall-clock limit of 300..10,800 seconds,
   Ultra only; upstream stops starting work as the limit approaches.
+  Terminal `budget_reached` and `time_limit_reached` warnings mean the run ended
+  at a limit; inspect gathered results and disclose that limit.
   Ultra and `agent runs stop` require no beta header; legacy `max` fails locally
   with a migration command. `--data-source macrobond` is supported.
 - Numeric text/highlights/legacy content-context caps accept 1..1,000,000 where
@@ -91,7 +93,10 @@ self-description commands still work.
   The separate `context` code-search route stays available with an
   `undocumented_upstream` warning; retired Websets export commands stay absent.
 - Websets mutation metadata keys are at most 250 characters. This constraint
-  does not apply to Agent or Batch metadata.
+  applies to metadata on Websets create/update, enrichment create/update, search
+  create, import create, and webhook create/update; Websets create also validates
+  nested `enrichments[].metadata`. Nested `search.metadata` is not defined upstream. It does not
+  apply to Agent or Batch metadata.
 - Deprecated `includeText`/`excludeText` use approximate word matching and are
   ignored for `similar` company/people categories. Use `--body`/`--set` for these
   fields. Crawl-date filters are ignored upstream. Prefer publication dates.
@@ -102,7 +107,10 @@ self-description commands still work.
   `monitor` and `websets monitors` are separate families.
 - For government content failures, follow the emitted external fallback:
   `firecrawl scrape 'URL' --max-age 0`. Firecrawl must be installed
-  and configured separately; Exa does not return trustworthy raw PDF bytes.
+  and configured separately; its fallback writes to stdout, so save to a task-specific
+  path when needed. Confirm the title and opening text match the requested source
+  before quoting: a soft 404 can have HTTP 200 and `outcome: full`. Exa does not
+  return trustworthy raw PDF bytes.
 
 ## Reading the output
 
@@ -139,7 +147,7 @@ Output format is automatic — JSON when stdout is piped, human-readable in a TT
 
 **Out of credits is exit `13` / `insufficient_credits`, never exit `1`.** Challenge-evidenced raw payment 402 is checked first and is `payment_required` / exit `2`; otherwise a bare 402, or any 4xx body carrying `NO_MORE_CREDITS`, means the credential is valid and the invocation was well-formed — the account just cannot pay. Retrying and re-guessing flags is wasted effort; top up at https://dashboard.exa.ai or move the task to another research lane.
 
-Dispatch-level body validation runs before credential resolution and network I/O. Body-level mistakes (unknown fields, out-of-range values, missing required fields, or a malformed `--body`/`--set`) exit `1` as a local `usage` error rather than being sent upstream and returning `5`. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
+Dispatch-level modeled-body validation runs before credential resolution and network I/O. Out-of-range modeled values, missing required fields, and malformed `--body`/`--set` exit `1` locally. Ordinary typed dispatch permits unknown extension fields; `schema validate-input` for modeled operations and stored presets reject unknown keys. Schema validation is complete only with top-level `valid:true`: `valid:false` is rejected, while `valid:null` means structural validation is unsupported for an operation without modeled fields, even with exit zero and `ok:true`. Presets provide defaults; named flags, `--body`, and then `--set` override them, with effective constraints checked on the final merged request. `--dry-run --print-request` still performs this validation and exits `1` without printing a request when the body is invalid; when the body is valid it prints the exact request body and exits `0` without sending it.
 
 ## Safety model
 

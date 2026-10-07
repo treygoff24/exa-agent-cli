@@ -1,18 +1,23 @@
-# Ergonomics checklist (Wave 6)
+# Ergonomics checks
 
 Date: 2026-06-30  
-Status: committed in-repo release gate; no external skill workspace dependency.
+Status: committed checks; no external skill workspace dependency.
 
 The local `agent-ergonomics-and-intuitiveness-maximization-for-cli-tools` skill is useful for ad hoc audits, but v1 release readiness is gated by this repository's own tests and `xtask` commands.
 
-## Required commands
+## Verification commands
 
 | Command | Purpose |
 | --- | --- |
-| `cargo test --test ergonomics -- --nocapture` | Runs the committed intent, robot-docs, and score-floor corpus |
+| `cargo test -j 8 --test ergonomics -- --test-threads=8 --nocapture` | Runs the committed intent, robot-docs, and score-floor corpus |
 | `cargo xtask ergonomics` | Convenience wrapper for the ergonomics test binary plus offline self-description smokes |
 | `cargo xtask phase-gate 6` | Full workspace tests, ergonomics, self-description smokes, final dry-run smokes |
 | `cargo xtask smoke --budget "$EXA_E2E_BUDGET"` | Final low-cost live smoke against a real Exa key; read-only and cost-capped (default $0.05) |
+
+Workers run only targeted checks through `testrun`; the coordinator owns full
+workspace and release gates. Set `EXA_AGENT_NO_NETWORK=1` for offline probes.
+On the devbox, export `CARGO_TARGET_DIR="$(estate-build-cache path)"` before Cargo
+builds. Live smoke requires a real credential and intentional network access.
 
 ## Intent-mistake corpus
 
@@ -48,4 +53,5 @@ The committed Wave 6 floor is **700 minimum per dimension**. The in-repo score m
 | determinism | 700 |
 | dangerous_op_safety | 700 |
 
-The goal is not to turn scoring into theater; the real gate is binary behavior plus regression tests. The score monitor is a compact release-readiness tripwire.
+The score floor supplements binary behavior and regression tests. It does not
+establish live API access or replace the coordinator's integrated gate.

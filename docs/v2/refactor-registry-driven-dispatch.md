@@ -1,5 +1,10 @@
 # Refactor: finish the registry-driven dispatch (the "full vision")
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 Date: 2026-06-30
 Status: **design proposal — not yet approved.** Decides whether, and how, to converge the as-built dispatch onto the generic registry-driven architecture that [`architecture.md`](architecture.md) §1/§5 already describes. Companion to [`architecture.md`](architecture.md); where they disagree, this doc is the newer thinking and supersedes for the dispatch layer only.
 

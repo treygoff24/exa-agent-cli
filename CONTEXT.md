@@ -6,16 +6,26 @@ Build an agent-first CLI over Exa that exposes the full public and documented Ex
 
 ## Glossary
 
-Terms whose meaning is not obvious from the command surface. Endpoint-to-command mappings live in `capabilities --json` and `docs/v2/commands.md`; the locked design decisions and their rationale live in `docs/v2/decisions.md`.
+Installed `capabilities --json` gives endpoint-to-command mappings. The
+[command reference](docs/v2/commands.md) includes design targets; the
+[decision record](docs/v2/decisions.md) preserves the rationale and later changes.
 
-- **Agent-first CLI**: A command-line interface where AI agents are the primary user. It must be discoverable, deterministic, parseable, safe under non-interactive use, and helpful when an agent makes a predictable mistake.
-- **Canonical command**: A stable command path mapping directly to one official Exa operation, e.g. `exa-agent search` → `POST /search`.
-- **Macro**: A thin, transparent expansion of a canonical command (`ask` → `answer`, `fetch` → `contents`). Macros must be inspectable with `--dry-run --print-request` and must never hide the underlying API shape.
-- **Raw passthrough**: `exa-agent raw METHOD PATH --body ...` — reaches endpoints the registry does not model (`/chat/completions`, `/responses`) while keeping auth, retry, tracing, output, and error contracts. Raw also carries signed stdin-only payment pass-through/discovery for exact nonstreaming `POST /search` and `POST /contents`; it does not own wallets, signing, or custody.
-- **Envelope**: The CLI-owned JSON wrapper around upstream responses (`exa.cli.response.v1` / `exa.cli.error.v1`). It normalizes ok, command, operation, request ids, data, pagination, cost, warnings, diagnostics, and errors; `--raw` bypasses it and emits exact upstream bytes.
-- **Operation registry**: The build-time table merged from the vendored OpenAPI specs plus `openapi/overlay.toml`, carrying each operation's command path, HTTP method, schema, pagination style, safety, and idempotency metadata. It backs `capabilities`, `schema`, validation, and help. The overlay may fully define real-but-unspecced operations, not just annotate spec-derived ones (e.g. `/context`).
-- **Webset**: Exa's asynchronous structured collection under `/v0/websets`, containing searches, items, criteria/evaluations, enrichments, imports, monitors, events, and webhooks. Creation is async: it returns an id you poll or stream events from.
-- **Standalone Monitor** vs **Websets Monitor**: `exa-agent monitor …` drives top-level `/monitors` (a recurring search); `exa-agent websets monitors …` drives Websets `/v0/monitors` (scheduled behavior over an existing Webset). Different resources — the CLI gives the confusable pair reciprocal did-you-mean rather than aliasing them.
-- **Admin/service key**: `EXA_SERVICE_KEY`, used only for the Team Management API at `https://admin-api.exa.ai/team-management`. Never interchangeable with `EXA_API_KEY`; stored and resolved separately.
+| Term | Meaning |
+| --- | --- |
+| Agent-first CLI | Commands designed for non-interactive callers, with offline discovery, parseable output, stable exit codes, and explicit confirmation for destructive actions |
+| Canonical command | A stable command path for one Exa operation, such as `search` for `POST /search` |
+| Macro | A transparent command expansion: `ask` calls `answer`; `fetch` calls `contents`. Inspect the request with `--dry-run --print-request` |
+| Raw request | `raw METHOD PATH --body ...` calls an endpoint outside the typed surface with shared auth, retries, tracing, and output handling |
+| Envelope | The CLI's JSON wrapper: `exa.cli.response.v1` for success and `exa.cli.error.v1` for errors. `--raw` emits HTTP content-decoded body bytes instead; signed-payment credential echoes are redacted |
+| Operation registry | A build-time table generated from committed OpenAPI specs and `openapi/overlay.toml`, containing command paths, methods, fields, pagination, streaming, and safety metadata |
+| Webset | An asynchronous structured collection at `/websets/v0/websets`, containing searches, items, enrichments, and related resources. Creation returns an ID for later status and result retrieval |
+| Search monitor | `monitor` manages recurring searches at `/monitors` |
+| Websets monitor | `websets monitors` manages scheduled Websets work at `/websets/v0/monitors`; it is a separate resource family from Search monitors |
+| Admin/service key | `EXA_SERVICE_KEY`, resolved separately for the Team Management API at `https://admin-api.exa.ai/team-management`. It is not interchangeable with `EXA_API_KEY` |
 
-**Not implemented:** wallet custody/signing for x402 or MPP. Payment support is limited to raw signed-header pass-through and discovery; original research notes are in `docs/research/exa-api-research.md`.
+The overlay also defines the retained `/context` compatibility command, which
+is undocumented upstream. SDK-only beta Agent Monitors are not typed commands.
+Raw payment discovery and signed-header pass-through support exact nonstreaming
+`POST /search` and `POST /contents` on the default host. Wallet custody and signing
+are outside the CLI. Historical research remains in
+[Exa API research](docs/research/exa-api-research.md).

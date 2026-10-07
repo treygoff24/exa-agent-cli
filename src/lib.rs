@@ -9206,10 +9206,10 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
     (
         "Discover and dry-run",
         &[
-            "Start with `exa-agent capabilities` to discover command metadata.",
-            "Narrow discovery with `exa-agent capabilities <command-path>`, for example `exa-agent capabilities search`.",
-            "Preview live mutations with `--dry-run --print-request` before sending them.",
-            "When an invocation is rejected, run the `error.suggestedCommand` it names.",
+            "Choose the command with `exa-agent capabilities --json`, then read `exa-agent capabilities <command-path> --compact` and the command's `--help`; discovery is complete when its method, required inputs, and safety flags are known.",
+            "Read `exa-agent robot-docs examples --task search --json` for runnable offline examples; use the sections below for contents, agent runs, batches, monitors, and Websets.",
+            "Build the intended request with `--dry-run --print-request --json` before any live mutation. Proceed only when the preview has the intended path and complete body; remove the preview flags to submit once, then follow its returned `nextActions`.",
+            "When an invocation is rejected, inspect `error.suggestedCommand`. Replay an emitted recovery preview without reordering it: it already includes dry-run flags and may put the query after `--`; insert any added global flags before `--`. For other API-request repairs, add `--dry-run --print-request --json` before any `--` and inspect the final body. Restore private context when required. Help, auth, and config corrections follow their command-specific safety rules and completion criteria.",
         ],
     ),
     (
@@ -9238,11 +9238,10 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
         "Search",
         &[
             "Set result count with `--num-results`; search is not cursor-paginated.",
-            "Use search `--objective TEXT` for a broader goal independent of search type (maximum 4096 Unicode characters). Search and answer accept `--user-location COUNTRY|JSON`, or paired `--latitude N --longitude N` within -90..90 and -180..180, optionally with a country. Country-only requests retain their string form; coordinates produce a location object.",
+            "Use search `--objective TEXT` for a broader goal independent of search type (maximum 4096 Unicode characters). Search and answer accept `--user-location COUNTRY|JSON`, or paired `--latitude N --longitude N` within -90..90 and -180..180, optionally with a country. Preview negative coordinates with `exa-agent search \"regional policy\" --objective \"Find primary sources\" --user-location US --latitude=37.7749 --longitude=-122.4194 --dry-run --print-request --json`; verify the location object contains both coordinates. Country-only requests retain their string form.",
             "Use the named rich-input controls: search/answer `--output-schema JSON|@file`, search/answer/agent runs create `--system-prompt TEXT|@file`, and contents `--highlights [QUERY|JSON|@file]`.",
-            "Search returns query-aware 800-character highlights by default; use `--no-highlights` for metadata only, or `--text 1500` instead of `--text full` for capped triage text. `--highlights` accepts a character cap or `JSON|@file`; for a shared context budget use `--highlights '{\"dynamic\":true,\"verbosity\":\"medium\"}' --beta dynamic-highlights-2026-08-28`, omitting `maxCharacters` and `numSentences` with `verbosity`.",
+            "Search returns query-aware 800-character highlights by default; use `--no-highlights` for metadata only, or `--text 1500` instead of `--text full` for capped triage text. Numeric text/highlights and supported legacy content-context caps accept 1..1000000 characters. `--highlights` accepts a character cap or `JSON|@file`; for a shared context budget use `--highlights '{\"dynamic\":true,\"verbosity\":\"medium\"}' --beta dynamic-highlights-2026-08-28`, omitting `maxCharacters` and `numSentences` with `verbosity`.",
             "`search --stream` requests SSE for synthesized output. Without a final non-null `outputSchema`, upstream returns normal JSON and the envelope warns with `stream_ignored`; `--body`/`--set` overrides determine the final request.",
-            "Use `site:example.gov` inside the query to affect query interpretation; use `--include-domain example.gov` and `--exclude-domain example.com` as typed upstream domain filters.",
             "Pass hostnames, hostname paths, or wildcard subdomains to `--include-domain`; for broad government discovery, put `site:.gov` in the query rather than passing a bare TLD such as `gov`, then inspect the returned domains. Example: `exa-agent search \"AI infrastructure\" --include-domain \"exa.ai\" --num-results 5 --json`.",
             "Treat `SOURCE_NOT_AVAILABLE` as a source-access failure, not a zero-result success. Broaden and filter locally with `exa-agent search \"AI infrastructure\" --num-results 20 --json | jq '[(.data.results // [])[] | select(.url | test(\"^https?://([^/]+\\\\.)?exa\\\\.ai(/|$)\"; \"i\"))]'`, and cite the accessible publisher rather than a syndicator.",
             "Valid `--category` values are exactly `company`, `people`, `publication`, `news`, `personal site`, and `financial report`; use a plain query plus `--include-domain github.com` for repository or release lookup. Typed flags accept legacy `research paper` and coerce it to `publication`, while `--body`/`--set` values pass through unchanged.",
@@ -9258,10 +9257,10 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
             "Use `contents --chunk-size N --jobs J` for 1-16 workers (default 1); an explicit `--jobs` requires `--chunk-size`.",
             "Multi-chunk stream bodies are rejected before sending; admitted results stay in input order, drain after failure, and stop before new rounds. `--output` retains every successful rendering with one confirmation; JSON is a sequence of envelopes, and NDJSON keeps records and summaries.",
             "Contents/fetch and answer/ask live success envelopes add text-aware `outcome` and `contentDiagnostics`. Empty, binary, and unextracted-PDF rows are unusable; zero usable contents rows produce `no_content`, while all-URL crawl failures still exit 10.",
-            "For government pages without usable content, the fallback is `firecrawl scrape URL --max-age 0`; fetch full authoritative text before quoting or editing it.",
+            "For government pages or PDFs without usable content, run the emitted `firecrawl scrape URL --max-age 0` fallback (requires separately configured Firecrawl). It writes to stdout; save it to a task-specific path if needed. Recovery is complete only when the returned title and opening text match the requested source; HTTP 200 or `outcome: full` can still contain a soft 404 or interstitial.",
             "Use Exa as the fast default; for `no_content` or `partial` sources, follow `warnings` and `nextActions` (their `suggestedCommand` names the exact fallback fetch; copy it rather than improvising) or fetch the URL with another tool. Authority-critical text must come from a crawl that returned it, including for uscode.house.gov, govinfo.gov, eCFR, Congress.gov, and agency sites.",
             "Empty contents error objects use `upstream_reason_unavailable` and suggest retrying or directly fetching the quoted URL.",
-            "The standalone `/context` route is retained as an undocumented compatibility route absent from the official Exa SDKs; it may change or disappear.",
+            "The standalone `/context` route is retained as an undocumented compatibility route absent from the official Exa SDKs; it may change or disappear. Its presence and offline preview do not establish current upstream live support.",
         ],
     ),
     (
@@ -9275,7 +9274,9 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
         "Agent runs",
         &[
             "`agent --data-source` accepts `fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`, `particle`, `jinko`, `polymarket`, and `macrobond` case-insensitively (max 5) and sends canonical spellings. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; `--body`/`--set` values pass through unchanged.",
-            "`agent --max-cost-dollars` maps `budget.maxCostDollars` and is valid only with omitted, `auto`, or `ultra` effort. Typed-command CLI safety policy requires an explicit 1..100 dollar cap for ultra; raw remains pass-through. `--max-duration-seconds` is a soft wall-clock limit of 300..10800 seconds, ultra only; upstream stops starting work as the limit approaches. It is separate from the local request timeout. Old max effort returns a migration preview preserving the final request body; no beta is required. Reapply original profile/base URL/header context when `recoveryContextRequired` is set. `budget_reached` and `time_limit_reached` emit success warnings.",
+            "Preview Ultra with `exa-agent agent runs create \"Compare central-bank forecasts\" --effort ultra --max-cost-dollars 5 --max-duration-seconds 600 --data-source macrobond --dry-run --print-request --json`. Verify `effort`, both budget fields, and the provider before submitting; Ultra needs no beta header. `--max-cost-dollars` maps `budget.maxCostDollars` (1..100), valid with omitted, `auto`, or `ultra` effort. Typed commands require an explicit Ultra cap; raw is pass-through outside this CLI cost policy. `--max-duration-seconds` is Ultra-only, 300..10800 seconds, a soft upstream limit that stops starting work near the limit; it differs from local `--timeout`.",
+            "Legacy `--effort max` fails locally with an Ultra migration preview that preserves the final merged body. Replay its `suggestedCommand` offline and inspect that body; reapply original profile/base URL/header context when `recoveryContextRequired` is set.",
+            "After submission, follow `nextActions` to inspect the run until terminal status. A success carrying `budget_reached` or `time_limit_reached` ended at a limit; inspect gathered results and report that limit rather than treating it as unrestricted completion.",
             "Finish an ultra-effort run early with its gathered results by running `agent runs stop ID --yes`; no beta token is required. Unlike cancellation, stop returns partial work and charges accrued usage.",
         ],
     ),
@@ -9290,15 +9291,23 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
     (
         "Monitors",
         &[
-            "Pass repeated `--include-domain` and `--exclude-domain` flags to monitor create/update, and use `--set search.contents.highlights` for monitor highlight options.",
+            "Pass repeated `--include-domain` and `--exclude-domain` flags to monitor create/update, and use `--set search.contents.highlights=JSON` for monitor highlight options. Documented `monitor` and `websets monitors` are separate families; SDK-only beta `/agent/monitors` has no stable public contract and remains absent from typed commands.",
         ],
     ),
     (
         "Websets",
         &[
-            "Metadata keys on supported Websets mutations are limited to 250 Unicode characters, including nested enrichment metadata. This limit does not apply to Agent or batch metadata.",
+            "Metadata keys are at most 250 Unicode characters on Websets create/update, enrichment create/update, search create, import create, and webhook create/update. Websets create also checks `enrichments[].metadata`; nested `search.metadata` is not defined upstream. Agent and batch metadata have no such limit.",
             "Include a Webset's items with `exa-agent websets get WEBSET --expand items`.",
             "Create an import, then use the upload PUT template in its returned `nextActions`; `websets imports create` accepts neither `--csv` nor `--url`.",
+        ],
+    ),
+    (
+        "Body overrides and validation",
+        &[
+            "Merge order is preset defaults, named flags, `--body`, then repeated `--set` overrides. Preview the final merged request rather than judging an overridden intermediate value; final modeled values and cross-field constraints must be valid. Stored presets themselves reject unknown keys and malformed modeled types.",
+            "Check a standalone complete body with `exa-agent schema validate-input search --body '{\"query\":\"regional policy\",\"objective\":\"Find primary sources\"}' --json`; completion requires the top-level `valid:true`, not merely exit zero or `ok:true`. `valid:false` means rejected; `valid:null` means structural validation is unsupported because that operation has no modeled request fields. For modeled operations, this strict schema check rejects unknown fields. Ordinary typed dispatch permits unknown extension fields while checking modeled inputs, so a successful dry-run alone does not prove every field is documented.",
+            "Supply deprecated `includeText`/`excludeText` through `--body` or `--set`; no new typed flags exist. Their approximate word matching is ignored for similar company/people categories. Crawl-date filters are ignored upstream; prefer publication-date filters or `--snapshot-as-of` for historical contents.",
         ],
     ),
     (

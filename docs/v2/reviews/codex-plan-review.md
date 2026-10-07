@@ -1,5 +1,10 @@
 # Reviewing model: OpenAI Codex
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../../../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 ## Top 3 findings
 
 1. **Must-fix:** `implementation-plan.md` does not schedule the full `commands.md` surface: `team`, most `schema`, most `robot-docs`, `auth`, and `config` have no build phase.

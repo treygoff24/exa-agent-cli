@@ -4,17 +4,26 @@ Raw output preserves HTTP content-decoded body bytes, including gzip decoding;
 it is not a wire-level compressed-byte capture. References to exact upstream
 bytes below mean these decoded body bytes, subject to signed-payment redaction.
 
-Date: 2026-06-29
-Status: canonical. The schema ids, field names, exit codes, and rules here are the source of truth. `architecture.md`, `commands.md`, and the in-tool `robot-docs guide` must match this exactly. If you find a divergence, fix it here first, then propagate.
+Original contract: 2026-06-29, with later runtime additions. Historical keyring
+references describe a design that has not shipped: `auth login` currently writes
+a plaintext 0600 credentials file. Current usage and publication status are in
+the [README](../../README.md).
 
-This is what an agent actually contracts against: how output is shaped, how failures are signalled, when to retry, how streaming/pagination/batch behave. It is deliberately separable from the command list so `robot-docs` can be generated from it.
+Date: 2026-06-29
+Status: maintained contract reference. Schema IDs, field names, exit codes, and
+validation rules describe the local 0.8.0 candidate. Installed `capabilities`,
+`--help`, and `robot-docs guide` expose the running contract.
+
+Output, errors, retry rules, streaming, pagination, and bulk contents behavior
+are specified below. The robot guide is generated from `GUIDE_SECTIONS` in
+`src/lib.rs`, with contract tests checking selected documented invariants.
 
 ---
 
 ## 1. stdout / stderr discipline (non-negotiable)
 
-- **stdout is data only.** Human table/markdown, the JSON envelope, NDJSON event stream, or raw upstream bytes. Nothing else.
-- **stderr is diagnostics only.** Progress, warnings, deprecations, retry notices, doctor explanations, suggested commands.
+- Stdout carries data: human table/Markdown, the JSON envelope, NDJSON event stream, or raw upstream bytes. Nothing else.
+- Stderr carries diagnostics: progress, warnings, deprecations, retry notices, doctor explanations, suggested commands.
 - `exa-agent <cmd> --json | jq` must work with **no** `grep -v` of log lines.
 - No ANSI on stdout ever in non-TTY. Color/spinners go to stderr and auto-disable on non-TTY, `NO_COLOR`, `CI`, `TERM=dumb`, `--no-color`, or any non-human `--format`.
 - Never prompt on stdin unless the command is explicitly interactive. Non-TTY confirmations require `--yes` / `--confirm`.
@@ -49,7 +58,7 @@ All envelopes carry a `schema` string. Versions bump only on breaking change; ea
 | `exa.cli.doctor.v1` | `doctor --json` report (§15). |
 | `exa.cli.pending_run.v1` | Ambiguous-create recovery record (§7). |
 
-## 4. Success envelope — `exa.cli.response.v1`
+## 4. Success envelope: `exa.cli.response.v1`
 
 Written to **stdout**. Field order is stable (serialized in this order).
 
@@ -99,29 +108,43 @@ Written to **stdout**. Field order is stable (serialized in this order).
 `upstreamRequestId`, `correlationId`, `dataPath`, `bytes`, `payment`, and `pagination` are shown above only
 where populated for this example (`payment` on successful signed raw payment responses; `pagination` on a list/paginated command). On an actual call,
 any of these that would otherwise be `null` are **omitted from the envelope entirely** rather
-than serialized as `null` — an agent should check for key presence, not compare against `null`.
+than serialized as `null`: an agent should check for key presence, not compare against `null`.
 `warnings[]`/`nextActions[]` are the exception: they always serialize, even when empty.
 
 Rules:
-- `data` holds the upstream payload **unwrapped from the envelope** — e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`; all non-payment raw bytes remain exact, while signed payment raw output is exact except exact submitted payment credential echoes are replaced with `<redacted>`.
-- Live `/contents`, `fetch`, `/answer`, and `ask` result envelopes add required `outcome`. For contents, a row counts only when `text`, `summary`, `context`, or at least one highlight contains non-whitespace, non-binary text. Gzip/PDF signatures, replacement-heavy strings, and strings with at least 30% non-whitespace control characters are binary, not content. `full` means one usable row per requested item with no failure evidence; missing statuses do not downgrade complete usable coverage. `partial` means some usable content plus a failed, missing, empty, or binary item. `no_content` means zero usable rows, including all-URL crawl failures; `all_urls_failed` still exits 10 while `url_failed` and empty/binary rows keep their existing exit behavior. For answer, `full` means a non-empty answer, `partial` means an empty answer with citations, and `no_content` means both answer and citations are empty; answer/ask remain exit 0. `--dry-run`/`--print-request` envelopes are request previews and never carry `outcome`.
-- Those live result envelopes also add `contentDiagnostics[]` immediately after `outcome`. Contents entries are keyed by requested URL/document `id` and may carry `crawl_status` (exact `statuses[].status`), `error_tag` (exact `statuses[].error.tag`), `http_status` (exact `statuses[].error.httpStatusCode`), `content_type`, and `content_type_source`. `content_status` is one of `usable`, `crawl_error`, `empty_content`, `binary_content`, or `pdf_unextracted`; `usable` is the corresponding boolean, and an unextracted PDF also carries `pdf_unextracted: true`. The embedded Exa schema defines no content-type or crawl-status field on result rows: MIME is omitted unless the URL/body conclusively identifies PDF/gzip, in which case `content_type_source` says `inferred_url` or `inferred_body`. Answer/ask currently emit an empty array because `AnswerResponse` exposes no per-citation crawl, HTTP, or MIME diagnostics; the CLI does not fabricate them.
-- Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs or `--ids`; agents must never infer a named URL flag.
-- `count` is the number of primary items in this response (results, items, citations — whichever the command's `data` is a list of), or `null` for single-object responses. It is **always populated even when `data` is spilled** (`dataTruncated: true`, §9) so an agent can size a spilled result without reading the file.
-- `dataHash` is a sha256 over the serialized `data` (or `null` when spilled-without-hashing). For the offline/registry-derived surfaces it is deterministic; for live-index results it is a change-fingerprint for cheap dedup/drift detection, **not** a determinism guarantee (§12).
-- `nextActions[]` carries paste-ready follow-ups (`{ "description": "...", "command": "exa-agent agent runs events <id> --stream" }`) — populated on async-create and cursor-paginated commands (e.g. after `agent run`, the obvious `runs get`/`runs events`). Empty `[]` when there is no obvious next step. This is the success-path analogue of the error envelope's `suggestedCommand`.
-- `costDollars` always present; `{ "total": 0.0 }` when upstream reports none.
-- `warnings[]` carries non-fatal notices (deprecated flag used, livecrawl fallback, empty-result broaden hint, etc.) — never on stdout as prose, always here.
-- **`legacy_value_coerced`** (added 0.5.0): a typed flag accepted a legacy enum spelling and sent the canonical one upstream; details name `field`, `given`, `sent`. Mappings: category `research paper`→`publication` (search + similar), agent data-source provider `fiber_ai`→`fiber`, `particle_news`→`particle`. Coercion applies to typed flags only — `--body`/`--set` values are the explicit escape hatch and pass through unrewritten, unwarned.
-- **`stream_ignored`**: the final Search request has `stream:true` but no non-null `outputSchema`, so upstream falls back to its normal JSON response. This is non-fatal and appears on both request previews and live envelopes; add `--output-schema` to receive SSE.
-- For a `/contents` status whose upstream `error` object is empty or has no non-empty `tag`, `message`, or `reason`, warnings use the stable label `upstream_reason_unavailable` and include a suggested direct-fetch command. The CLI never invents an upstream reason.
-- A non-`full` contents/answer result always carries a non-empty warning naming the empty crawl, binary body, crawl error, or unextracted PDF and a paste-ready fallback in `suggestedCommand`/`nextActions[]`. Government URLs, including unextracted PDFs, use `firecrawl scrape URL --max-age 0` (stdout). Other `CRAWL_UNKNOWN_ERROR` and unextracted-PDF rows retain the Parallel fallback; other empty rows suggest a fresh full-text Exa retry. The API returns extracted text strings, not trustworthy raw response bytes, so this version reports `pdf_unextracted` rather than passing a lossy JSON string to `pdftotext` or introducing an out-of-band downloader.
-- `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
-- `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `dataTruncated: false`, with `dataPath`/`bytes` omitted.
-- `payment` is a top-level field only on successful signed raw payment responses (`--x402-payment-stdin` or `--mpp-payment-stdin`) in JSON-envelope mode. It is inserted after `dataTruncated` and is never nested under `data`, so agents can parse receipt metadata without depending on upstream body shape. Its exact shape is `{ "kind": "receipt", "headers": [{ "name": <allowlisted-receipt-header-name-as-received>, "present": true, "bytes": <value-byte-length>, "value": <header-value> }] }`; only receipt headers whose names case-insensitively match `payment-response`, `payment-receipt`, `x-payment-response`, or `x-payment-receipt` appear, with `name` casing preserved as received. If no safe receipt header is present, `headers` is `[]`. Successful signed payment responses redact exact submitted payment credential echoes before any output. Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `<redacted>`.
-- `pagination` present only on list/paginated commands; omitted otherwise (commands.md specifies per-command). `pagination.total` is the upstream total when the cursor API supplies it, else `null` (pure cursor pagination legitimately can't know it — `count` always can).
 
-## 5. Error envelope — `exa.cli.error.v1`
+`data` holds the upstream payload **unwrapped from the envelope**: e.g. `data.results` for search, `data.answer` + `data.citations` for answer. `--raw` is the only way to get upstream bytes ungrouped under `data`; all non-payment raw bytes remain exact, while signed payment raw output is exact except exact submitted payment credential echoes are replaced with `<redacted>`.
+
+Live `/contents`, `fetch`, `/answer`, and `ask` result envelopes add required `outcome`. For contents, a row counts only when `text`, `summary`, `context`, or at least one highlight contains non-whitespace, non-binary text. Gzip/PDF signatures, replacement-heavy strings, and strings with at least 30% non-whitespace control characters are binary, not content. `full` means one usable row per requested item with no failure evidence; missing statuses do not downgrade complete usable coverage. `partial` means some usable content plus a failed, missing, empty, or binary item. `no_content` means zero usable rows, including all-URL crawl failures; `all_urls_failed` still exits 10 while `url_failed` and empty/binary rows keep their existing exit behavior. For answer, `full` means a non-empty answer, `partial` means an empty answer with citations, and `no_content` means both answer and citations are empty; answer/ask remain exit 0. `--dry-run`/`--print-request` envelopes are request previews and never carry `outcome`.
+
+Those live result envelopes also add `contentDiagnostics[]` immediately after `outcome`. Contents entries are keyed by requested URL/document `id` and may carry `crawl_status` (exact `statuses[].status`), `error_tag` (exact `statuses[].error.tag`), `http_status` (exact `statuses[].error.httpStatusCode`), `content_type`, and `content_type_source`. `content_status` is one of `usable`, `crawl_error`, `empty_content`, `binary_content`, or `pdf_unextracted`; `usable` is the corresponding boolean, and an unextracted PDF also carries `pdf_unextracted: true`. The embedded Exa schema defines no content-type or crawl-status field on result rows: MIME is omitted unless the URL/body conclusively identifies PDF/gzip, in which case `content_type_source` says `inferred_url` or `inferred_body`. Answer/ask currently emit an empty array because `AnswerResponse` exposes no per-citation crawl, HTTP, or MIME diagnostics; the CLI does not fabricate them.
+
+Command-field metadata retains the legacy `flag` key for one compatibility release. For positional inputs it is **not** a CLI spelling: `inputKind` and `name` are authoritative, and `legacyFlagIsCliFlag: false` makes that explicit. In particular, `contents URL...` accepts one or more positional URLs or `--ids`; agents must never infer a named URL flag.
+
+`count` is the number of primary items in this response (results, items, citations: whichever the command's `data` is a list of), or `null` for single-object responses. It is **always populated even when `data` is spilled** (`dataTruncated: true`, §9) so an agent can size a spilled result without reading the file.
+
+- `dataHash` is a sha256 over the serialized `data` (or `null` when spilled-without-hashing). For the offline/registry-derived surfaces it is deterministic; for live-index results it is a change-fingerprint for cheap dedup/drift detection, **not** a determinism guarantee (§12).
+
+`nextActions[]` carries paste-ready follow-ups (`{ "description": "...", "command": "exa-agent agent runs events <id> --stream" }`): populated on async-create and cursor-paginated commands (e.g. after `agent run`, the obvious `runs get`/`runs events`). Empty `[]` when there is no obvious next step. This is the success-path analogue of the error envelope's `suggestedCommand`.
+
+- `costDollars` always present; `{ "total": 0.0 }` when upstream reports none.
+- `warnings[]` carries non-fatal notices (deprecated flag used, livecrawl fallback, empty-result broaden hint, etc.): never on stdout as prose, always here.
+
+**`legacy_value_coerced`** (added 0.5.0): a typed flag accepted a legacy enum spelling and sent the canonical one upstream; details name `field`, `given`, `sent`. Mappings: category `research paper`→`publication` (search + similar), agent data-source provider `fiber_ai`→`fiber`, `particle_news`→`particle`. Coercion applies to typed flags only: `--body`/`--set` values are the explicit escape hatch and pass through unrewritten, unwarned.
+
+- `stream_ignored`: the final Search request has `stream:true` but no non-null `outputSchema`, so upstream falls back to its normal JSON response. This is non-fatal and appears on both request previews and live envelopes; add `--output-schema` to receive SSE.
+- For a `/contents` status whose upstream `error` object is empty or has no non-empty `tag`, `message`, or `reason`, warnings use the stable label `upstream_reason_unavailable` and include a suggested direct-fetch command. The CLI never invents an upstream reason.
+
+A non-`full` contents/answer result always carries a non-empty warning naming the empty crawl, binary body, crawl error, or unextracted PDF and a paste-ready fallback in `suggestedCommand`/`nextActions[]`. Government URLs, including unextracted PDFs, use `firecrawl scrape URL --max-age 0` (stdout). Other `CRAWL_UNKNOWN_ERROR` and unextracted-PDF rows retain the Parallel fallback; other empty rows suggest a fresh full-text Exa retry. The API returns extracted text strings, not trustworthy raw response bytes, so this version reports `pdf_unextracted` rather than passing a lossy JSON string to `pdftotext` or introducing an out-of-band downloader.
+
+`request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
+- `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `dataTruncated: false`, with `dataPath`/`bytes` omitted.
+
+`payment` is a top-level field only on successful signed raw payment responses (`--x402-payment-stdin` or `--mpp-payment-stdin`) in JSON-envelope mode. It is inserted after `dataTruncated` and is never nested under `data`, so agents can parse receipt metadata without depending on upstream body shape. Its exact shape is `{ "kind": "receipt", "headers": [{ "name": <allowlisted-receipt-header-name-as-received>, "present": true, "bytes": <value-byte-length>, "value": <header-value> }] }`; only receipt headers whose names case-insensitively match `payment-response`, `payment-receipt`, `x-payment-response`, or `x-payment-receipt` appear, with `name` casing preserved as received. If no safe receipt header is present, `headers` is `[]`. Successful signed payment responses redact exact submitted payment credential echoes before any output. Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `<redacted>`.
+
+- `pagination` present only on list/paginated commands; omitted otherwise (commands.md specifies per-command). `pagination.total` is the upstream total when the cursor API supplies it, else `null` (pure cursor pagination legitimately can't know it: `count` always can).
+
+## 5. Error envelope: `exa.cli.error.v1`
 
 Written to **stderr**. stdout stays empty (so a failed `| jq` sees nothing, not a half-object).
 
@@ -144,15 +167,15 @@ Written to **stderr**. stdout stays empty (so a failed `| jq` sees nothing, not 
 }
 ```
 
-Every error MUST carry: `code` (stable machine string from the §5.1 dictionary), `category` (maps to an exit code, §6), `message` (one line, names what failed and where), `retryable` (the primary retry signal — see §7), and `suggestedCommand` (copy-pasteable, the exact thing the agent should have run). Optional, populated when relevant: `details.didYouMean` (the corrected token / candidate list for a typo'd flag, subcommand, or enum value), `details.checked` (for auth, the credential-ladder rungs that were tried — see §5.1), `details.retryAfterMs` (server-advised wait on a terminal `rate_limit`/transient failure), and `see` (a pointer into `--help`/`robot-docs`/`capabilities`). `httpStatus`/`upstreamRequestId` are populated when the failure came from upstream. **No secrets** in any field, including `suggestedCommand`.
+Every error MUST carry: `code` (stable machine string from the §5.1 dictionary), `category` (maps to an exit code, §6), `message` (one line, names what failed and where), `retryable` (the primary retry signal: see §7). Optional, populated when relevant: `suggestedCommand` (a copy-pasteable correction), `details.didYouMean` (the corrected token / candidate list for a typo'd flag, subcommand, or enum value), `details.checked` (for auth, the credential-ladder rungs that were tried: see §5.1), `details.retryAfterMs` (server-advised wait on a terminal `rate_limit`/transient failure), and `see` (a pointer into `--help`/`robot-docs`/`capabilities`). `httpStatus`/`upstreamRequestId` are populated when the failure came from upstream. **No secrets** in any field, including `suggestedCommand`.
 
 `retryable` is the contract agents branch on. The exit code is the coarse signal; the envelope is the fine one.
 
-**Parser errors are wrapped, never leaked.** `clap` exits **2** by default for any parse/usage error (unknown flag, bad `ValueEnum` value, missing positional, `conflicts_with`/`ArgGroup`/`range` violation) and prints its own plain text. Since §6 reserves exit 2 for `auth`, the binary catches `clap` via `try_parse` and **remaps every parse error to exit 1 (`usage`)**, rendered as `exa.cli.error.v1` on stderr — clap's native exit 2 and raw text are never surfaced (a leaked exit 2 would read to an agent as an auth failure). clap's nearest-candidate suggestion is mirrored into `error.details.didYouMean` rather than printed raw. `--help`/`--version` still print to **stdout** and exit **0** (clap's `DisplayHelp`/`DisplayVersion` are passed through unchanged). Pinned by `golden_parse_error_envelope`.
+**Parser errors are wrapped, never leaked.** `clap` exits **2** by default for any parse/usage error (unknown flag, bad `ValueEnum` value, missing positional, `conflicts_with`/`ArgGroup`/`range` violation) and prints its own plain text. Since §6 reserves exit 2 for `auth`, the binary catches `clap` via `try_parse` and **remaps every parse error to exit 1 (`usage`)**, rendered as `exa.cli.error.v1` on stderr: clap's native exit 2 and raw text are never surfaced (a leaked exit 2 would read to an agent as an auth failure). clap's nearest-candidate suggestion is mirrored into `error.details.didYouMean` rather than printed raw. `--help`/`--version` still print to **stdout** and exit **0** (clap's `DisplayHelp`/`DisplayVersion` are passed through unchanged). Pinned by `golden_parse_error_envelope`.
 
 ### 5.1 Error-code dictionary
 
-`error.code` is the agent's **primary** branch signal (§6), so the vocabulary is published — enumerated here, surfaced in `capabilities --json` as `errorCodes`, and golden-pinned (§14). Each `code` has a fixed `category` (→ exit code) and a default `retryable`; an individual error may carry richer `details`. The set is stable and versioned with the `exa.cli.error.v1` schema; new codes are additive.
+`error.code` is the agent's **primary** branch signal (§6), so the vocabulary is published: enumerated here, surfaced in `capabilities --json` as `errorCodes`, and golden-pinned (§14). Each `code` has a fixed `category` (→ exit code) and a default `retryable`; an individual error may carry richer `details`. The set is stable and versioned with the `exa.cli.error.v1` schema; new codes are additive.
 
 | `code` | `category` (exit) | default `retryable` | meaning |
 |---|---|---:|---|
@@ -166,7 +189,7 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `placeholder_argument` | usage (1) | false | an argument looks like a placeholder (`<id>`, `$VAR`, `YOUR_*`, `…`); names the discovery step. |
 | `broadcast_scope_refused` | usage (1) | false | a broad/destructive scope was refused without an explicit `--all`/opt-in. |
 | `not_authenticated` | auth (2) | false | no credential resolved locally; `details.checked` lists the ladder rungs tried. |
-| `reauth_required` | auth (2) | false | a credential was sent but upstream rejected it (401/403 — revoked/expired/wrong scope). |
+| `reauth_required` | auth (2) | false | a credential was sent but upstream rejected it (401/403: revoked/expired/wrong scope). |
 | `feature_not_enabled` | auth (2) | false | HTTP 403 with `FEATURE_DISABLED`: request feature access from Exa; rotating a valid key does not enable the feature. |
 | `payment_required` | auth (2) | false | a raw payment discovery/pass-through request received a challenge-evidenced 402. This classification wins before any credit-body sniffing; safe challenge metadata may be surfaced and payment secrets are never echoed. |
 | `key_scope_mismatch` | auth (2) | false | an api key was presented where a service key is required, or vice versa (D4). |
@@ -186,14 +209,14 @@ Every error MUST carry: `code` (stable machine string from the §5.1 dictionary)
 | `partial_batch` | partial (10) | false | a batch had mixed success/failure (§11). |
 | `no_input` | no_input (11) | false | required stdin/input was empty or a TTY (§1). |
 | `interrupted` | interrupted (12) | false | SIGINT or a stream broke after partial output (§8). |
-| `insufficient_credits` | billing (13) | false | Bare HTTP 402, or any 4xx carrying `NO_MORE_CREDITS` after challenge checks: the account is out of credits. Valid key, valid request, no balance — never classify as `usage`. A 402 with a safe payment challenge is `payment_required`. |
+| `insufficient_credits` | billing (13) | false | Bare HTTP 402, or any 4xx carrying `NO_MORE_CREDITS` after challenge checks: the account is out of credits. Valid key, valid request, no balance: never classify as `usage`. A 402 with a safe payment challenge is `payment_required`. |
 | `probe_inconclusive` | upstream (5) | true | the credential probe got a response that neither confirms nor denies the key. |
 | `invalid_field_type` | usage (1) | false | a body field was the wrong JSON type for its schema. |
 | `research_retired` | usage (1) | false | the upstream Research API is retired (HTTP 410 upstream, 2026-08); the local `research` stub emits this without a network call. `details.replacement` names `search --type deep-reasoning`; `suggestedCommand` is per-verb: `create` interpolates the supplied query, `get`/`list` point at `exa-agent search --help`, and any supplied id is preserved in `details.researchId`. |
 | `not_implemented` | usage (1) | false | a documented surface is not wired up in this build (`details.subcommands` or `suggestedCommand` names the shipped alternative). |
 | `internal_error` | usage (1) | false | an internal invariant failed; the invocation is not the caller's fault and retrying it unchanged will not help. |
 
-`retryable` here is the **default**; transport may refine it (e.g. an un-keyed create failure is always `retryable: false` regardless of the underlying network class — D7/§7).
+`retryable` here is the **default**; transport may refine it (e.g. an un-keyed create failure is always `retryable: false` regardless of the underlying network class: D7/§7).
 
 ## 6. Exit-code dictionary
 
@@ -201,7 +224,7 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 
 | Exit | category | Meaning | Example |
 |---:|---|---|---|
-| 0 | success | Completed; empty results are success. | `results: []` |
+| 0 | ok | Completed; empty results are success. | `results: []` |
 | 1 | usage | Invalid command/flag/JSON body/schema, or local validation. | `--all` on search; positional URLS plus `--ids`; bad category filter |
 | 2 | auth | Missing/invalid API key or team context (upstream 401/403). | no key; revoked key |
 | 3 | config | Config/profile/env problem. | malformed TOML; unknown profile |
@@ -210,7 +233,7 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 | 6 | rate_limit | HTTP 429 or concurrency limit. | search QPS; agent concurrency |
 | 7 | not_found | Resource does not exist. | run/webset/monitor id unknown |
 | 8 | conflict | Resource/idempotency conflict. | webset `externalId` exists |
-| 9 | safety | Dangerous op refused for missing confirmation. | delete without `--yes`; batch delete without `--confirm` |
+| 9 | safety | Dangerous op refused for missing confirmation. | delete without `--yes`; admin key delete without `--confirm ID` |
 | 10 | partial | Batch had mixed success/failure. | some content chunks failed |
 | 11 | no_input | Required stdin/input was empty. | `--input -` with empty stdin |
 | 12 | interrupted | SIGINT or stream broke after partial output. | Ctrl-C during `--stream` |
@@ -218,18 +241,28 @@ Exit codes are CLI categories, not raw HTTP codes (HTTP detail lives in `error.h
 
 Keep the dictionary, but agents should branch on `error.code` + `error.retryable` first; the exit code is the coarse fallback. The exit dictionary **and** the `error.code` dictionary (§5.1) are both published in `capabilities --json` (`exitCodes` / `errorCodes`).
 
-This is a deliberate small-integer scheme, **not** sysexits — it is the published, golden-pinned source of truth, so an agent reads it from `capabilities` rather than assuming `64`–`78`. The one collision risk it creates — `clap`'s default parse-exit `2` vs `auth` here — is closed by the parse-error remap in §5 (all parse errors → exit 1).
+This is a deliberate small-integer scheme, **not** sysexits: it is the published, golden-pinned source of truth, so an agent reads it from `capabilities` rather than assuming `64`–`78`. The one collision risk it creates: `clap`'s default parse-exit `2` vs `auth` here: is closed by the parse-error remap in §5 (all parse errors → exit 1).
 
-**Empty result is a success with a next step.** Exit 0, `data: []`, `count: 0` — and the command SHOULD emit a `warnings[]` hint turning the dead end into a move, e.g. `{"ok":true,"count":0,"data":[],"warnings":["no matches; broaden the query or raise --num-results"]}`. Never exit 1 and never empty stdout for "ran, found nothing."
+**Empty result is a success with a next step.** Exit 0, `data: []`, `count: 0`: and the command SHOULD emit a `warnings[]` hint turning the dead end into a move, e.g. `{"ok":true,"count":0,"data":[],"warnings":["no matches; broaden the query or raise --num-results"]}`. Never exit 1 and never empty stdout for "ran, found nothing."
 
-## 7. Retry & idempotency (transport-layer rule — D7)
+## 7. Retry and idempotency (D7)
 
 - `--retry N` (default 2) auto-retries **only**: idempotent GETs, network failures (exit-4 class), HTTP 429 (honoring `Retry-After` when present, `--retry-after` default on), and 5xx.
-- **Never** auto-retry a non-idempotent create-POST unless `--idempotency-key KEY` is supplied — i.e. anything that mints a billable async run *or* a resource whose duplicate creation is harmful. The authoritative list is the registry's `idempotency_sensitive` set; a Phase-1 test asserts this prose list equals it exactly. Affected: `batches create`, `agent runs create`, `websets create`, `websets searches create`, `websets enrichments create`, `websets imports create`, `websets monitors create`, `websets webhooks create`, `monitor create`, `admin keys create`. (`research create` was removed in 0.5.0 with the Research API's upstream retirement.)
-- **The key must reach the server, or "keyed" means nothing.** When `--idempotency-key KEY` is supplied for an `idempotency_sensitive` op, transport **injects it upstream as an `Idempotency-Key: KEY` header** at the auth chokepoint (architecture §5) — that header, honored by Exa for server-side dedup, is the *only* thing that makes a keyed auto-retry non-double-billing. The local flag and the upstream header are the same value. ⚠️ Whether Exa honors a client idempotency-key header on create-POSTs is a **carry-over validation** (decisions.md): if it does not, keyed auto-retry is disabled and `--idempotency-key` becomes a no-op the recovery path still uses for the pending-run record.
-- **Batch exception:** `/batches` has no documented deduplication guarantee. Batch creates never auto-retry, even with an explicit key; the header is still forwarded and ambiguous failures retain a pending-run record. Reading batches and explicit cancellation/deletion keep their ordinary retry policy.
-- Ambiguous create failure (request sent, no confirmed response): exit non-zero, write a **pending-run record** (append-only JSONL under the state dir), and set `suggestedCommand` to the exact recovery (`exa-agent agent runs list --limit 10` for Agent runs, or re-issue with `--idempotency-key` where listing is not the right recovery).
-- The pending-run record is an **agent-facing recovery contract** — agents parse it, so its shape is frozen. Schema `exa.cli.pending_run.v1`, one JSON object per line: `{ "schema": "exa.cli.pending_run.v1", "requestId": "...", "command": "agent runs create", "operationId": "createAgentRun", "apiPath": "/agent/runs", "idempotencyKey": null, "attemptedAt": "<SOURCE_DATE_EPOCH-aware epoch seconds>", "recoveryCommand": "exa-agent agent runs list --limit 10" }`. Golden-pinned (§14).
+
+**Never** auto-retry a non-idempotent create-POST unless `--idempotency-key KEY` is supplied: i.e. anything that mints a billable async run *or* a resource whose duplicate creation is harmful. The authoritative list is the registry's `idempotency_sensitive` set; a Phase-1 test asserts this prose list equals it exactly. Affected: `batches create`, `agent runs create`, `websets create`, `websets searches create`, `websets enrichments create`, `websets imports create`, `websets monitors create`, `websets webhooks create`, `monitor create`, `admin keys create`. (`research create` was removed in 0.5.0 with the Research API's upstream retirement.)
+
+When `--idempotency-key KEY` is supplied, transport forwards the same value in
+an `Idempotency-Key` header. The local retry policy permits keyed creates to
+retry, except Batch below. This flag does not prove upstream deduplication:
+confirm the endpoint's guarantee before relying on it to prevent duplicates.
+The original upstream idempotency question remains in the decision record.
+
+- Batch exception: `/batches` has no documented deduplication guarantee. Batch creates never auto-retry, even with an explicit key; the header is still forwarded and ambiguous failures retain a pending-run record. Reading batches and explicit cancellation/deletion keep their ordinary retry policy.
+
+Ambiguous create failure (request sent, no confirmed response): exit non-zero, write a **pending-run record** (append-only JSONL under the state dir), and set `suggestedCommand` to the exact recovery (`exa-agent agent runs list --limit 10` for Agent runs, or re-issue with `--idempotency-key` where listing is not the right recovery).
+
+The pending-run record is an **agent-facing recovery contract**: agents parse it, so its shape is frozen. Schema `exa.cli.pending_run.v1`, one JSON object per line: `{ "schema": "exa.cli.pending_run.v1", "requestId": "...", "command": "agent runs create", "operationId": "createAgentRun", "apiPath": "/agent/runs", "idempotencyKey": null, "attemptedAt": "<SOURCE_DATE_EPOCH-aware epoch seconds>", "recoveryCommand": "exa-agent agent runs list --limit 10" }`. Golden-pinned (§14).
+
 - `retryable: true` in the error envelope means "a retry of *this exact request* is safe and may succeed." It is `false` for every un-keyed create failure.
 - Raw payment discovery/pass-through is never retried, never redirected, never given an API key or idempotency key, and never writes pending-run recovery records.
 
@@ -255,14 +288,18 @@ For Search SSE, upstream `type:"text-delta"` events map to envelope `type:"delta
 
 Interrupted stream → exit 12 + `exa.cli.error.v1` on stderr including the last observed `eventId` when available. `--last-event-id ID` resumes Agent event replay.
 
-## 9. Output target & large payloads (D10)
+## 9. Output targets and large payloads (D10)
 
-- `-o/--output FILE` writes the complete selected output to `FILE` instead of stdout: JSON writes the full envelope (respecting `--pretty`/`--compact`), human and NDJSON write their full rendered forms, and `--raw` writes exact upstream bytes except signed payment raw output replaces exact submitted payment credential echoes with `<redacted>`. Stdout then carries a small confirmation envelope with `data` elided, `dataTruncated: true`, `dataPath` set to `FILE`, and the original `count`/`dataHash` plus `bytes` (the exact file byte length) preserved. An explicit output path supersedes `--max-output-bytes` auto-spill, so no state-dir copy is created. A write failure is a structured non-zero error and never falls back to auto-spill — but it also never destroys the response: when the upstream call already succeeded, the full envelope is emitted inline on stdout with an `output_write_failed` entry in `warnings[]` naming the path, and the command still exits non-zero.
-- `--output` applies to **every** surface that writes to stdout, not only live structured responses: `--dry-run`/`--print-request` previews and the self-description commands (`capabilities`, `schema *`, `robot-docs *`) write their document to `FILE` and print a `{schema, ok, command, data: null, dataTruncated: true, dataPath, bytes}` confirmation; a stream writes its events (and its terminal line, or exact upstream bytes under non-payment `--raw`) to `FILE` and prints the same confirmation shape on stdout when it finishes.
-- `--output` and `--secret-output` may not resolve to the same file. The combination is rejected with `invalid_flag_combination` before the secret file is reserved and before any request is sent, because the response write happens after the secret is committed and would overwrite the only copy of a one-time secret.
-- `--max-output-bytes N` is a **default-on** ceiling on the inline stdout payload (48 KiB by default) so one accidental `contents --text` over long pages can't blow the agent's context window even without `--output`. When the serialized `data` would exceed it, the CLI spills `data` as pretty-printed JSON to a temp file under the state dir and emits the envelope with `dataTruncated: true`, `dataPath`, `bytes` set and `data` elided — and a `warnings[]` note naming the ways forward (raise `--max-output-bytes`, pass `--output FILE`, or narrow fields). `--max-output-bytes 0` disables the ceiling.
+`-o/--output FILE` writes the complete selected output to `FILE` instead of stdout: JSON writes the full envelope (respecting `--pretty`/`--compact`), human and NDJSON write their full rendered forms, and `--raw` writes exact upstream bytes except signed payment raw output replaces exact submitted payment credential echoes with `<redacted>`. Stdout then carries a small confirmation envelope with `data` elided, `dataTruncated: true`, `dataPath` set to `FILE`, and the original `count`/`dataHash` plus `bytes` (the exact file byte length) preserved. An explicit output path supersedes `--max-output-bytes` auto-spill, so no state-dir copy is created. A write failure is a structured non-zero error and never falls back to auto-spill: but it also never destroys the response: when the upstream call already succeeded, the full envelope is emitted inline on stdout with an `output_write_failed` entry in `warnings[]` naming the path, and the command still exits non-zero.
+
+`--output` applies to **every** surface that writes to stdout, not only live structured responses: `--dry-run`/`--print-request` previews and the self-description commands (`capabilities`, `schema *`, `robot-docs *`) write their document to `FILE` and print a `{schema, ok, command, data: null, dataTruncated: true, dataPath, bytes}` confirmation; a stream writes its events (and its terminal line, or exact upstream bytes under non-payment `--raw`) to `FILE` and prints the same confirmation shape on stdout when it finishes.
+
+`--output` and `--secret-output` may not resolve to the same file. The combination is rejected with `invalid_flag_combination` before the secret file is reserved and before any request is sent, because the response write happens after the secret is committed and would overwrite the only copy of a one-time secret.
+
+`--max-output-bytes N` is a **default-on** ceiling on the inline stdout payload (48 KiB by default) so one accidental `contents --text` over long pages can't blow the agent's context window even without `--output`. When the serialized `data` would exceed it, the CLI spills `data` as pretty-printed JSON to a temp file under the state dir and emits the envelope with `dataTruncated: true`, `dataPath`, `bytes` set and `data` elided: and a `warnings[]` note naming the ways forward (raise `--max-output-bytes`, pass `--output FILE`, or narrow fields). `--max-output-bytes 0` disables the ceiling.
+
 - Auto-spill (threshold-gated): the same spill mechanism, also triggered by the `--max-output-bytes` ceiling above. The standalone *auto*-spill threshold (independent of `--output`) ships conservative; the manual `--max-output-bytes` ceiling is the v1 guarantee.
-- **`count` and `dataHash` survive a spill.** A spilled envelope still carries `count` (item count) and `bytes`, so an agent can size and verify the spilled file without reading it (F1.4).
+- `count` and `dataHash` survive a spill. A spilled envelope still carries `count` (item count) and `bytes`, so an agent can size and verify the spilled file without reading it (F1.4).
 - Conservative content defaults reduce how often any of this fires: `search` defaults to query-aware highlights; bare `search --text` / `similar --text` cap text at 1500 characters per result; bare `contents --text` remains uncapped for deep reads.
 
 ### Receive and chunk bounds
@@ -294,20 +331,32 @@ One uniform model over endpoint-specific cursors.
 - Cursor-list commands expose `--limit`, `--cursor`, `--all`, `--max-pages`, `--page-delay`.
 - The envelope's `pagination` block carries `nextCursor`, `hasMore`, `autoPaginated`, `page`, `pageCount`.
 - `--all --json` → one accumulated envelope. `--all --ndjson` → one envelope per page (lower memory; preferred for agents).
-- `--all --ndjson --output FILE` streams pages into a sibling staging file and renames it over `FILE` (over the file a symlinked `FILE` points at, keeping its permissions) once the run ends, so a failure before the first page leaves an existing `FILE` untouched and creates nothing new. A failure after N ≥ 1 pages still moves those pages into `FILE` and reports `outputPartial: true`, `outputPages`, `outputBytes`, and `resumeCursor` in `error.details`; if that final rename itself fails, the pages stay in the staging file and `details.stagedOutputPath` names it.
+
+`--all --ndjson --output FILE` streams pages into a sibling staging file and renames it over `FILE` (over the file a symlinked `FILE` points at, keeping its permissions) once the run ends, so a failure before the first page leaves an existing `FILE` untouched and creates nothing new. A failure after N ≥ 1 pages still moves those pages into `FILE` and reports `outputPartial: true`, `outputPages`, `outputBytes`, and `resumeCursor` in `error.details`; if that final rename itself fails, the pages stay in the staging file and `details.stagedOutputPath` names it.
+
 - `--max-pages N` caps `--all`; reaching the cap is success with `hasMore: true` and a `warnings[]` note.
 - Non-cursor endpoints reject `--all` with exit 1 and a `suggestedCommand` (search → `--num-results N (1..100)`; contents → `--chunk-size`).
 
-## 11. Batch contract
+## 11. Chunked contents contract
 
 - `contents --input urls.txt --chunk-size 100 --ndjson` emits one success/error envelope per chunk.
 - A mixed batch exits **10** (partial) after emitting all per-chunk NDJSON, so agents parse partial success.
-- `/contents` returns HTTP 200 with per-URL failures in `statuses[]`; the envelope preserves `data.statuses[]`. Future `--fail-on-url-error` can promote those to exit 10.
+- `/contents` can return HTTP 200 with per-URL failures in `statuses[]`. A single
+  request with mixed outcomes exits 0 with `url_failed` warnings and partial
+  outcome; all-URL failure exits 10. Chunk failures can also produce exit 10.
+  The upstream statuses remain in `data.statuses[]`.
 
 ## 11.1 Current request validation
 
 Validation applies to the final merged typed request before credential resolution
-and transport, including dry-run previews and `--body`/`--set` overrides:
+and transport, including dry-run previews and `--body`/`--set` overrides. Ordinary
+typed requests forward unknown body fields for compatibility. Strict
+`schema validate-input` and stored preset structure reject unknown fields where
+modeled; required
+fields and cross-field constraints are checked on the final merged request.
+`schema validate-input` returns a report: inspect `valid`, because a successful
+report exits 0 even when `valid` is false. `valid: null` means structural
+validation is unsupported for an operation without modeled fields:
 
 - Search `objective` is at most 4,096 Unicode characters. Search/answer
   `userLocation` accepts a country string or an object with `country`, or paired
@@ -318,24 +367,32 @@ and transport, including dry-run previews and `--body`/`--set` overrides:
   `budget.maxDurationSeconds` is an integer in 300..10800 and Ultra only.
   It is a soft wall-clock limit: upstream stops starting work as it approaches,
   independently of the local request timeout.
-  Legacy `max` fails locally with an Ultra migration command. Ultra and stop
+  Legacy `max` fails locally with an Ultra migration command that preserves
+  the final body. Restore explicit profile, base URL, beta, and custom headers
+  manually before replaying its preview. Ultra and stop
   do not require or inject the retired Agent beta token.
 - Supported content text/highlights/legacy context `maxCharacters` values are
-  1..1000000. Websets mutation metadata key names are at most 250 characters;
-  Agent and Batch metadata do not inherit this limit.
+  1..1000000. Metadata key names are at most 250 Unicode characters on Webset
+  create/update, search create, enrichment create/update, import create, and
+  webhook create/update. Webset creation also checks nested enrichment metadata.
+  Agent/Batch metadata is outside this Websets rule. Nested `search.metadata`
+  is not defined by the upstream Webset creation schema.
 - Deprecated `crawledBeforeDate` is a historical-content alias with the same
   conflict checks as `snapshotAsOf`; prefer `--snapshot-as-of`. Deprecated
   `includeText`/`excludeText` retain approximate matching and are ignored by
   findSimilar company/people categories. Crawl-date filters are ignored upstream.
 
-## 12. Redaction & determinism
+## 12. Redaction and determinism
 
-- Known secrets are never emitted, by prevention at the source rather than a value-shape scrub of output: managed auth headers are injected only at send time and refused if user-supplied (below); secret-*named* headers and query params are redacted in request previews; and the one-time secrets returned by create ops (`apiKey`, `webhookSecret`, `secret`) are redacted from the default response envelope after `--secret-output` capture. `request.redacted` is `true` on these governed paths and `false` on the ungoverned `raw` escape hatch. Non-payment `raw` emits the upstream response as-is; signed payment `raw` emits it as-is except exact submitted payment credential echoes are replaced with `<redacted>`.
-- `--header 'Name: value'` may *add* request headers but MUST NOT override managed `Authorization` / auth headers, payment namespaces, or any known secret header. An attempt is refused with exit 1, so credentials/payment material can't be shadowed, leaked via an injected header, or prompt-injected.
-- Determinism applies to the **CLI's own output** — stable field/key ordering (the envelope's own fields serialize in fixed declaration order; the upstream `data` payload preserves insertion order — "stable" means *deterministic given identical input*, not alphabetized), no wall-clock timestamps in free text (timestamps live in JSON fields), `SOURCE_DATE_EPOCH` honored for any CLI-generated time. It does **not** apply to upstream search results (Exa is a live index; identical queries may return different results — that is expected and not a determinism violation).
-- **Documented volatile fields** (the only fields exempt from byte-identical determinism, normalized/scrubbed before golden snapshots and excluded from any two-invocation determinism assertion): `request.requestId`, `request.upstreamRequestId`, `request.correlationId`, `diagnostics.durationMs`, `diagnostics.retries`, `event.timestamp`, and the pending-run `attemptedAt` (§7). `embeddedSpecSha256` and `dataHash` are **not** volatile — a change in either is a real signal. With `SOURCE_DATE_EPOCH` set and these fields held aside, two consecutive structured invocations of the same command on the same input are byte-identical.
+Known secrets are never emitted, by prevention at the source rather than a value-shape scrub of output: managed auth headers are injected only at send time and refused if user-supplied (below); secret-*named* headers and query params are redacted in request previews; and the one-time secrets returned by create ops (`apiKey`, `webhookSecret`, `secret`) are redacted from the default response envelope after `--secret-output` capture. `request.redacted` is `true` on these governed paths and `false` on the ungoverned `raw` escape hatch. Non-payment `raw` emits the upstream response as-is; signed payment `raw` emits it as-is except exact submitted payment credential echoes are replaced with `<redacted>`.
 
-## 13. `capabilities --json` — `exa.cli.capabilities.v1`
+`--header 'Name: value'` may *add* request headers but MUST NOT override managed `Authorization` / auth headers, payment namespaces, or any known secret header. An attempt is refused with exit 1, so credentials/payment material can't be shadowed, leaked via an injected header, or prompt-injected.
+
+Determinism applies to the **CLI's own output**: stable field/key ordering (the envelope's own fields serialize in fixed declaration order; the upstream `data` payload preserves insertion order: "stable" means *deterministic given identical input*, not alphabetized), no wall-clock timestamps in free text (timestamps live in JSON fields), `SOURCE_DATE_EPOCH` honored for any CLI-generated time. It does **not** apply to upstream search results (Exa is a live index; identical queries may return different results: that is expected and not a determinism violation).
+
+**Documented volatile fields** (the only fields exempt from byte-identical determinism, normalized/scrubbed before golden snapshots and excluded from any two-invocation determinism assertion): `request.requestId`, `request.upstreamRequestId`, `request.correlationId`, `diagnostics.durationMs`, `diagnostics.retries`, `event.timestamp`, and the pending-run `attemptedAt` (§7). `embeddedSpecSha256` and `dataHash` are **not** volatile: a change in either is a real signal. With `SOURCE_DATE_EPOCH` set and these fields held aside, two consecutive structured invocations of the same command on the same input are byte-identical.
+
+## 13. `capabilities --json`: `exa.cli.capabilities.v1`
 
 Offline, no network. Describes the CLI contract, not account state. `describe` is a documented alias of `capabilities` (the verb an agent is likely to guess first). The abbreviated example below shows the runtime shape; the real command fully populates every command and dictionary entry.
 
@@ -345,9 +402,9 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   "ok": true,
   "binary": "exa-agent",
   "build": {
-    "version": "0.5.0",
+    "version": "0.8.0",
     "gitSha": "abc1234",
-    "buildDate": "2026-08-11",
+    "buildDate": "2026-10-07",
     "target": "aarch64-apple-darwin"
   },
   "spec": {
@@ -428,9 +485,10 @@ self-description commands.
 ## 14. Golden-pinned surfaces
 
 These outputs are frozen with insta snapshots (see implementation plan); any drift fails CI:
+
 `capabilities --json` (incl. the populated `exitCodes`/`errorCodes`/`doctor` maps), the **error-code dictionary** (§5.1), `schema list --json`, `robot-docs guide`, one success envelope (with `count`/`nextActions`/`dataHash`), one error envelope, a **parse-error envelope** (the clap-remap path, §5), a **`not_authenticated` envelope** (with `details.checked`, §5.1), one paginated list (`--all --ndjson`), one streaming NDJSON path (with `type`/`timestamp`), one `--raw` passthrough, the exit-code table, a **`doctor --json` report** (§15), key-line assertions for each command's `--help`, and the pending-run record (`exa.cli.pending_run.v1`).
 
-## 15. `doctor --json` — `exa.cli.doctor.v1`
+## 15. `doctor --json`: `exa.cli.doctor.v1`
 
 `doctor` is a diagnostic, so it uses a **linter-style exit dictionary**, not the §6 categories: **0 = healthy, 1 = findings present, 4 = refused-unsafe** (a detector that could not safely complete). The per-finding `category` keeps the granularity an agent wants; the exit code stays in doctor's own small vocabulary so a `doctor` exit can never be confused with a real `auth`(2)/`config`(3) failure from another command. The detector list and this exit dictionary are published in `capabilities.doctor` (§13).
 
@@ -448,7 +506,7 @@ These outputs are frozen with insta snapshots (see implementation plan); any dri
 
 `status` is `healthy` (exit 0) when no finding is `fail`, else `findings` (exit 1). Each finding mirrors the error envelope's `suggestedCommand` so the fix is one paste-ready line (every `fail`/`warn` finding MUST name one). Read-only and offline by default; `--online` adds the networked detectors (D8). The presence of `EXA_AGENT_NO_NETWORK` (any value, including empty) refuses every live typed, raw, stream, `auth test`, `auth status`, `schema refresh --check`, and `doctor --online` path with `usage_error` on stderr and exit 1 before credential resolution, transport construction, or sending; unset it to allow live paths. Dry-run request previews and offline description/help/schema/capabilities/robot-docs remain available.
 
-Post-v1 repair is additive to this schema: `doctor --fix` may add `actions[]` (`id`, `status`,
+Explicit repair adds fields to this schema: `doctor --fix` may add `actions[]` (`id`, `status`,
 `path`, optional `reason`/`requiredFlag`) and `backupPath`. `--fix --dry-run` emits `planned` actions
 without mutation. Formatting and config permission repairs need no extra flag; credential permission
 repairs require `--allow-auth`, and deleting spill files older than seven days requires

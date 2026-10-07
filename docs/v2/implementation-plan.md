@@ -1,5 +1,10 @@
 # v2 Implementation Plan
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 Date: 2026-06-29
 Status: build/test/release plan for the `exa-agent` CLI. Implements [`decisions.md`](decisions.md) (D1–D22) and [`contracts.md`](contracts.md). Where this plan and a decision disagree, the decision wins. This doc owns phasing, testing, CI, and release; it references command internals and module layout only at a high level (see `architecture.md` / `commands.md`). **Reviewed** by the `plan-reviewer` subagent and Codex (work-mode); their reviews are in [`reviews/`](reviews/) and their findings are folded in below.
 

@@ -1,16 +1,49 @@
 # exa-agent
 
-An agent-first command-line interface over the documented [Exa](https://exa.ai) API.
+Search the web, retrieve pages, and run Exa workflows from scripts and AI agents.
 
 Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
-`exa-agent` exposes every documented Exa capability — search, contents, answer, code context, agent runs, monitors, the Websets tree, and team/key administration — as a single self-contained Rust binary (the Linux musl artifacts are fully static). It is built for AI agents as the primary user: every command is non-interactive, has a stable exit code, and can describe itself offline. Structured (non-`raw`) commands print one JSON envelope on success (`--ndjson`: one per line); `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming/human-format output differ by design. A human can drive it too, but the defaults are tuned for a program calling it, not a person typing at a prompt.
+`exa-agent` is one self-contained Rust binary with offline command discovery, stable
+exit codes, and JSON output. It covers search, contents, answers, agent runs,
+monitors, Websets, and team/key administration. The binary is `exa-agent`; the
+crate is `exa-agent-cli`.
 
-The binary is `exa-agent`. The crate is `exa-agent-cli`. It is pre-1.0 and built from a committed copy of the Exa Public API spec (2.0.0) plus the Team Management spec (1.0.0).
+```sh
+brew install treygoff24/tap/exa-agent
+```
+
+The source and locally verified candidate are **0.8.0**. GitHub releases and
+crates.io publication are pending; package-manager and latest-release installers
+below retrieve published artifacts, which may have an earlier version. Check
+`exa-agent --version` before using the new flags.
+
+## Quick example
+
+Set `EXA_API_KEY` through your environment or secret manager, then preview a
+request before sending it:
+
+```sh
+exa-agent search "fusion energy" --objective "Find US demonstration projects" --user-location US --num-results 5 --dry-run --print-request
+exa-agent search "fusion energy" --num-results 5 --json
+exa-agent contents 'https://exa.ai' --text 1500 --json
+exa-agent answer "Recent fusion energy milestones" --json
+exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
+exa-agent capabilities search --json
+```
+
+Search defaults to query-aware highlights capped at 800 characters per result.
+Use `--text N` for page text or `--no-highlights` for metadata only. API calls can
+incur usage charges; dry-run and self-description commands use no key or network.
+
+| Need | CLI behavior |
+| --- | --- |
+| Discover commands without loading every schema | `capabilities search --json` describes one command offline |
+| Keep large results out of an agent's context | `--output FILE` saves the full result; oversized inline data spills automatically |
+| Inspect a mutation before spending | `--dry-run --print-request` prints the resolved request |
+| Branch on a failed call | Stable exit codes and `error.code` identify the cause |
 
 ## Install
-
-Pick whichever fits your setup:
 
 ```sh
 # Homebrew (macOS/Linux)
@@ -27,7 +60,7 @@ All three install the `exa-agent` binary. Verify with `exa-agent --version`.
 
 ### Platforms and release artifacts
 
-The 0.7.0 release targets six prebuilt archives. Windows is a deliberate non-goal.
+The release configuration targets six prebuilt archives. Windows is a deliberate non-goal.
 
 | Platform | Target triple | Linkage |
 | --- | --- | --- |
@@ -38,10 +71,9 @@ The 0.7.0 release targets six prebuilt archives. Windows is a deliberate non-goa
 | Linux x86_64, glibc | `x86_64-unknown-linux-gnu` | dynamic |
 | Linux x86_64, static | `x86_64-unknown-linux-musl` | static |
 
-The shell installer chooses for you. On Linux it prefers the glibc archive and falls back to the
+The shell installer chooses the archive. On Linux it prefers the glibc archive and falls back to the
 musl archive when the host's glibc is older than the release's recorded minimum or missing entirely, so Alpine, distroless,
-and scratch images get a binary that actually runs. Nothing changes for an existing glibc user:
-the same `-gnu` archive is still what they receive.
+and scratch images get a binary that actually runs. Ordinary glibc hosts receive the `-gnu` archive.
 
 The musl archives are fully static. CI fails the build unless the binary carries no `PT_INTERP`
 segment and no `NEEDED` shared-library entries, and unless it runs on an Alpine image with no
@@ -52,20 +84,16 @@ environment narrows the CPU baseline.
 If you pin an exact archive instead of using the installer, take `-musl` inside containers and
 `-gnu` on an ordinary distribution.
 
-Credentials work identically on every artifact, and none of them uses an OS keyring — see
-[Authentication](#authentication).
+Every artifact uses the same credential storage, described under
+[Authentication](#authentication). Credentials are not stored in an OS keyring.
 
 
 ## Build and run
-
-Build from source:
 
 ```sh
 cargo build --release
 ./target/release/exa-agent search "rust async runtimes" --num-results 5
 ```
-
-During development you can run it through cargo:
 
 ```sh
 cargo run --bin exa-agent -- search "rust async runtimes" --num-results 5
@@ -81,32 +109,16 @@ cargo +1.85 clippy --all-features --all-targets
 After installing Rust 1.85, CI confirms the stricter
 `cargo clippy --locked --all-features --all-targets -- -D warnings` variant.
 
-### Local build knobs
+### Development builds
 
-The dev profile keeps line tables only (`debug = "line-tables-only"`) and drops debug info for
-dependencies. Backtraces through this crate's own frames still carry file and line; dependency
-frames keep symbol names but lose line numbers. For a full debugging session, delete the
-`[profile.dev]` and `[profile.dev.package."*"]` blocks in `Cargo.toml` rather than working around
-them. Release and `dist` builds are unaffected. In the coordinator's Linux
-comparison, the debug binary shrank from 82,861,952 to 33,311,480 bytes. Single cold
-builds took 11.63s and 11.80s respectively: this supports a size reduction, not a
-build-speed claim. Project line tables were checked with `readelf`.
-
-Other things that help, roughly in order of payoff:
-
-- `cargo check` while editing; `cargo build` only when you need to run it.
-- A single test filter (`cargo test <name>`) instead of the whole suite.
-- A faster linker such as `mold` or `lld`, configured in your own `~/.cargo/config.toml`. The
-  repository's `.cargo/config.toml` is deliberately limited to the `xtask` alias so that CI and
-  new contributors get the stock toolchain with no surprises.
-
-Do not add `-C target-cpu=native` to anything you intend to ship or hand to someone else. Release
-artifacts have to run on any CPU of their architecture, and CI rejects a narrowed baseline.
-
+The dev profile keeps line tables for this crate and omits dependency debug info.
+For full debugging, override those profile settings locally. Use `cargo check`
+while editing and targeted tests for changed behavior. Release builds keep the
+architecture baseline: do not add `-C target-cpu=native` to shipped artifacts.
 
 ## Usage
 
-A few real commands (all verified to parse):
+Examples below send requests unless they include `--dry-run --print-request`:
 
 ```sh
 # Search
@@ -130,12 +142,12 @@ exa-agent search "fusion energy" --objective "Find recent US demonstration proje
 exa-agent search "fusion energy" --highlights '{"dynamic":true,"verbosity":"medium"}' --beta dynamic-highlights-2026-08-28
 
 # Page contents
-exa-agent contents https://exa.ai https://docs.exa.ai --text
+exa-agent contents 'https://exa.ai' 'https://exa.ai/docs' --text
 # Contents accepts positional URLS or `--ids`. Text accepts bare, full, or N (1..1000000).
 # --snapshot-as-of accepts an RFC 3339 date or date-time and cannot be combined with freshness,
 # live-crawl, or subpage options.
 
-# Code/docs context for a coding agent
+# Legacy code/docs context (undocumented upstream; may change or disappear)
 exa-agent context "how to stream SSE in Rust with ureq"
 
 # Create a Webset (async structured list-building)
@@ -150,7 +162,7 @@ exa-agent monitor create --query "AI policy news" --webhook-url https://example.
 exa-agent raw POST /search --body '{"query":"test"}'
 ```
 
-Before running any mutation for real, preview the exact upstream request it will send — without sending it — by appending `--dry-run --print-request`:
+Before sending a mutation, inspect its resolved request by appending `--dry-run --print-request`:
 
 ```sh
 exa-agent websets create --query "AI startups in SF" --count 25 --dry-run --print-request
@@ -161,14 +173,17 @@ Credentials and HTTP-stack defaults such as `Content-Type`, `Host`, and `User-Ag
 are omitted. Only non-secret values belong in `--header`; custom headers are not
 copied into automatic follow-up commands.
 
-`--dry-run --print-request` still performs the same local body validation as a live call. If the body is invalid (unknown field, out-of-range value, missing required field, or malformed `--body`/`--set`), the command exits `1` without printing a request; when the body is valid it prints the exact request body and exits `0` without sending it.
+`--dry-run --print-request` still performs the same local body validation as a live call. If a modeled field is invalid (wrong type, out-of-range value, missing required field, or malformed `--body`/`--set`), the command exits `1` without printing a request; when the body is valid it prints the exact request body and exits `0` without sending it. Ordinary typed calls forward unknown body fields for upstream compatibility; `schema validate-input` and stored presets reject unknown fields where the
+request structure is modeled. `schema validate-input` reports validation
+in `valid`; a successful report can exit `0` with `valid: false`. `valid: null`
+means structural validation is unsupported for that operation, not that input passed.
 
 ### Discovering the surface (offline, no key, no network)
 
-The CLI describes itself, which is the point of the agent-first design. These run with no credential and no network call:
+These run with no credential and no network call:
 
 ```sh
-exa-agent capabilities          # machine-readable inventory of all commands + exit/error codes
+exa-agent capabilities --json   # machine-readable inventory of all commands + exit/error codes
 exa-agent robot-docs guide      # a short, paste-ready playbook for agents
 exa-agent schema --help         # embedded API/CLI schema
 exa-agent doctor                # offline health checks (add --online for a live probe)
@@ -193,30 +208,48 @@ commands still work.
 
 ### Command surface
 
-- **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream). The `/context` route is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it is retained for compatibility and may change or disappear.
-- **Agent runs** — `agent runs create|get|list|events|cancel|stop|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/`ultra` effort.
-- **Batches** — `batches create|list|get|cancel|delete` (alias `batch`) runs `/search` and `/agent/runs` requests asynchronously. Typed batch commands add the required beta token. Access depends on your team's Batch API entitlement.
-- **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
-- **Monitors** — `monitor …`, the top-level recurring search monitors.
-- **Websets** — websets, searches, items, enrichments, monitors and their runs, imports, webhooks and their delivery attempts, and events.
-- **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
-- **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
-- **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.
+| Family | Commands and scope |
+| --- | --- |
+| Core retrieval | `search`, `contents`, `answer`, `similar` (deprecated), and `context` (undocumented compatibility) |
+| Agent runs | `agent runs create|get|list|events|cancel|stop|delete`; `agent run` aliases create |
+| Batches | `batches create|list|get|cancel|delete` (alias `batch`); requires the Batch beta token and account access |
+| Search monitors | `monitor` manages recurring searches |
+| Websets | Websets, searches, items, enrichments, imports, monitors, webhooks, delivery attempts, and events |
+| Team and admin | `team info` reports quota/concurrency; `admin keys` uses a separate service key and host |
+| Raw requests | `raw METHOD PATH` calls endpoints outside the typed surface with shared auth/output/error handling |
+| Offline tools | `capabilities`, embedded `schema`, `robot-docs`, default `doctor`, `config`, `preset`, and `macro` |
+
+The retired `research` family is a local stub: it returns `research_retired` and
+suggests `search --type deep-reasoning`. `auth test`, `auth status`, and
+`schema refresh --check` can use the network. The undocumented `/context` route
+may change or disappear; offline examples do not establish live support.
+
+Raw payment discovery and signed stdin-only payment pass-through work only for
+nonstreaming `raw POST /search` or `/contents` on the default host. Wallet custody
+and signing are outside the CLI.
 
 Search accepts `--objective TEXT` (up to 4,096 characters) independently of the
 query. Search and answer accept `--user-location COUNTRY|JSON` and paired `--latitude` /
 `--longitude` coordinates; latitude is -90..90 and longitude is -180..180.
 
-Ultra runs require an explicit `--max-cost-dollars` cap of $1..$100 as CLI safety
+Typed Ultra runs require an explicit `--max-cost-dollars` cap of $1..$100 as CLI safety
 policy for typed commands; `raw` remains the pass-through escape hatch.
 `--max-duration-seconds` optionally sets a soft Ultra wall-clock limit of
 300..10,800 seconds; upstream stops starting work as the limit approaches.
 Exa reports `time_limit_reached` when that limit stops a run. Legacy `--effort max`
 fails locally with an Ultra migration command instead of changing effort silently.
+The migration preview preserves the final body; restore any explicit profile, base URL, beta, and custom
+headers manually before replay.
 
 ```sh
 exa-agent agent run "Map fusion demonstration projects" --effort ultra --max-cost-dollars 5 --max-duration-seconds 600 --data-source macrobond --dry-run --print-request
 ```
+
+Supported Websets mutations limit metadata keys to 250 Unicode characters,
+including nested enrichment metadata on Webset creation. This applies to Webset
+create/update, search create, enrichment create/update, import create, and webhook
+create/update. Agent/Batch metadata is outside this Websets rule. Nested
+`search.metadata` is not defined by the upstream Webset creation schema.
 
 The SDK-only beta `/agent/monitors` family is intentionally absent from the typed
 CLI because it has no public documented spec or contract. Use the documented
@@ -271,7 +304,9 @@ exa-agent macro show ask
 exa-agent macro show fetch
 ```
 
-Preset values are defaults: explicit flags, `--body`, and `--set` win. Preset bodies are validated against the vendored OpenAPI request schema, so only documented body properties are allowed; unknown keys are rejected before the preset is merged with flags, `--body`, or `--set`. `macro show` exposes the canonical expansion for the built-in `ask` and `fetch` macros.
+Preset values are defaults: explicit flags, `--body`, and `--set` win. For modeled request structures, preset bodies allow documented properties and
+reject unknown keys before merging with flags, `--body`, or `--set`. Required
+fields and cross-field constraints are checked on the final merged request. `macro show` exposes the canonical expansion for the built-in `ask` and `fetch` macros.
 
 ### Doctor repair and undo
 
@@ -297,17 +332,33 @@ reverse credential-file permission changes or spill deletions. Network checks st
 
 ## Output contract
 
-The contract is what makes this usable from code. Highlights:
+Structured JSON success uses `exa.cli.response.v1`; errors use
+`exa.cli.error.v1` with `error.code` on stderr. Stdout carries results. Raw,
+streaming, human, and chunked output have their own shapes.
 
-- **One JSON envelope per call.** Success is `exa.cli.response.v1`; errors are `exa.cli.error.v1` carrying a stable `error.code` and a category.
-- **stdout is data, stderr is diagnostics.** Errors and trace output go to stderr; the parseable result goes to stdout.
-- **Output format is automatic:** JSON when stdout is piped, human-readable in a TTY. Override with `--json`, `--ndjson`, `--format`, `--compact`/`--pretty`, or `--raw` to emit decoded upstream body bytes except signed payment responses replace exact submitted payment credential echoes with `<redacted>`.
-- **Contents coverage is explicit.** Live `contents` and `fetch` result envelopes carry `outcome: "full"`, `"partial"`, or `"no_content"`, independent of the exit code.
-- **Exit codes are stable and meaningful** — `0` ok, `1` usage (bad invocation or local body validation failure), `2` auth, `4` network, `5` upstream, `6` rate_limit, `7` not_found, `9` safety (a destructive op refused without confirmation), among others. The full table is in `capabilities`.
-- **`--dry-run --print-request` works on every mutation.** It builds and prints the exact request body without sending it, but invalid bodies still exit `1` before any request is printed.
-- **Destructive operations refuse to run without `--yes`** (deletes and cancels exit `9` otherwise).
-- **No surprise double-billing.** `--idempotency-key` is forwarded upstream, and the CLI never auto-retries a non-idempotent create-POST.
-- **Billing vs payment is explicit.** `insufficient_credits` remains exit `13`; only a challenge-evidenced raw payment 402 is `payment_required` / exit `2`.
+| Setting or result | Behavior |
+| --- | --- |
+| Default format | JSON when piped, human-readable in a TTY; pass `--json` for automation |
+| `--ndjson` | One record per line for list or stream output, with summaries as applicable |
+| `--raw` | Decoded upstream body bytes without an envelope, subject to signed-payment echo redaction |
+| Live contents/fetch/answer/ask | Text-aware `outcome`: `full`, `partial`, or `no_content`, independent of exit category |
+| `--output FILE` | Complete selected output in a file; stdout carries a confirmation with `dataPath` |
+| Oversized inline data | Automatic spill above 48 KiB; `data` becomes `null`, and `dataPath` points to the former `data` object |
+
+Read `.results` from an automatic spill file; read `.data.results` from a complete
+JSON envelope written with `--output`. `--max-output-bytes 0` disables auto-spill.
+
+Exit codes distinguish usage (`1`), auth (`2`), network (`4`), upstream (`5`),
+rate limits (`6`), missing resources (`7`), confirmation required (`9`), and billing
+(`13`), among others. `capabilities --json` publishes the complete dictionary.
+`insufficient_credits` is exit `13`; a challenge-evidenced raw payment 402 is
+`payment_required` / exit `2`.
+
+Most destructive operations require `--yes`; admin key deletion uses
+`--confirm ID`, and live monitor batch deletion requires both `--yes` and
+`--confirm delete`.
+Create-POSTs are never auto-retried without `--idempotency-key`, which is forwarded
+upstream. Batch creates are never auto-retried even with a key.
 
 ## Transport, bulk output, and local state
 
@@ -341,19 +392,11 @@ renderings. Existing file modes and symlinks are preserved. Completed chunks
 survive later failures; an unwritable chunk falls back to stdout. A failed final
 rename identifies the staging path. Multi-chunk `--raw` is not supported.
 
-Relative or empty `XDG_CONFIG_HOME` and `XDG_STATE_HOME` values are ignored in
-favor of `$HOME/.config` and `$HOME/.local/state`. Explicit `EXA_AGENT_*` file
-paths may remain relative. New managed files/directories use 0600/0700. Existing
-paths are not silently chmod-ed: `doctor --check permissions.state` reports
-accessible managed files and group/world-writable state, spill, or credential
-directories, without following child-directory symlinks. A 0755 directory alone
-is not a finding. Inspection is bounded to 1,024 state entries, one level deep.
-
-Config transactions and `doctor --fix`/`--undo` share a lock; lock failure refuses
-the operation. `doctor --fix --dry-run` creates no directories, locks, or backups;
-`doctor --undo --dry-run` plans restoration without changing files or the marker.
-Explicit `--trace FILE` appends under a sibling `.<filename>.lock`; a new trace
-file is 0600, while existing trace files retain their modes.
+New managed files and directories use 0600/0700. Existing permissions are
+report-only unless an explicit doctor repair applies. Empty or relative XDG roots
+fall back to `$HOME`; explicit `EXA_AGENT_*` paths may be relative. Config and
+doctor mutations use a shared lock; dry-run repairs create no files or locks.
+See the [contracts](docs/v2/contracts.md) for local-state, trace, and write-failure details.
 
 ## Authentication
 
@@ -364,7 +407,7 @@ export EXA_API_KEY=...        # primary credential for the Exa API
 export EXA_SERVICE_KEY=...    # required only for `admin keys …` (Team Management)
 ```
 
-Alternatively, `exa-agent auth login` reads a key from stdin and writes it to a credentials file at `~/.config/exa-agent-cli/credentials.json` (mode `0600`). That file is plaintext on disk — it is not an OS keyring — so prefer the environment variable where you can, and protect the file otherwise. `exa-agent auth status` shows which source resolved the active credential, and `exa-agent auth logout` clears the stored key.
+Alternatively, `exa-agent auth login` reads a key from stdin and writes it to a credentials file at `~/.config/exa-agent-cli/credentials.json` (mode `0600`). That file is plaintext on disk. Prefer the environment variable and protect stored credentials. `exa-agent auth status` shows which source resolved the active credential, and `exa-agent auth logout` clears the stored key.
 
 This is true on every platform and every release artifact. The crate carries a `keyring` cargo
 feature, on by default, but it is currently inert: no code is compiled conditionally on it, so
@@ -373,9 +416,41 @@ describe a keyring-backed credential store and a keyring-free musl build (D11/D1
 planned, not implemented. Treat `auth login` as plaintext-file storage until this README says
 otherwise.
 
-## Design docs
+## Troubleshooting and limitations
 
-The full design set for the Rust build lives under `docs/v2/`: the locked decisions and their rationale (`decisions.md`), the agent-facing wire/output spec (`contracts.md`), the complete command tree (`commands.md`), the crate architecture (`architecture.md`), and the phased implementation plan (`implementation-plan.md`). The domain glossary is in `CONTEXT.md`. Earlier, language-agnostic v1 notes remain under `docs/` and `work/research/` for traceability.
+| Failure | Next step |
+| --- | --- |
+| Exit 1, usage | Read `error.message` and `suggestedCommand`; preview the corrected request |
+| Exit 2, missing or rejected credential | Set `EXA_API_KEY`; admin key commands need `EXA_SERVICE_KEY` |
+| Exit 13, `insufficient_credits` | Top up the Exa account; changing flags or retrying will not help |
+| Partial or empty page content | Inspect `contentDiagnostics` and follow `nextActions`; government PDF recovery uses `firecrawl scrape 'URL' --max-age 0` |
+| Output write fails after a successful call | Save the complete result left on stdout; repeating a create may duplicate it |
+
+Firecrawl is a separate tool and must be installed and configured separately.
+Exa does not provide trustworthy raw PDF bytes. Account entitlements can limit
+Batch, Snapshot, and other APIs. Windows is unsupported. The retained `/context`
+route is undocumented upstream, so offline examples do not establish live support.
+
+### Common questions
+
+**Why a CLI when an SDK or MCP exists?** Use an SDK inside an application, an MCP
+for assistant integration, and the CLI for shell workflows with output files and
+exit codes. See [Why a CLI](docs/why-a-cli.md).
+
+**Can I inspect a request without an API key?** Yes. Add
+`--dry-run --print-request`, or use `capabilities --json`.
+
+**Does login use an OS keyring?** No. `auth login` writes a plaintext 0600 file;
+prefer the environment variable.
+
+## Design and maintenance
+
+The [design index](docs/v2/README.md) preserves decisions, contracts, command
+plans, and reviews. Historical plans can differ from the running binary,
+particularly credential storage and flags. [Monthly maintenance](docs/monthly-update.md)
+covers checks and release preparation; [spec provenance](openapi/PROVENANCE.md)
+identifies the committed API inputs. `work/` holds ignored local evidence and is
+not distributed.
 
 ## License
 

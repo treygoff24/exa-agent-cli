@@ -1,8 +1,11 @@
 # Changelog
 
-All notable changes to this project are documented here.
+Notable changes, newest first.
 
 ## Unreleased
+
+The 0.8.0 candidate is verified locally. Public release and registry publication
+are pending; these entries are not a claim of published availability.
 
 ### Added
 
@@ -24,8 +27,19 @@ All notable changes to this project are documented here.
 ### Fixed
 
 - Deprecated `crawledBeforeDate` applies the same historical-content conflict
-  checks as `snapshotAsOf`. Websets mutation metadata keys are limited to
-  250 characters, including body and set overrides.
+  checks as `snapshotAsOf`. Metadata keys on supported Websets mutations are limited to
+  250 Unicode characters, including body/set overrides and nested enrichment
+  metadata on Webset creation. Agent/Batch metadata is outside this Websets
+  rule; nested `search.metadata` is not defined by the upstream creation schema.
+- Preset structure is checked before merge; required-field and cross-field checks
+  use the final request. Strict schema checks reject unknown fields where request
+  structure is modeled, while ordinary
+  typed requests retain forward compatibility. Location, content caps, and budget
+  constraints share validation across schema, presets, and dispatch.
+- Migration hints preserve the final request body, including leading-dash values.
+  Restore explicit profile, base URL, beta, and custom-header context manually
+  before replay. Ultra budget/time-limit warnings explain limited results.
+- Government PDF fallback writes to stdout rather than a fixed filename.
 - Monthly maintenance guidance distinguishes the offline vendored identity
   check from a fresh upstream fetch.
 

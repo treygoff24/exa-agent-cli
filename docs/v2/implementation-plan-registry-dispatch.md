@@ -1,5 +1,10 @@
 # Implementation plan: registry-driven dispatch convergence
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 Date: 2026-06-30
 Status: **ready for autonomous execution** (patched after native plan-reviewer + Codex plan review, 2026-06-30). Companion to [`refactor-registry-driven-dispatch.md`](refactor-registry-driven-dispatch.md) (design + fusion verdict). This is the execution playbook: phases, lane assignments, per-phase review-fix loops, mechanical exit gates, and the autonomy contract. Where the design doc's §0.5 revisions (R1–R8) amend the original proposal, this plan follows the revision.
 

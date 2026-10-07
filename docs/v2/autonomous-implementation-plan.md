@@ -1,5 +1,10 @@
 # Autonomous Implementation Plan
 
+Historical record: the original proposal, plan, or review below is preserved.
+Its implementation status, commands, and upstream observations may be outdated.
+Use the [current README](../../README.md) and installed `--help`/`capabilities --json`
+for current behavior.
+
 Date: 2026-06-29
 Status: execution overlay for a long `/goal` run. It does not replace
 [`implementation-plan.md`](implementation-plan.md); it defines how Codex should
@@ -92,7 +97,7 @@ primary lanes are unavailable or there is a specific model-diversity reason.
    delegate --json models
    ```
 
-3. Establish a run ledger in [`../../work/autonomous-run.md`](../../work/autonomous-run.md).
+3. Establish a run ledger in `work/autonomous-run.md` (historical local record, not distributed).
 4. Run the narrow baseline:
 
    ```bash

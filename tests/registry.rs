@@ -301,7 +301,7 @@ fn contents_registry_input_metadata_matches_clap() {
             .iter()
             .find(|field| field.flag == "text")
             .and_then(|field| field.input_range),
-        Some((1, 10_000))
+        Some((1, 1_000_000))
     );
     assert_registry_inputs_match_clap("contents");
 }

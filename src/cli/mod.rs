@@ -152,6 +152,9 @@ pub enum Effort {
     Medium,
     High,
     Xhigh,
+    Ultra,
+    /// Removed upstream; retained only to return an explicit migration command.
+    #[value(hide = true)]
     Max,
 }
 
@@ -164,6 +167,7 @@ impl Effort {
             Effort::Medium => "medium",
             Effort::High => "high",
             Effort::Xhigh => "xhigh",
+            Effort::Ultra => "ultra",
             Effort::Max => "max",
         }
     }
@@ -458,7 +462,7 @@ pub struct PaginationArgs {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run a search (POST /search).
-    Search(SearchArgs),
+    Search(Box<SearchArgs>),
     /// Fetch page contents (POST /contents).
     Contents(ContentsArgs),
     /// Find similar pages (POST /findSimilar). Deprecated upstream.
@@ -548,6 +552,28 @@ pub enum Command {
 
 #[derive(Args, Debug)]
 pub struct SearchArgs {
+    /// Broader search goal, independent of search type (maximum 4096 characters).
+    #[arg(long, value_name = "TEXT")]
+    pub objective: Option<String>,
+    /// Two-letter ISO country code (e.g. US) or a JSON location object.
+    #[arg(long, value_name = "COUNTRY|JSON")]
+    pub user_location: Option<String>,
+    /// Latitude (-90..=90); requires --longitude.
+    #[arg(
+        long,
+        requires = "longitude",
+        value_name = "DEGREES",
+        allow_negative_numbers = true
+    )]
+    pub latitude: Option<f64>,
+    /// Longitude (-180..=180); requires --latitude.
+    #[arg(
+        long,
+        requires = "latitude",
+        value_name = "DEGREES",
+        allow_negative_numbers = true
+    )]
+    pub longitude: Option<f64>,
     /// The search query.
     #[arg(value_name = crate::registry::field_value_name("search", "query").expect("search query metadata"))]
     pub query: String,
@@ -665,6 +691,13 @@ impl SearchArgs {
     pub fn into_flag_values(&self) -> Vec<(&'static str, Option<String>)> {
         let mut values = vec![
             ("query", Some(self.query.clone())),
+            ("objective", self.objective.clone()),
+            (
+                "user-location",
+                location_flag(self.user_location.as_deref(), self.latitude, self.longitude),
+            ),
+            ("latitude", None),
+            ("longitude", None),
             ("output-schema", self.output_schema.clone()),
             ("stream", self.stream.then(|| "true".to_string())),
             ("system-prompt", self.system_prompt.clone()),
@@ -907,9 +940,25 @@ pub struct AnswerArgs {
     /// Instructions guiding the answer, inline or read from @file.
     #[arg(long, value_name = "TEXT|@file")]
     pub system_prompt: Option<String>,
-    /// Two-letter ISO country code, e.g. US.
-    #[arg(long, value_name = "COUNTRY")]
+    /// Two-letter ISO country code (e.g. US) or a JSON location object.
+    #[arg(long, value_name = "COUNTRY|JSON")]
     pub user_location: Option<String>,
+    /// Latitude (-90..=90); requires --longitude.
+    #[arg(
+        long,
+        requires = "longitude",
+        value_name = "DEGREES",
+        allow_negative_numbers = true
+    )]
+    pub latitude: Option<f64>,
+    /// Longitude (-180..=180); requires --latitude.
+    #[arg(
+        long,
+        requires = "latitude",
+        value_name = "DEGREES",
+        allow_negative_numbers = true
+    )]
+    pub longitude: Option<f64>,
 }
 
 impl AnswerArgs {
@@ -919,9 +968,44 @@ impl AnswerArgs {
             ("text", bool_flag(self.text)),
             ("stream", bool_flag(self.stream)),
             ("model", self.model.clone()),
-            ("user-location", self.user_location.clone()),
+            (
+                "user-location",
+                location_flag(self.user_location.as_deref(), self.latitude, self.longitude),
+            ),
+            ("latitude", None),
+            ("longitude", None),
         ]
     }
+}
+
+fn location_flag(
+    country: Option<&str>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+) -> Option<String> {
+    let raw = country.map(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => value.to_string(),
+        Err(_) if matches!(raw.trim_start().chars().next(), Some('{' | '[' | '"')) => {
+            raw.to_string()
+        }
+        Err(_) => serde_json::json!(raw).to_string(),
+    });
+    if latitude.is_none() && longitude.is_none() {
+        return raw;
+    }
+    let mut value = match raw {
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
+            Ok(serde_json::Value::String(country)) => serde_json::json!({"country":country}),
+            Ok(serde_json::Value::Null) => serde_json::json!({}),
+            // Preserve malformed input for the request/body validator instead of silently coercing it.
+            _ => return Some(raw),
+        },
+        None => serde_json::json!({}),
+    };
+    value["latitude"] = serde_json::json!(latitude);
+    value["longitude"] = serde_json::json!(longitude);
+    Some(value.to_string())
 }
 
 #[derive(Args, Debug)]
@@ -1128,7 +1212,10 @@ pub struct AgentRunArgs {
         value_parser = crate::registry::ranged_f64_value_parser("agent runs create", "max-cost-dollars")
     )]
     pub max_cost_dollars: Option<f64>,
-    /// Repeatable provider (max 5): fiber, financial_datasets, similarweb, baselayer, affiliate, particle, or jinko.
+    /// Ultra soft wall-clock limit, 300..=10800 seconds; upstream stops starting work as it approaches. Requires an explicit dollar cap.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u32).range(300..=10800))]
+    pub max_duration_seconds: Option<u32>,
+    /// Repeatable Connect provider (max 5); includes macrobond and polymarket.
     #[arg(long, value_name = "PROVIDER")]
     pub data_source: Vec<String>,
     #[arg(long)]
@@ -1149,7 +1236,7 @@ pub enum AgentRunsCmd {
     Events(AgentRunsEventsArgs),
     /// Terminate a run and discard the results it has gathered (POST /agent/runs/{id}/cancel).
     Cancel { id: String },
-    /// Complete a max-effort run early and retain gathered results (POST /agent/runs/{id}/stop).
+    /// Complete an ultra-effort run early and retain gathered results (POST /agent/runs/{id}/stop).
     Stop { id: String },
     /// DELETE /agent/runs/{id}.
     Delete { id: String },

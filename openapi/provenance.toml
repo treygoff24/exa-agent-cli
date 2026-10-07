@@ -9,10 +9,10 @@
 [exa]
 source_url = "https://exa.ai/docs/exa-spec.json"
 vendored_path = "openapi/exa-openapi.json"
-source_sha256 = "5540b4a81b5b7699128209c3070aa96810998b964e61b84ecff53fab53e6f702"
-vendored_sha256 = "59518d9f6af69b004eb05d3f12d969bc87cc74bf9acd011516dd14293f52e43c"
+source_sha256 = "f4837699da0145d6e81e2d761c312aadd2a72b80464462469c80852aacb7d6b0"
+vendored_sha256 = "8b3b615ce310b0829bc6877ae2631d877d508489584d15282ec75d25ab4d9ad8"
 operations = 64
-verified = "2026-09-21"
+verified = "2026-10-07"
 
 [admin]
 source_url = "https://exa.ai/docs/team-management-spec.yaml"
@@ -20,4 +20,4 @@ vendored_path = "openapi/team-management.json"
 source_sha256 = "3cb487d56b67a3f0ae45fe0750341a9ceedfbd6084b36bf1b14b0802bb785c8d"
 vendored_sha256 = "35b19be1f94438af071f394dddec15c96cf9641fe0346b04c01755558ff66170"
 operations = 6
-verified = "2026-09-21"
+verified = "2026-10-07"

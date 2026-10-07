@@ -481,16 +481,12 @@ fn collect_schema_paths(
         concrete.insert(prefix.to_string());
     }
     let resolved = resolve_schema(schema, components);
-    if let Some(alternatives) = resolved
-        .get("allOf")
-        .or_else(|| resolved.get("oneOf"))
-        .or_else(|| resolved.get("anyOf"))
-        .and_then(|x| x.as_array())
-    {
-        for sub in alternatives {
-            collect_schema_paths(sub, components, prefix, concrete, free, visited);
+    for composition in ["allOf", "oneOf", "anyOf"] {
+        if let Some(alternatives) = resolved.get(composition).and_then(|x| x.as_array()) {
+            for sub in alternatives {
+                collect_schema_paths(sub, components, prefix, concrete, free, visited);
+            }
         }
-        return;
     }
     if let Some(properties) = resolved.get("properties").and_then(|x| x.as_object()) {
         for (key, sub) in properties {

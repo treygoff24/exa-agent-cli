@@ -36,9 +36,16 @@ enum ConstraintKind {
 }
 
 const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
+    ("answer", "latitude", ConstraintKind::Range),
+    ("answer", "longitude", ConstraintKind::Range),
     ("answer", "model", ConstraintKind::Enum),
     ("createAgentRun", "effort", ConstraintKind::Enum),
     ("createAgentRun", "max-cost-dollars", ConstraintKind::Range),
+    (
+        "createAgentRun",
+        "max-duration-seconds",
+        ConstraintKind::Range,
+    ),
     ("findSimilar", "category", ConstraintKind::Enum),
     ("findSimilar", "livecrawl-timeout", ConstraintKind::Range),
     ("findSimilar", "max-age-hours", ConstraintKind::Range),
@@ -46,6 +53,8 @@ const EXPECTED_CONSTRAINTS: &[(&str, &str, ConstraintKind)] = &[
     ("getContents", "livecrawl-timeout", ConstraintKind::Range),
     ("getContents", "max-age-hours", ConstraintKind::Range),
     ("search", "category", ConstraintKind::Enum),
+    ("search", "latitude", ConstraintKind::Range),
+    ("search", "longitude", ConstraintKind::Range),
     ("search", "livecrawl-timeout", ConstraintKind::Range),
     ("search", "max-age-hours", ConstraintKind::Range),
     ("search", "num-results", ConstraintKind::Range),
@@ -303,8 +312,35 @@ fn enum_range_ops_agree_on_verdict_between_validate_input_and_live() {
             // stays reachable as `details.issue`, asserted below against the same body.
             let expected_live_issue = "invalid_value";
 
-            let base_body =
+            let mut base_body =
                 preview_body(manifest_entry(&manifest, op.operation_id), op.operation_id);
+            // Mutate one constraint in a request whose other prerequisites are valid.
+            match (op.operation_id, field.flag) {
+                ("search" | "answer", "latitude" | "longitude") => {
+                    set_body_value(
+                        &mut base_body,
+                        "userLocation.latitude",
+                        serde_json::json!(0.0),
+                    );
+                    set_body_value(
+                        &mut base_body,
+                        "userLocation.longitude",
+                        serde_json::json!(0.0),
+                    );
+                }
+                ("createAgentRun", "max-duration-seconds") => {
+                    set_body_value(&mut base_body, "effort", serde_json::json!("ultra"));
+                    set_body_value(
+                        &mut base_body,
+                        "budget.maxCostDollars",
+                        serde_json::json!(5.0),
+                    );
+                }
+                ("createAgentRun", "max-cost-dollars") => {
+                    set_body_value(&mut base_body, "effort", serde_json::json!("auto"));
+                }
+                _ => {}
+            }
 
             let mut invalid_body = base_body.clone();
             set_body_value(&mut invalid_body, field.body_path, invalid_value);
@@ -347,15 +383,46 @@ fn enum_range_ops_agree_on_verdict_between_validate_input_and_live() {
                 field.flag
             );
 
-            let mut valid_body = base_body;
-            set_body_value(&mut valid_body, field.body_path, valid_value);
-            if op.operation_id == "createAgentRun" && field.flag == "max-cost-dollars" {
-                set_body_value(
-                    &mut valid_body,
-                    "effort",
-                    serde_json::Value::String("auto".to_string()),
+            // Bind new rejection rows to their actual constraint, beyond exit-class parity.
+            let expected_field = match (op.operation_id, field.flag) {
+                ("search" | "answer", "latitude" | "longitude") => Some("userLocation"),
+                ("createAgentRun", "max-duration-seconds") => Some("budget.maxDurationSeconds"),
+                _ => None,
+            };
+            if let Some(expected_field) = expected_field {
+                assert_eq!(
+                    live_error["error"]["details"]["field"], expected_field,
+                    "{} {}",
+                    op.operation_id, field.flag
+                );
+                assert_eq!(
+                    validate_invalid["details"]["field"], expected_field,
+                    "{} {}",
+                    op.operation_id, field.flag
+                );
+                let expected_bound = if field.flag == "max-duration-seconds" {
+                    "300 to 10800"
+                } else {
+                    "-90..90 and -180..180"
+                };
+                assert!(
+                    live_error["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(expected_bound),
+                    "{live_error}"
+                );
+                assert!(
+                    validate_invalid["details"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(expected_bound),
+                    "{validate_invalid}"
                 );
             }
+
+            let mut valid_body = base_body;
+            set_body_value(&mut valid_body, field.body_path, valid_value);
             // Dry-run is enough here: registry validation runs before the live/dry-run branch.
             let live_valid = run_live_with_body(
                 manifest_entry(&manifest, op.operation_id),

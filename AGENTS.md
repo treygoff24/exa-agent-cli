@@ -6,7 +6,7 @@ Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
 ## What this tool does
 
-`exa-agent` is a single self-contained binary that exposes the full Exa API — search, contents, answer, code context, agent runs, monitors, the Websets tree, and team/key administration — as 71 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
+`exa-agent` is a single self-contained binary that exposes the documented Exa API — search, contents, answer, code context, agent runs, monitors, the Websets tree, and team/key administration — as 71 non-interactive commands. Every call returns a stable exit code, and every structured (non-`raw`) success prints exactly one JSON envelope — `--ndjson` emits one envelope per line by design, `raw` prints decoded upstream body bytes except signed payment replaces exact submitted payment credential echoes with `<redacted>`, and streaming and human-format output differ by design. It can describe its own surface offline, with no key and no network call.
 
 ## Install
 
@@ -74,6 +74,35 @@ probing MUST export `EXA_AGENT_NO_NETWORK` (any value, including empty) to preve
 billed live calls; unset it only for an intentionally live test. The guard refuses live typed, raw, streaming, `auth test`/`status`,
 `schema refresh --check`, and `doctor --online` before credential resolution; dry-run and
 self-description commands still work.
+
+## Current API choices
+
+- Search `--objective TEXT` is a broader goal separate from the query, at most
+  4,096 characters. Search and answer accept `--user-location COUNTRY|JSON` plus paired
+  `--latitude` (-90..90) and `--longitude` (-180..180) hints.
+- Agent `--effort ultra` requires an explicit `--max-cost-dollars` ($1..$100) as
+  typed-command CLI safety policy; raw is a pass-through escape hatch. Optional
+  `--max-duration-seconds` is a soft wall-clock limit of 300..10,800 seconds,
+  Ultra only; upstream stops starting work as the limit approaches.
+  Ultra and `agent runs stop` require no beta header; legacy `max` fails locally
+  with a migration command. `--data-source macrobond` is supported.
+- Numeric text/highlights/legacy content-context caps accept 1..1,000,000 where
+  upstream supports them. Prefer text/highlights to deprecated content-context.
+  The separate `context` code-search route stays available with an
+  `undocumented_upstream` warning; retired Websets export commands stay absent.
+- Websets mutation metadata keys are at most 250 characters. This constraint
+  does not apply to Agent or Batch metadata.
+- Deprecated `includeText`/`excludeText` use approximate word matching and are
+  ignored for `similar` company/people categories. Use `--body`/`--set` for these
+  fields. Crawl-date filters are ignored upstream. Prefer publication dates.
+  Deprecated `crawledBeforeDate` shares Snapshot conflict checks; use
+  `--snapshot-as-of` for historical content.
+- SDK-only beta `/agent/monitors` (nine operations) has no public documented spec
+  or contract and is deliberately absent from typed commands. Documented
+  `monitor` and `websets monitors` are separate families.
+- For government content failures, follow the emitted external fallback:
+  `firecrawl scrape 'URL' --max-age 0`. Firecrawl must be installed
+  and configured separately; Exa does not return trustworthy raw PDF bytes.
 
 ## Reading the output
 

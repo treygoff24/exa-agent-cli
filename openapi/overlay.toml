@@ -557,7 +557,11 @@ kind = "str"
 [[operations."answer".fields]]
 flag = "user-location"
 body_path = "userLocation"
-kind = "str"
+kind = "json"
+input_kind = "flag"
+input_name = "--user-location"
+value_name = "COUNTRY|JSON"
+arity = { min = 1, max = 1 }
 
 [[operations."answer".fields]]
 flag = "output-schema"
@@ -606,7 +610,7 @@ input_kind = "flag"
 input_name = "--text"
 value_name = "N|full"
 arity = { min = 0, max = 1 }
-input_range = [1, 10000]
+input_range = [1, 1000000]
 
 [[operations."findSimilar".fields]]
 flag = "max-age-hours"
@@ -705,7 +709,7 @@ input_kind = "flag"
 input_name = "--text"
 value_name = "N|full"
 arity = { min = 0, max = 1 }
-input_range = [1, 10000]
+input_range = [1, 1000000]
 
 [[operations."search".fields]]
 flag = "max-age-hours"
@@ -872,7 +876,7 @@ input_kind = "flag"
 input_name = "--text"
 value_name = "N|full"
 arity = { min = 0, max = 1 }
-input_range = [1, 10000]
+input_range = [1, 1000000]
 
 [[operations."getContents".fields]]
 flag = "summary-query"
@@ -975,7 +979,7 @@ kind = "str"
 flag = "effort"
 body_path = "effort"
 kind = "str"
-enum_values = ["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
+enum_values = ["auto", "minimal", "low", "medium", "high", "xhigh", "ultra"]
 
 [[operations."createAgentRun".fields]]
 flag = "max-cost-dollars"
@@ -996,3 +1000,71 @@ kind = "json"
 flag = "metadata"
 body_path = "metadata"
 kind = "json"
+
+[[operations."search".fields]]
+flag = "objective"
+body_path = "objective"
+kind = "str"
+input_kind = "flag"
+input_name = "--objective"
+value_name = "TEXT"
+arity = { min = 1, max = 1 }
+
+[[operations."search".fields]]
+flag = "user-location"
+body_path = "userLocation"
+kind = "json"
+input_kind = "flag"
+input_name = "--user-location"
+value_name = "COUNTRY|JSON"
+arity = { min = 1, max = 1 }
+
+[[operations."createAgentRun".fields]]
+flag = "max-duration-seconds"
+body_path = "budget.maxDurationSeconds"
+kind = "int"
+range = [300, 10800]
+input_kind = "flag"
+input_name = "--max-duration-seconds"
+value_name = "SECONDS"
+arity = { min = 1, max = 1 }
+
+[[operations."search".fields]]
+flag = "latitude"
+body_path = "userLocation.latitude"
+kind = "num"
+range = [-90, 90]
+input_kind = "flag"
+input_name = "--latitude"
+value_name = "DEGREES"
+arity = { min = 1, max = 1 }
+
+[[operations."search".fields]]
+flag = "longitude"
+body_path = "userLocation.longitude"
+kind = "num"
+range = [-180, 180]
+input_kind = "flag"
+input_name = "--longitude"
+value_name = "DEGREES"
+arity = { min = 1, max = 1 }
+
+[[operations."answer".fields]]
+flag = "latitude"
+body_path = "userLocation.latitude"
+kind = "num"
+range = [-90, 90]
+input_kind = "flag"
+input_name = "--latitude"
+value_name = "DEGREES"
+arity = { min = 1, max = 1 }
+
+[[operations."answer".fields]]
+flag = "longitude"
+body_path = "userLocation.longitude"
+kind = "num"
+range = [-180, 180]
+input_kind = "flag"
+input_name = "--longitude"
+value_name = "DEGREES"
+arity = { min = 1, max = 1 }

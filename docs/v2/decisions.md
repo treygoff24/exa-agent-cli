@@ -191,3 +191,27 @@ These remain runtime-validation items, not blockers — the `raw` + `--body` + `
 **D40 — 0.5.0 parity-wave scope rulings (2026-08-03; payment refined 2026-08-11).** (a) **Research retirement:** upstream `/research/v1` returns HTTP 410 `RESEARCH_RETIRED`; the three generated commands are removed from the registry and replaced by a local `research` stub that exits 1 with error code `research_retired` and a per-verb copy-pasteable replacement (`search --type deep-reasoning`), so agents with stale knowledge are redirected without burning a network call. (b) **OpenAI-compat routes stay raw-only**, reaffirming D16: `/chat/completions` and `/responses` duplicate natively covered surfaces (`search`, `answer`, `agent runs`); `raw` remains the documented path. (c) **MPP/x402 wallet/signing/custody remains out of scope, but signed pass-through/discovery is supported**: raw-only `--x402-payment-stdin`, `--mpp-payment-stdin`, and `--payment-discovery` are limited to exact nonstreaming `POST /search` or `/contents` on the default Exa host, with no API key, redirects, retries, idempotency key, or pending-run recovery. Successful signed payment `raw` output has no envelope/payment metadata and is exact except exact submitted payment credential echoes are replaced with `<redacted>`. (d) **Websets imports `--csv`/`--url` conveniences removed rather than implemented**: the documented flow is create → presigned `PUT`, and without a resumable-upload command a failed upload strands a created import with no honest `retryable` semantics under D7. `imports create` instead emits a `nextActions` template for the documented PUT step. A one-shot convenience returns in a future version only alongside a designed resumable-upload/pending-record contract. (e) **Websets exports** join `/context` as overlay-defined typed commands (D17 precedent): overlay carries method/path/provenance/request fields, responses are opaque upstream `data`, and `exports create` is `idempotency_sensitive`.
 
 **D41 — Remove retired Websets exports commands (2026-09-21).** Exa's current documentation and official SDKs no longer carry the export routes, and a live probe returned a route-level 404. Remove `websets exports create|get` from the CLI, registry, generated skill, tests, and current documentation. Unlike the Research retirement in D40a, there is no replacement command, so keep no compatibility stub: stale invocations fail at the clap boundary as an unrecognized subcommand.
+
+**D42 — October API parity and deliberate omissions (2026-10-07).** Agent
+`ultra` replaces `max`; reject the legacy value locally with an exact migration
+command. Ultra and early stop require no Agent beta header. Keep an explicit
+$1..$100 Ultra cost cap as typed-command CLI safety policy even though Exa accepts a time-only
+budget; optional duration is a soft wall-clock limit of 300..10,800 seconds.
+Upstream stops starting work as the limit approaches. Add search objective, paired
+search/answer coordinates, Macrobond, supported 1,000,000-character content caps,
+and Websets mutation metadata-key validation. Apply Snapshot conflicts to the
+deprecated historical alias too.
+
+Deprecated `includeText`/`excludeText` stay body/set fields with approximate
+matching; findSimilar company/people categories ignore them. Crawl-date filters
+are ignored upstream. Do not add typed flags for these deprecated inputs. Retain
+the code `context` route with its existing compatibility warning (separate from
+deprecated content-context extraction); retired Websets exports stay absent (D41).
+
+The SDK-only beta `/agent/monitors` family has nine operations but no public
+documented spec or contract. Defer typed commands until a contract establishes
+request validation, destructive semantics, and replay safety. Documented top-level
+monitors and Websets monitors remain available; command count stays 71. External
+recovery for government content uses Firecrawl, configured separately. An offline
+`vendor-spec --check` verifies committed identity/provenance, while upstream drift
+assessment requires fresh sources plus documentation and SDK review.

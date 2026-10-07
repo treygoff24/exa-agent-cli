@@ -115,7 +115,7 @@ Rules:
 - **`legacy_value_coerced`** (added 0.5.0): a typed flag accepted a legacy enum spelling and sent the canonical one upstream; details name `field`, `given`, `sent`. Mappings: category `research paper`→`publication` (search + similar), agent data-source provider `fiber_ai`→`fiber`, `particle_news`→`particle`. Coercion applies to typed flags only — `--body`/`--set` values are the explicit escape hatch and pass through unrewritten, unwarned.
 - **`stream_ignored`**: the final Search request has `stream:true` but no non-null `outputSchema`, so upstream falls back to its normal JSON response. This is non-fatal and appears on both request previews and live envelopes; add `--output-schema` to receive SSE.
 - For a `/contents` status whose upstream `error` object is empty or has no non-empty `tag`, `message`, or `reason`, warnings use the stable label `upstream_reason_unavailable` and include a suggested direct-fetch command. The CLI never invents an upstream reason.
-- A non-`full` contents/answer result always carries a non-empty warning naming the empty crawl, binary body, crawl error, or unextracted PDF and a paste-ready fallback in `suggestedCommand`/`nextActions[]`. Government URLs and `CRAWL_UNKNOWN_ERROR` use `parallel-cli extract URL --full-content --json`; other empty rows suggest a fresh full-text Exa retry. The API returns extracted text strings, not trustworthy raw response bytes, so this version reports `pdf_unextracted` rather than passing a lossy JSON string to `pdftotext` or introducing an out-of-band downloader.
+- A non-`full` contents/answer result always carries a non-empty warning naming the empty crawl, binary body, crawl error, or unextracted PDF and a paste-ready fallback in `suggestedCommand`/`nextActions[]`. Government URLs, including unextracted PDFs, use `firecrawl scrape URL --max-age 0` (stdout). Other `CRAWL_UNKNOWN_ERROR` and unextracted-PDF rows retain the Parallel fallback; other empty rows suggest a fresh full-text Exa retry. The API returns extracted text strings, not trustworthy raw response bytes, so this version reports `pdf_unextracted` rather than passing a lossy JSON string to `pdftotext` or introducing an out-of-band downloader.
 - `request.requestId` is a locally-generated id (ULID-style, deterministic-friendly); `upstreamRequestId` is Exa's when present, omitted otherwise. `request.correlationId` echoes a caller-supplied `--correlation-id`/`EXA_CORRELATION_ID` verbatim when set; omitted otherwise, so an orchestrator running many concurrent calls can stamp its own key instead of scraping `requestId`.
 - `dataTruncated`/`dataPath`/`bytes` support `--output`, `--max-output-bytes`, and auto-spill (§9). When data is inlined: `dataTruncated: false`, with `dataPath`/`bytes` omitted.
 - `payment` is a top-level field only on successful signed raw payment responses (`--x402-payment-stdin` or `--mpp-payment-stdin`) in JSON-envelope mode. It is inserted after `dataTruncated` and is never nested under `data`, so agents can parse receipt metadata without depending on upstream body shape. Its exact shape is `{ "kind": "receipt", "headers": [{ "name": <allowlisted-receipt-header-name-as-received>, "present": true, "bytes": <value-byte-length>, "value": <header-value> }] }`; only receipt headers whose names case-insensitively match `payment-response`, `payment-receipt`, `x-payment-response`, or `x-payment-receipt` appear, with `name` casing preserved as received. If no safe receipt header is present, `headers` is `[]`. Successful signed payment responses redact exact submitted payment credential echoes before any output. Under `--raw`, no envelope or `payment` metadata is added; output is exact except those echoes are replaced with `<redacted>`.
@@ -304,6 +304,30 @@ One uniform model over endpoint-specific cursors.
 - A mixed batch exits **10** (partial) after emitting all per-chunk NDJSON, so agents parse partial success.
 - `/contents` returns HTTP 200 with per-URL failures in `statuses[]`; the envelope preserves `data.statuses[]`. Future `--fail-on-url-error` can promote those to exit 10.
 
+## 11.1 Current request validation
+
+Validation applies to the final merged typed request before credential resolution
+and transport, including dry-run previews and `--body`/`--set` overrides:
+
+- Search `objective` is at most 4,096 Unicode characters. Search/answer
+  `userLocation` accepts a country string or an object with `country`, or paired
+  `latitude`/`longitude`; coordinates must be numeric and within -90..90 and
+  -180..180 respectively. Unknown location-object fields are rejected.
+- Agent `budget.maxCostDollars` is $1..$100 for omitted/auto/ultra effort.
+  Typed Ultra commands require an explicit dollar cap as CLI safety policy; raw remains pass-through. Optional
+  `budget.maxDurationSeconds` is an integer in 300..10800 and Ultra only.
+  It is a soft wall-clock limit: upstream stops starting work as it approaches,
+  independently of the local request timeout.
+  Legacy `max` fails locally with an Ultra migration command. Ultra and stop
+  do not require or inject the retired Agent beta token.
+- Supported content text/highlights/legacy context `maxCharacters` values are
+  1..1000000. Websets mutation metadata key names are at most 250 characters;
+  Agent and Batch metadata do not inherit this limit.
+- Deprecated `crawledBeforeDate` is a historical-content alias with the same
+  conflict checks as `snapshotAsOf`; prefer `--snapshot-as-of`. Deprecated
+  `includeText`/`excludeText` retain approximate matching and are ignored by
+  findSimilar company/people categories. Crawl-date filters are ignored upstream.
+
 ## 12. Redaction & determinism
 
 - Known secrets are never emitted, by prevention at the source rather than a value-shape scrub of output: managed auth headers are injected only at send time and refused if user-supplied (below); secret-*named* headers and query params are redacted in request previews; and the one-time secrets returned by create ops (`apiKey`, `webhookSecret`, `secret`) are redacted from the default response envelope after `--secret-output` capture. `request.redacted` is `true` on these governed paths and `false` on the ungoverned `raw` escape hatch. Non-payment `raw` emits the upstream response as-is; signed payment `raw` emits it as-is except exact submitted payment credential echoes are replaced with `<redacted>`.
@@ -360,7 +384,7 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
           "required": false,
           "inputKind": "flag",
           "name": "--effort",
-          "enumValues": ["auto", "minimal", "low", "medium", "high", "xhigh", "max"]
+          "enumValues": ["auto", "minimal", "low", "medium", "high", "xhigh", "ultra"]
         }
       ]
     }

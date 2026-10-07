@@ -2,7 +2,7 @@
 //! carries. Without these, an API refresh can change a beta token or an enum upstream while every
 //! other test stays green and the CLI keeps sending the retired value.
 
-use exa_agent_cli::{batches, registry, AGENT_MAX_EFFORT_BETA};
+use exa_agent_cli::{batches, registry};
 use serde_json::Value;
 use std::fs;
 
@@ -47,28 +47,6 @@ fn batch_beta_token_matches_the_spec_flag() {
         batches::BETA_TOKEN,
         flag,
         "batches::BETA_TOKEN drifted from x-exa-beta-flag on POST /batches"
-    );
-}
-
-/// `POST /agent/runs/{id}/stop` carries no `x-exa-beta-flag`; the spec names its token in prose
-/// only, so the assertion reads the description.
-#[test]
-fn agent_stop_beta_token_matches_the_spec_description() {
-    let spec = spec();
-    let description = operation(&spec, "/agent/runs/{id}/stop", "post")["description"]
-        .as_str()
-        .expect("stop operation has a description");
-    let (_, after) = description
-        .split_once("Exa-Beta: ")
-        .expect("stop description names the Exa-Beta header");
-    let token = after
-        .split('`')
-        .next()
-        .expect("stop description terminates the token")
-        .trim();
-    assert_eq!(
-        AGENT_MAX_EFFORT_BETA, token,
-        "AGENT_MAX_EFFORT_BETA drifted from the token named in the stop description"
     );
 }
 

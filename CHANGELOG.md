@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Added
+
+- Agent Ultra effort, optional `--max-duration-seconds` (300..10,800), and the
+  Macrobond data source. Ultra retains an explicit $1..$100 cost cap as CLI
+  safety policy; legacy `max` returns a local migration command.
+- Search `--objective` (up to 4,096 characters), plus country and paired
+  latitude/longitude hints on search and answer.
+
+### Changed
+
+- Content text, highlights, and legacy context character caps increase to
+  1,000,000 where supported upstream. Ultra and early stop need no beta header;
+  Batch and Dynamic Highlights keep their own beta requirements.
+- Government content recovery suggests `firecrawl scrape URL --max-age 0`.
+- Public API spec refreshed for October changes. SDK-only beta Agent monitors
+  remain a deliberate omission; the command count stays 71.
+
+### Fixed
+
+- Deprecated `crawledBeforeDate` applies the same historical-content conflict
+  checks as `snapshotAsOf`. Websets mutation metadata keys are limited to
+  250 characters, including body and set overrides.
+- Monthly maintenance guidance distinguishes the offline vendored identity
+  check from a fresh upstream fetch.
+
 ### Removed
 
 - Removed `websets exports create` and `websets exports get` because Exa no longer

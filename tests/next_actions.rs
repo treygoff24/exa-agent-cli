@@ -471,3 +471,139 @@ fn aggregated_repeated_cursor_does_not_offer_the_rejected_cursor_again() {
 fn ndjson_repeated_cursor_does_not_offer_the_rejected_cursor_again() {
     assert_repeated_cursor_stops_without_a_continuation(true);
 }
+
+#[test]
+fn agent_stop_limits_emit_success_warnings_without_repeating_the_request() {
+    for reason in ["budget_reached", "time_limit_reached"] {
+        for response in [
+            json!({"id":"run / quote's", "status":"completed", "stopReason":reason}),
+            json!({"data":[{"id":"run1", "stop_reason":reason}]}),
+        ] {
+            let (url, handle) = server(response.clone());
+            let args = if response.get("id").is_some() {
+                vec![
+                    "agent",
+                    "runs",
+                    "get",
+                    "run1",
+                    "--base-url",
+                    &url,
+                    "--api-key",
+                    "fixture-secret",
+                    "--json",
+                ]
+            } else {
+                vec![
+                    "agent",
+                    "runs",
+                    "list",
+                    "--base-url",
+                    &url,
+                    "--api-key",
+                    "fixture-secret",
+                    "--json",
+                ]
+            };
+            let envelope = run(&args, false);
+            handle.join().unwrap();
+            assert_eq!(envelope["data"], response);
+            let warning = envelope["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|warning| warning["code"] == reason)
+                .expect("stop warning");
+            assert_eq!(warning["details"]["stopReason"], reason);
+            assert_eq!(warning["details"]["count"], 1);
+            assert!(warning.get("suggestedCommand").is_none());
+            assert_all_exa_actions_parse(&envelope);
+        }
+    }
+}
+
+#[test]
+fn legacy_max_migration_preserves_query_and_is_an_executable_preview() {
+    for query in ["query ' with spaces", "-dash query"] {
+        for rich in [true, false] {
+            let directory = temporary();
+            let mut original =
+                json!({"query":query, "effort":"max", "budget":{"maxCostDollars":7.0}});
+            if rich {
+                original["budget"]["maxDurationSeconds"] = json!(600);
+                original["systemPrompt"] = json!("Use primary sources");
+                original["outputSchema"] =
+                    json!({"type":"object","properties":{"name":{"type":"string"}}});
+                original["dataSources"] = json!([{"provider":"macrobond"}]);
+                original["metadata"] = json!({"ticket":"T1"});
+            }
+            let output = Command::new(env!("CARGO_BIN_EXE_exa-agent"))
+                .env("EXA_AGENT_NO_NETWORK", "1")
+                .env("EXA_AGENT_CONFIG", directory.join("absent.toml"))
+                .args([
+                    "agent",
+                    "runs",
+                    "create",
+                    "placeholder",
+                    "--body",
+                    &original.to_string(),
+                    "--dry-run",
+                    "--json",
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            let replacement = preview(error["error"]["suggestedCommand"].as_str().unwrap());
+            let mut expected = original;
+            expected["effort"] = json!("ultra");
+            assert_eq!(replacement["data"]["request"]["body"], expected);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+}
+
+#[test]
+fn duration_repairs_keep_valid_duration_and_other_final_inputs() {
+    for budget in [
+        json!({"maxDurationSeconds":600}),
+        json!({"maxCostDollars":5,"maxDurationSeconds":600}),
+    ] {
+        let directory = temporary();
+        let original = json!({"query":"research", "effort":"auto", "budget":budget, "systemPrompt":"Keep sources", "metadata":{"ticket":"T2"}});
+        let output = Command::new(env!("CARGO_BIN_EXE_exa-agent"))
+            .env("EXA_AGENT_NO_NETWORK", "1")
+            .env("EXA_AGENT_CONFIG", directory.join("absent.toml"))
+            .args([
+                "agent",
+                "runs",
+                "create",
+                "research",
+                "--body",
+                &original.to_string(),
+                "--base-url",
+                "http://127.0.0.1:9",
+                "--header",
+                "X-Route: private-route",
+                "--api-key",
+                "fixture-secret",
+                "--dry-run",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["details"]["recoveryContextRequired"], true);
+        let suggestion = error["error"]["suggestedCommand"].as_str().unwrap();
+        assert!(!suggestion.contains("private-route") && !suggestion.contains("fixture-secret"));
+        let result = preview(suggestion);
+        let mut expected = original;
+        expected["effort"] = json!("ultra");
+        if expected["budget"].get("maxCostDollars").is_none() {
+            expected["budget"]["maxCostDollars"] = json!(20.0);
+        }
+        assert_eq!(result["data"]["request"]["body"], expected);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}

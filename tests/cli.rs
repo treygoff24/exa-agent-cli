@@ -609,7 +609,7 @@ fn capabilities_publish_named_flag_body_paths() {
     );
     assert_eq!(
         field("agent runs create", "effort")["enumValues"],
-        serde_json::json!(["auto", "minimal", "low", "medium", "high", "xhigh", "max"])
+        serde_json::json!(["auto", "minimal", "low", "medium", "high", "xhigh", "ultra"])
     );
     assert_eq!(
         field("agent runs create", "data-source")["enumValues"],
@@ -1006,11 +1006,11 @@ fn named_flag_help_covers_contents_highlights_and_agent_system_prompt() {
     );
     assert!(agent_help.contains("1..=100"), "help: {agent_help}");
     assert!(
-        agent_help.contains("omitted, auto, or max effort"),
+        agent_help.contains("omitted, auto, or ultra effort"),
         "help: {agent_help}"
     );
     assert!(
-        agent_help.contains("agent-max-effort-2026-07-27"),
+        agent_help.contains("CLI safety policy"),
         "help: {agent_help}"
     );
 }
@@ -3047,7 +3047,7 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
         assert_eq!(text["name"], "--text");
         assert_eq!(text["valueName"], "N|full");
         assert_eq!(text["arity"], serde_json::json!({"min": 0, "max": 1}));
-        assert_eq!(text["range"], serde_json::json!({"min": 1, "max": 10000}));
+        assert_eq!(text["range"], serde_json::json!({"min": 1, "max": 1000000}));
     }
 
     for command in ["search", "similar"] {
@@ -3055,7 +3055,7 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
         assert!(help.status.success());
         let help = String::from_utf8(help.stdout).unwrap();
         assert!(
-            help.contains("--text accepts bare, `full`, or 1..=10000"),
+            help.contains("--text accepts bare, `full`, or 1..=1000000"),
             "{help}"
         );
 
@@ -3076,7 +3076,7 @@ fn contents_text_metadata_renders_in_help_schema_and_capabilities() {
                 .expect("text field");
             assert_eq!(
                 text["range"],
-                serde_json::json!({"min": 1, "max": 10000}),
+                serde_json::json!({"min": 1, "max": 1000000}),
                 "{command}"
             );
         }
@@ -3369,7 +3369,7 @@ fn search_and_similar_text_share_normalization_boundaries() {
             };
             assert_eq!(text, &expected, "{command} {raw}");
         }
-        for raw in ["0", "false", "-1", "10001"] {
+        for raw in ["0", "false", "-1", "1000001"] {
             let mut args = valid.clone();
             args.push(raw);
             args.extend(["--compact"]);
@@ -3436,7 +3436,7 @@ fn contents_text_forms_match_help_and_reject_legacy_boolean_spellings() {
             "contents",
             "https://example.com",
             "--text",
-            "10001",
+            "1000001",
             "--api-key",
             "test-key-abcdef12",
             "--base-url",
@@ -3453,7 +3453,7 @@ fn contents_text_forms_match_help_and_reject_legacy_boolean_spellings() {
         let rendered = error["error"]["message"].as_str().unwrap();
         assert!(rendered.contains("bare"), "{rendered}");
         assert!(rendered.contains("--text full"), "{rendered}");
-        assert!(rendered.contains("--text 10000"), "{rendered}");
+        assert!(rendered.contains("--text 1000000"), "{rendered}");
     }
 }
 
@@ -3658,7 +3658,7 @@ fn contents_empty_text_is_no_content_with_diagnostics_and_fallback() {
     assert!(warning["suggestedCommand"]
         .as_str()
         .unwrap()
-        .starts_with("parallel-cli extract "));
+        .starts_with("firecrawl scrape "));
     assert!(json["nextActions"]
         .as_array()
         .unwrap()
@@ -3704,7 +3704,7 @@ fn contents_gzip_text_is_binary_with_warning() {
 }
 
 #[test]
-fn contents_crawl_unknown_error_surfaces_http_status_and_parallel_fallback() {
+fn contents_government_crawl_unknown_error_surfaces_http_status_and_firecrawl_fallback() {
     let response = br#"{
         "results":[],
         "statuses":[{"id":"https://congress.gov/bill/1","status":"error","error":{"tag":"CRAWL_UNKNOWN_ERROR","httpStatusCode":502}}]
@@ -3732,47 +3732,29 @@ fn contents_crawl_unknown_error_surfaces_http_status_and_parallel_fallback() {
     assert!(json["warnings"][0]["suggestedCommand"]
         .as_str()
         .unwrap()
-        .starts_with("parallel-cli extract "));
+        .starts_with("firecrawl scrape "));
 }
 
 #[test]
-fn contents_empty_pdf_is_explicitly_unextracted() {
-    let response = br#"{
-        "results":[{"url":"https://agency.gov/report.pdf","text":""}],
-        "statuses":[{"id":"https://agency.gov/report.pdf","status":"success"}]
-    }"#;
-    let (base_url, server) = local_json_server(|_| {}, response);
-    let output = run(&[
-        "fetch",
-        "https://agency.gov/report.pdf",
-        "--api-key",
-        "test-key-abcdef12",
-        "--base-url",
-        base_url.as_str(),
-        "--compact",
-    ]);
-    server.join().expect("local test server panicked");
-    assert!(output.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["outcome"], "no_content");
-    assert_eq!(
-        json["contentDiagnostics"][0]["content_type"],
-        "application/pdf"
-    );
-    assert_eq!(
-        json["contentDiagnostics"][0]["content_type_source"],
-        "inferred_url"
-    );
-    assert_eq!(
-        json["contentDiagnostics"][0]["content_status"],
-        "pdf_unextracted"
-    );
-    assert_eq!(json["contentDiagnostics"][0]["pdf_unextracted"], true);
-    assert!(json["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| warning["code"] == "pdf_unextracted"));
+fn review_government_pdf_is_unextracted_with_authority_fallback() {
+    for (url, response, expected) in [
+        ("https://agency.gov/report.pdf", br#"{"results":[{"url":"https://agency.gov/report.pdf","text":""}],"statuses":[{"id":"https://agency.gov/report.pdf","status":"success"}]}"#.as_slice(), "firecrawl scrape 'https://agency.gov/report.pdf' --max-age 0"),
+        ("https://example.com/report.pdf", br#"{"results":[{"url":"https://example.com/report.pdf","text":""}],"statuses":[{"id":"https://example.com/report.pdf","status":"success"}]}"#.as_slice(), "parallel-cli extract 'https://example.com/report.pdf' --full-content --json"),
+    ] {
+        let (base_url, server) = local_json_server(|_| {}, response);
+        let output = run(&["fetch", url, "--api-key", "test-key-abcdef12", "--base-url", &base_url, "--json"]);
+        server.join().unwrap();
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["outcome"], "no_content");
+        assert_eq!(json["contentDiagnostics"][0]["content_type"], "application/pdf");
+        assert_eq!(json["contentDiagnostics"][0]["content_type_source"], "inferred_url");
+        assert_eq!(json["contentDiagnostics"][0]["content_status"], "pdf_unextracted");
+        assert_eq!(json["contentDiagnostics"][0]["pdf_unextracted"], true);
+        let warning = json["warnings"].as_array().unwrap().iter().find(|warning| warning["code"] == "pdf_unextracted").unwrap();
+        assert_eq!(warning["suggestedCommand"], expected);
+        assert!(json["nextActions"].as_array().unwrap().iter().any(|action| action["command"] == warning["suggestedCommand"]));
+    }
 }
 
 #[test]
@@ -5170,7 +5152,7 @@ fn context_dry_run_defaults_dynamic_tokens_and_validates_range() {
     assert_eq!(defaulted["warnings"][0]["code"], "undocumented_upstream");
     assert_eq!(
         defaulted["warnings"][0]["message"],
-        "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice."
+        "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it is retained for compatibility and may change or disappear."
     );
 
     let dynamic = run_ok_json(&[
@@ -6136,27 +6118,27 @@ fn agent_runs_create_dry_run_builds_structured_create_fields() {
 }
 
 #[test]
-fn agent_runs_create_supports_budgeted_beta_max_effort() {
+fn agent_runs_create_supports_budgeted_ultra_effort() {
     let create = run_ok_json(&[
         "agent",
         "runs",
         "create",
         "deep list build",
         "--effort",
-        "max",
+        "ultra",
         "--max-cost-dollars",
         "20",
         "--beta",
-        "other,agent-max-effort-2026-07-27",
+        "caller-beta",
         "--dry-run",
         "--compact",
     ]);
     let body = &create["data"]["request"]["body"];
-    assert_eq!(body["effort"], "max");
+    assert_eq!(body["effort"], "ultra");
     assert_eq!(body["budget"]["maxCostDollars"], 20.0);
     assert_eq!(
         create["data"]["request"]["headers"],
-        serde_json::json!([{"name":"Exa-Beta","value":"other,agent-max-effort-2026-07-27"}])
+        serde_json::json!([{"name":"Exa-Beta","value":"caller-beta"}])
     );
 
     let body_set_precedence = run_ok_json(&[
@@ -6196,7 +6178,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ][..],
-            "exa-agent agent runs create 'expensive research' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27 --dry-run --print-request",
+            "exa-agent agent runs create --effort ultra --max-cost-dollars 20 --dry-run --print-request -- 'expensive research'",
         ),
         (
             &[
@@ -6211,7 +6193,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ],
-            "exa-agent agent runs create 'expensive research' --effort max --max-cost-dollars 20 --beta agent-max-effort-2026-07-27 --dry-run --print-request",
+            "exa-agent agent runs create --effort ultra --max-cost-dollars 20 --dry-run --print-request -- 'expensive research'",
         ),
         (
             &[
@@ -6226,7 +6208,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ],
-            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 10 --dry-run --print-request",
+            "exa-agent agent runs create --effort auto --max-cost-dollars 10 --dry-run --print-request -- 'expensive research'",
         ),
         (
             &[
@@ -6239,7 +6221,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ],
-            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+            "exa-agent agent runs create --effort auto --max-cost-dollars 20 --dry-run --print-request -- 'expensive research'",
         ),
         (
             &[
@@ -6252,7 +6234,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ],
-            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+            "exa-agent agent runs create --effort auto --max-cost-dollars 20 --dry-run --print-request -- 'expensive research'",
         ),
         (
             &[
@@ -6265,7 +6247,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ],
-            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+            "exa-agent agent runs create --effort auto --max-cost-dollars 20 --dry-run --print-request -- 'expensive research'",
         ),
         (
             &[
@@ -6278,7 +6260,7 @@ fn agent_runs_create_validates_final_budget_and_max_effort_contract() {
                 "--dry-run",
                 "--compact",
             ],
-            "exa-agent agent runs create 'expensive research' --effort auto --max-cost-dollars 20 --dry-run --print-request",
+            "exa-agent agent runs create --effort auto --max-cost-dollars 20 --dry-run --print-request -- 'expensive research'",
         ),
     ] {
         let output = run(args);
@@ -11034,4 +11016,727 @@ fn rejected_enum_values_come_back_as_a_runnable_command() {
         stderr_json(&expand)["error"]["suggestedCommand"],
         "exa-agent websets get item --expand items --compact"
     );
+}
+
+#[test]
+fn october_upstream_request_contracts() {
+    for args in [
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--effort",
+            "ultra",
+            "--max-cost-dollars",
+            "20",
+            "--max-duration-seconds",
+            "300",
+        ],
+        vec![
+            "search",
+            "research",
+            "--objective",
+            "Identify useful sources",
+            "--user-location",
+            "US",
+            "--latitude",
+            "40.5",
+            "--longitude",
+            "-73.2",
+        ],
+        vec![
+            "answer",
+            "research",
+            "--latitude",
+            "40.5",
+            "--longitude",
+            "-73.2",
+        ],
+        vec!["contents", "https://example.com", "--text", "1000000"],
+        vec!["search", "research", "--highlights", "1000000"],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--data-source",
+            "macrobond",
+        ],
+    ] {
+        let mut args = args;
+        args.extend(["--dry-run", "--json"]);
+        let result = run_ok_json(&args);
+        let body = &result["data"]["request"]["body"];
+        match args[0] {
+            "agent" if args.contains(&"ultra") => {
+                assert_eq!(body["effort"], "ultra");
+                assert_eq!(body["budget"]["maxDurationSeconds"], 300);
+                assert!(result["data"]["request"].get("headers").is_none());
+            }
+            "agent" => assert_eq!(body["dataSources"][0]["provider"], "macrobond"),
+            "search" if args.contains(&"--objective") => {
+                assert_eq!(body["objective"], "Identify useful sources");
+                assert_eq!(
+                    body["userLocation"],
+                    serde_json::json!({"country":"US","latitude":40.5,"longitude":-73.2})
+                );
+            }
+            "answer" => assert_eq!(
+                body["userLocation"],
+                serde_json::json!({"latitude":40.5,"longitude":-73.2})
+            ),
+            "contents" => assert_eq!(body["text"]["maxCharacters"], 1000000),
+            "search" => assert_eq!(body["contents"]["highlights"]["maxCharacters"], 1000000),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn october_upstream_rejects_invalid_final_request_shapes() {
+    for args in [
+        vec!["agent", "runs", "create", "research", "--effort", "ultra"],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--effort",
+            "auto",
+            "--max-cost-dollars",
+            "5",
+            "--max-duration-seconds",
+            "300",
+        ],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--effort",
+            "ultra",
+            "--max-cost-dollars",
+            "20",
+            "--set",
+            "budget.maxDurationSeconds=299",
+        ],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--effort",
+            "ultra",
+            "--max-cost-dollars",
+            "20",
+            "--set",
+            "budget.maxDurationSeconds=10801",
+        ],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--effort",
+            "ultra",
+            "--max-cost-dollars",
+            "20",
+            "--set",
+            "budget.maxDurationSeconds=300.5",
+        ],
+        vec!["search", "research", "--latitude", "91", "--longitude", "0"],
+        vec![
+            "answer",
+            "research",
+            "--latitude",
+            "0",
+            "--longitude",
+            "181",
+        ],
+        vec![
+            "answer",
+            "research",
+            "--body",
+            r#"{"userLocation":{"latitude":40}}"#,
+        ],
+        vec![
+            "search",
+            "research",
+            "--body",
+            r#"{"userLocation":{"country":"US","extra":1}}"#,
+        ],
+        vec!["search", "research", "--set", "userLocation={}"],
+        vec![
+            "contents",
+            "https://example.com",
+            "--set",
+            "crawledBeforeDate=2026-10-01",
+            "--fresh",
+        ],
+        vec![
+            "search",
+            "research",
+            "--set",
+            "contents.crawledBeforeDate=2026-10-01",
+            "--type",
+            "deep",
+        ],
+        vec![
+            "contents",
+            "https://example.com",
+            "--set",
+            "crawledBeforeDate=2026-10-01",
+            "--snapshot-as-of",
+            "2026-10-02",
+        ],
+        vec![
+            "search",
+            "research",
+            "--set",
+            "contents.text.maxCharacters=1000001",
+        ],
+        vec![
+            "contents",
+            "https://example.com",
+            "--set",
+            "highlights.maxCharacters=1000001",
+        ],
+        vec![
+            "monitor",
+            "create",
+            "--query",
+            "research",
+            "--webhook-url",
+            "https://example.com/hook",
+            "--set",
+            "search.contents.highlights.maxCharacters=1000001",
+        ],
+    ] {
+        let mut args = args;
+        args.extend(["--dry-run", "--json"]);
+        let output = run(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty(), "{args:?}");
+        if let Some(set) = args
+            .iter()
+            .find(|arg| arg.ends_with("maxCharacters=1000001"))
+        {
+            let expected_field = set.split_once('=').unwrap().0;
+            let error = stderr_json(&output);
+            assert_eq!(error["error"]["code"], "invalid_value", "{args:?}: {error}");
+            assert_eq!(
+                error["error"]["details"]["field"], expected_field,
+                "{args:?}: {error}"
+            );
+        }
+    }
+    for command in ["search", "answer"] {
+        let output = run(&[
+            command,
+            "research",
+            "--latitude",
+            "40",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(1));
+        let country = run_ok_json(&[
+            command,
+            "research",
+            "--user-location",
+            "US",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(country["data"]["request"]["body"]["userLocation"], "US");
+        let object = run_ok_json(&[
+            command,
+            "research",
+            "--body",
+            r#"{"userLocation":{"country":"US"}}"#,
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(
+            object["data"]["request"]["body"]["userLocation"],
+            serde_json::json!({"country":"US"})
+        );
+    }
+}
+
+#[test]
+fn objective_limits_unicode_characters_without_restricting_search_type() {
+    let valid = "é".repeat(4096);
+    for kind in SEARCH_TYPE_VALUES {
+        let output = run_ok_json(&[
+            "search",
+            "research",
+            "--objective",
+            &valid,
+            "--type",
+            kind,
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(output["data"]["request"]["body"]["objective"], valid);
+    }
+    let invalid = format!("objective={}", "é".repeat(4097));
+    let output = run(&[
+        "search",
+        "research",
+        "--set",
+        &invalid,
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&output)["error"]["details"]["field"],
+        "objective"
+    );
+}
+
+#[test]
+fn websets_metadata_key_limit_is_scoped_to_supported_mutations() {
+    let invalid_metadata = serde_json::json!({"é".repeat(251): "value"}).to_string();
+    for args in [
+        vec!["websets", "create", "--query", "research", "--count", "1"],
+        vec!["websets", "update", "ws_1"],
+        vec![
+            "websets",
+            "enrichments",
+            "create",
+            "ws_1",
+            "--description",
+            "Find names",
+        ],
+        vec!["websets", "enrichments", "update", "ws_1", "enr_1"],
+        vec![
+            "websets", "searches", "create", "ws_1", "--query", "research", "--count", "1",
+        ],
+        vec![
+            "websets",
+            "imports",
+            "create",
+            "--source",
+            "csv",
+            "--body",
+            r#"{"size":1,"count":1,"entity":{"type":"company"}}"#,
+        ],
+        vec![
+            "websets",
+            "webhooks",
+            "create",
+            "--url",
+            "https://example.com/hook",
+            "--event",
+            "webset.created",
+        ],
+        vec!["websets", "webhooks", "update", "hook_1"],
+    ] {
+        let mut args = args;
+        let metadata_set = format!("metadata={invalid_metadata}");
+        args.extend(["--set", &metadata_set, "--dry-run", "--json"]);
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let error = stderr_json(&output);
+        assert_eq!(
+            error["error"]["details"]["field"], "metadata",
+            "{args:?}: {error}"
+        );
+    }
+    let enrichments = serde_json::json!([{"description":"Find names", "metadata":serde_json::from_str::<serde_json::Value>(&invalid_metadata).unwrap()}]);
+    let value_set = format!("enrichments={enrichments}");
+    let output = run(&[
+        "websets",
+        "create",
+        "--query",
+        "research",
+        "--count",
+        "1",
+        "--set",
+        &value_set,
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr_json(&output)["error"]["details"]["field"],
+        "enrichments[0].metadata"
+    );
+    let valid_metadata = serde_json::json!({"é".repeat(250): "value"}).to_string();
+    run_ok_json(&[
+        "websets",
+        "update",
+        "ws_1",
+        "--set",
+        &format!("metadata={valid_metadata}"),
+        "--dry-run",
+        "--json",
+    ]);
+    run_ok_json(&[
+        "agent",
+        "runs",
+        "create",
+        "research",
+        "--metadata",
+        &invalid_metadata,
+        "--dry-run",
+        "--json",
+    ]);
+}
+
+#[test]
+fn review_partial_presets_validate_the_effective_request() {
+    let dir = temp_path("review-partial-presets");
+    let file = dir.join("presets.toml");
+    fs::write(
+        &file,
+        r#"
+[presets.timed]
+command = "agent runs create"
+body = { effort = "ultra", budget = { maxDurationSeconds = 300 } }
+[presets.legacy]
+command = "agent runs create"
+body = { effort = "max", budget = { maxCostDollars = 5 } }
+[presets.location]
+command = "answer"
+body = { userLocation = { latitude = 12 } }
+[presets.badtype]
+command = "search"
+body = { numResults = "two" }
+"#,
+    )
+    .unwrap();
+    let envs = [
+        ("EXA_AGENT_PRESETS", file.to_str().unwrap()),
+        ("EXA_AGENT_NO_NETWORK", "1"),
+    ];
+    for args in [
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--preset",
+            "timed",
+            "--max-cost-dollars",
+            "20",
+        ],
+        vec![
+            "agent",
+            "runs",
+            "create",
+            "research",
+            "--preset",
+            "legacy",
+            "--effort",
+            "auto",
+            "--max-cost-dollars",
+            "5",
+        ],
+        vec![
+            "answer",
+            "research",
+            "--preset",
+            "location",
+            "--latitude",
+            "12",
+            "--longitude",
+            "34",
+        ],
+    ] {
+        let mut args = args;
+        args.extend(["--dry-run", "--json"]);
+        let output = run_with_env(&args, &envs);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let body = &value["data"]["request"]["body"];
+        if args.contains(&"timed") {
+            assert_eq!(
+                body["budget"],
+                serde_json::json!({"maxCostDollars":20.0,"maxDurationSeconds":300})
+            );
+        } else if args.contains(&"legacy") {
+            assert_eq!(body["effort"], "auto");
+        } else {
+            assert_eq!(
+                body["userLocation"],
+                serde_json::json!({"latitude":12.0,"longitude":34.0})
+            );
+        }
+    }
+    for args in [
+        vec!["agent", "runs", "create", "research", "--preset", "timed"],
+        vec!["answer", "research", "--preset", "location"],
+        vec![
+            "search",
+            "research",
+            "--preset",
+            "badtype",
+            "--num-results",
+            "2",
+        ],
+    ] {
+        let mut args = args;
+        args.extend(["--dry-run", "--json"]);
+        let output = run_with_env(&args, &envs);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn review_contents_schema_and_presets_accept_parent_properties() {
+    let body = r#"{"urls":["https://example.com"],"crawledBeforeDate":"2026-10-01"}"#;
+    let valid = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "contents",
+        "--body",
+        body,
+        "--json",
+    ]);
+    assert_eq!(valid["valid"], true, "{valid}");
+    let invalid = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "contents",
+        "--body",
+        r#"{"urls":["https://example.com"],"crawledBeforeDate":"2026-10-01","unknownNeighbor":true}"#,
+        "--json",
+    ]);
+    assert_eq!(invalid["valid"], false);
+    assert_eq!(invalid["details"]["field"], "unknownNeighbor");
+    let dir = temp_path("review-alias-preset");
+    let file = dir.join("presets.toml");
+    fs::write(
+        &file,
+        "[presets.snapshot]\ncommand = 'contents'\nbody = { crawledBeforeDate = '2026-10-01' }\n",
+    )
+    .unwrap();
+    let output = run_with_env(
+        &[
+            "contents",
+            "https://example.com",
+            "--preset",
+            "snapshot",
+            "--dry-run",
+            "--json",
+        ],
+        &[
+            ("EXA_AGENT_PRESETS", file.to_str().unwrap()),
+            ("EXA_AGENT_NO_NETWORK", "1"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn review_legacy_context_caps_apply_to_final_body_and_schema() {
+    for (args, field) in [
+        (vec!["contents", "https://example.com"], "context"),
+        (vec!["search", "research"], "context"),
+        (vec!["search", "research"], "contents.context"),
+        (vec!["similar", "https://example.com"], "contents.context"),
+        (
+            vec![
+                "monitor",
+                "create",
+                "--query",
+                "research",
+                "--webhook-url",
+                "https://example.com/hook",
+            ],
+            "search.contents.context",
+        ),
+        (
+            vec!["monitor", "update", "monitor_1"],
+            "search.contents.context",
+        ),
+    ] {
+        let set = format!("{field}.maxCharacters=1000001");
+        let mut invalid_args = args.clone();
+        invalid_args.extend(["--set", &set, "--dry-run", "--json"]);
+        let invalid = run(&invalid_args);
+        assert_eq!(invalid.status.code(), Some(1), "{invalid_args:?}");
+        assert_eq!(
+            stderr_json(&invalid)["error"]["details"]["field"],
+            format!("{field}.maxCharacters")
+        );
+        let valid_set = format!("{field}.maxCharacters=1000000");
+        let mut valid_args = args;
+        valid_args.extend(["--set", &valid_set, "--dry-run", "--json"]);
+        run_ok_json(&valid_args);
+    }
+    for (cap, expected) in [(0, false), (1000000, true), (1000001, false)] {
+        let body =
+            serde_json::json!({"urls":["https://example.com"],"context":{"maxCharacters":cap}})
+                .to_string();
+        let checked = run_ok_json(&[
+            "schema",
+            "validate-input",
+            "contents",
+            "--body",
+            &body,
+            "--json",
+        ]);
+        assert_eq!(checked["valid"], expected, "{checked}");
+    }
+}
+
+#[test]
+fn review_robot_docs_discover_agent_stop_warning_codes() {
+    let value = run_ok_json(&["robot-docs", "errors", "--json"]);
+    for code in ["budget_reached", "time_limit_reached"] {
+        let warning = value["warningCodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["code"] == code)
+            .expect("documented warning code");
+        assert_eq!(warning["exit"], 0);
+        assert!(!warning["description"].as_str().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn review_schema_rejects_effective_snapshot_alias_conflicts() {
+    let checked = run_ok_json(&[
+        "schema",
+        "validate-input",
+        "search",
+        "--body",
+        r#"{"query":"research","contents":{"crawledBeforeDate":"2026-10-01","maxAgeHours":0}}"#,
+        "--json",
+    ]);
+    assert_eq!(checked["valid"], false, "{checked}");
+    assert_eq!(checked["details"]["field"], "contents.crawledBeforeDate");
+    assert_eq!(
+        checked["details"]["conflictingField"],
+        "contents.maxAgeHours"
+    );
+}
+
+#[test]
+fn review_location_json_flags_match_body_and_capabilities() {
+    let location = r#"{"country":"US","latitude":40.5,"longitude":-73.2}"#;
+    for command in ["search", "answer"] {
+        let preview = run_ok_json(&[
+            command,
+            "research",
+            "--user-location",
+            location,
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(
+            preview["data"]["request"]["body"]["userLocation"],
+            serde_json::from_str::<serde_json::Value>(location).unwrap()
+        );
+        for invalid_location in ["true", "false", "123", "[]", "{bad"] {
+            let output = run(&[
+                command,
+                "research",
+                "--user-location",
+                invalid_location,
+                "--dry-run",
+                "--json",
+            ]);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{command}: {invalid_location}"
+            );
+        }
+        let coordinates = run_ok_json(&[
+            command,
+            "research",
+            "--user-location",
+            "null",
+            "--latitude",
+            "40",
+            "--longitude",
+            "-73",
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(
+            coordinates["data"]["request"]["body"]["userLocation"],
+            serde_json::json!({"latitude":40.0,"longitude":-73.0})
+        );
+        let capabilities = run_ok_json(&["capabilities", command, "--json"]);
+        let field = capabilities["command"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["flag"] == "user-location")
+            .unwrap();
+        assert_eq!(field["kind"], "json");
+        assert_eq!(field["valueName"], "COUNTRY|JSON");
+        let invalid = run(&[
+            command,
+            "research",
+            "--user-location",
+            r#"{"latitude":40}"#,
+            "--dry-run",
+            "--json",
+        ]);
+        assert_eq!(invalid.status.code(), Some(1));
+    }
+}
+
+#[test]
+fn review_monitor_content_caps_bind_the_intended_validation() {
+    for args in [
+        vec![
+            "monitor",
+            "create",
+            "--query",
+            "research",
+            "--webhook-url",
+            "https://example.com/hook",
+        ],
+        vec!["monitor", "update", "monitor_1"],
+    ] {
+        for option in ["text", "highlights"] {
+            let invalid_set = format!("search.contents.{option}.maxCharacters=1000001");
+            let mut invalid_args = args.clone();
+            invalid_args.extend(["--set", &invalid_set, "--dry-run", "--json"]);
+            let output = run(&invalid_args);
+            assert_eq!(output.status.code(), Some(1));
+            let error = stderr_json(&output);
+            assert_eq!(error["error"]["code"], "invalid_value");
+            assert_eq!(
+                error["error"]["details"]["field"],
+                format!("search.contents.{option}.maxCharacters")
+            );
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("1000000"));
+            let valid_set = format!("search.contents.{option}.maxCharacters=1000000");
+            let mut valid_args = args.clone();
+            valid_args.extend(["--set", &valid_set, "--dry-run", "--json"]);
+            let value = run_ok_json(&valid_args);
+            assert_eq!(
+                value["data"]["request"]["body"]["search"]["contents"][option]["maxCharacters"],
+                1000000
+            );
+        }
+    }
 }

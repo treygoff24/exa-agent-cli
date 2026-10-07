@@ -59,7 +59,7 @@ const MAX_CONTEXT_QUERY_CHARS: usize = 2_000;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 49_152;
 const DEFAULT_TEXT_MAX_CHARACTERS: u32 = 1_500;
 const DEFAULT_HIGHLIGHTS_MAX_CHARACTERS: u32 = 800;
-const MAX_HIGHLIGHTS_MAX_CHARACTERS: u32 = 10_000;
+const MAX_HIGHLIGHTS_MAX_CHARACTERS: u32 = 1_000_000;
 const SEARCH_OVERSIZED_DATA_WARNING_BYTES: usize = 10 * 1024;
 
 #[derive(Clone, Copy)]
@@ -2589,47 +2589,56 @@ fn build_agent_run_spec(
             "max-cost-dollars",
             args.max_cost_dollars.map(|value| value.to_string()),
         ),
+        (
+            "max-duration-seconds",
+            args.max_duration_seconds.map(|value| value.to_string()),
+        ),
         ("data-source", data_sources),
         ("metadata", metadata),
     ];
     let spec = build_typed_spec(op, &flag_values, globals)?;
-    validate_agent_run_budget(&spec.body, globals, &args.query)?;
+    if let Err(mut error) = validate_agent_run_budget(&spec.body, &args.query) {
+        if !globals.headers.is_empty()
+            || globals.profile.is_some()
+            || globals.base_url.is_some()
+            || globals.beta.is_some()
+        {
+            if let CliError::Usage(diag) = &mut error {
+                let details = diag
+                    .details
+                    .get_or_insert_with(|| Box::new(serde_json::json!({})));
+                details["recoveryContextRequired"] = serde_json::json!(true);
+                details["recoveryContextNote"] = serde_json::json!("Restore the original profile, base URL, beta, and custom headers before using this recovery preview.");
+            }
+        }
+        return Err(error);
+    }
     Ok(spec)
 }
 
-fn validate_agent_run_budget(
-    body: &serde_json::Value,
-    globals: &GlobalArgs,
-    query: &str,
-) -> Result<(), CliError> {
+fn validate_agent_run_budget(body: &serde_json::Value, query: &str) -> Result<(), CliError> {
     let effort = body.get("effort").and_then(serde_json::Value::as_str);
     let budget = body.get("budget");
-
     if effort == Some("max") {
-        let capped = budget
+        let cost = budget
             .and_then(|value| value.get("maxCostDollars"))
             .and_then(serde_json::Value::as_f64)
-            .is_some_and(|value| value.is_finite() && (1.0..=100.0).contains(&value));
-        if !capped {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "invalid_flag_combination",
-                    "`effort:max` requires an explicit budget.maxCostDollars cap from 1 to 100",
-                )
-                .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
-            ));
-        }
-        if !beta_opted_in(globals, AGENT_MAX_EFFORT_BETA)? {
-            return Err(CliError::Usage(
-                Diag::new(
-                    "invalid_flag_combination",
-                    "`effort:max` requires --beta agent-max-effort-2026-07-27",
-                )
-                .with_suggestion(agent_budget_suggestion(query, "max", 20.0, true)),
-            ));
-        }
+            .filter(|value| (1.0..=100.0).contains(value))
+            .unwrap_or(20.0);
+        return Err(CliError::Usage(Diag::new("invalid_value", "`effort:max` was replaced upstream by `ultra`; the preview changes effort and retains the final request fields")
+            .with_details(serde_json::json!({"field":"effort", "replacement":"ultra", "requestFieldsPreserved":true}))
+            .with_suggestion(agent_budget_suggestion(body, query, "ultra", cost))));
     }
-
+    if effort == Some("ultra")
+        && budget
+            .and_then(|value| value.get("maxCostDollars"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && (1.0..=100.0).contains(value))
+            .is_none()
+    {
+        return Err(CliError::Usage(Diag::new("invalid_flag_combination", "CLI safety policy: `effort:ultra` requires an explicit budget.maxCostDollars cap from 1 to 100")
+            .with_suggestion(agent_budget_suggestion(body, query, "ultra", 20.0))));
+    }
     let Some(budget) = budget else {
         return Ok(());
     };
@@ -2639,59 +2648,103 @@ fn validate_agent_run_budget(
                 "invalid_value",
                 "`budget` must be a JSON object with maxCostDollars",
             )
-            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+            .with_suggestion(agent_budget_suggestion(body, query, "auto", 20.0)),
         ));
     };
-    let Some(value) = object.get("maxCostDollars") else {
+    let Some(max_cost) = object
+        .get("maxCostDollars")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && (1.0..=100.0).contains(value))
+    else {
         return Err(CliError::Usage(
             Diag::new(
                 "invalid_value",
-                "`budget.maxCostDollars` is required when budget is present",
+                if object.contains_key("maxDurationSeconds") && effort != Some("ultra") {
+                    "Duration budgets require ultra effort and an explicit cost cap from 1 to 100; the preview retains the valid duration and adds the missing effort/cap"
+                } else { "`budget.maxCostDollars` must be a finite number between 1 and 100" },
             )
-            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
+            .with_suggestion(agent_budget_suggestion(
+                body,
+                query,
+                if object.contains_key("maxDurationSeconds") {
+                    "ultra"
+                } else {
+                    "auto"
+                },
+                20.0,
+            )),
         ));
     };
-    let Some(max_cost) = value.as_f64().filter(|value| value.is_finite()) else {
-        return Err(CliError::Usage(
-            Diag::new(
-                "invalid_value",
-                "`budget.maxCostDollars` must be a finite number",
-            )
-            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
-        ));
-    };
-    if !(1.0..=100.0).contains(&max_cost) {
-        return Err(CliError::Usage(
-            Diag::new(
-                "invalid_value",
-                "`budget.maxCostDollars` must be between 1 and 100",
-            )
-            .with_suggestion(agent_budget_suggestion(query, "auto", 20.0, false)),
-        ));
+    if let Some(duration) = object.get("maxDurationSeconds") {
+        if effort != Some("ultra")
+            || !duration
+                .as_u64()
+                .is_some_and(|value| (300..=10800).contains(&value))
+        {
+            return Err(CliError::Usage(Diag::new("invalid_value", "`budget.maxDurationSeconds` must be an integer from 300 to 10800 and is valid only with ultra effort; the preview selects ultra and retains valid request fields")
+                .with_details(serde_json::json!({"field":"budget.maxDurationSeconds", "replacementEffort":"ultra", "requestFieldsPreserved":true}))
+                .with_suggestion(agent_budget_suggestion(body, query, "ultra", max_cost))));
+        }
     }
     match effort {
-        None | Some("auto") | Some("max") => Ok(()),
+        None | Some("auto") | Some("ultra") => Ok(()),
         Some(other) => Err(CliError::Usage(
             Diag::new(
                 "invalid_flag_combination",
-                format!("budget is only valid with omitted, auto, or max effort; got `{other}`"),
+                format!("budget is only valid with omitted, auto, or ultra effort; got `{other}`"),
             )
-            .with_suggestion(agent_budget_suggestion(query, "auto", max_cost, false)),
+            .with_suggestion(agent_budget_suggestion(body, query, "auto", max_cost)),
         )),
     }
 }
 
-fn agent_budget_suggestion(query: &str, effort: &str, max_cost: f64, beta: bool) -> String {
-    let mut command = format!(
-        "exa-agent agent runs create {} --effort {effort} --max-cost-dollars {}",
-        shell_quote(query),
-        format_agent_cost(max_cost)
-    );
-    if beta {
-        command.push_str(" --beta agent-max-effort-2026-07-27");
+fn agent_budget_suggestion(
+    body: &serde_json::Value,
+    fallback_query: &str,
+    effort: &str,
+    max_cost: f64,
+) -> String {
+    let query = body
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback_query);
+    let mut corrected = body.clone();
+    corrected["query"] = serde_json::json!(query);
+    corrected["effort"] = serde_json::json!(effort);
+    if !corrected["budget"].is_object() {
+        corrected["budget"] = serde_json::json!({});
     }
-    command.push_str(" --dry-run --print-request");
-    command
+    if !corrected["budget"]["maxCostDollars"]
+        .as_f64()
+        .is_some_and(|value| value.is_finite() && (1.0..=100.0).contains(&value))
+    {
+        corrected["budget"]["maxCostDollars"] = serde_json::json!(max_cost);
+    }
+    if let Some(duration) = corrected["budget"].get("maxDurationSeconds") {
+        if !duration
+            .as_u64()
+            .is_some_and(|value| (300..=10800).contains(&value))
+        {
+            corrected["budget"]["maxDurationSeconds"] =
+                serde_json::json!(duration.as_u64().unwrap_or(300).clamp(300, 10800));
+        }
+    }
+    // Keep simple repairs short; rich requests retain every final body field in the preview.
+    if corrected
+        .as_object()
+        .is_some_and(|object| object.len() == 3)
+        && corrected["budget"]
+            .as_object()
+            .is_some_and(|object| object.len() == 1)
+    {
+        format!("exa-agent agent runs create --effort {effort} --max-cost-dollars {} --dry-run --print-request -- {}", format_agent_cost(corrected["budget"]["maxCostDollars"].as_f64().expect("corrected finite cost cap")), shell_quote(query))
+    } else {
+        format!(
+            "exa-agent agent runs create --body {} --dry-run --print-request -- {}",
+            shell_quote(&corrected.to_string()),
+            shell_quote(query)
+        )
+    }
 }
 
 fn format_agent_cost(value: f64) -> String {
@@ -2701,10 +2754,6 @@ fn format_agent_cost(value: f64) -> String {
         value.to_string()
     }
 }
-
-/// The beta opt-in `POST /agent/runs/{id}/stop` and `effort: max` both require. The vendored
-/// spec names it in prose only, so `tests/spec_drift.rs` pins this copy against the spec.
-pub const AGENT_MAX_EFFORT_BETA: &str = "agent-max-effort-2026-07-27";
 
 fn beta_has_token(raw: Option<&str>, token: &str) -> bool {
     raw.is_some_and(|raw| raw.split(',').any(|part| part.trim() == token))
@@ -2960,8 +3009,7 @@ fn agent_runs_events_headers(args: &AgentRunsEventsArgs) -> Vec<(String, String)
 }
 
 fn dispatch_agent_runs_stop(id: &str, globals: &GlobalArgs, pretty: bool) -> Result<i32, CliError> {
-    let globals = globals_with_required_beta(globals, AGENT_MAX_EFFORT_BETA)?;
-    dispatch_id_command(&["agent", "runs", "stop"], id, &globals, pretty)
+    dispatch_id_command(&["agent", "runs", "stop"], id, globals, pretty)
 }
 
 /// Operations whose replay is not provably safe, so `--retry` never applies. The Exa spec
@@ -5845,7 +5893,7 @@ fn normalize_highlights_flag(raw: &str, query: &str) -> Result<String, CliError>
                     CliError::Usage(
                         Diag::new(
                             "invalid_value",
-                            "`--highlights` must be a character cap from 1 to 10000 or a JSON options object (inline or @file)",
+                            "`--highlights` must be a character cap from 1 to 1000000 or a JSON options object (inline or @file)",
                         )
                         .with_details(serde_json::json!({
                             "received": raw,
@@ -5918,6 +5966,32 @@ fn read_highlights_options(raw: &str) -> Result<String, CliError> {
     Ok(value.to_string())
 }
 
+/// Presets supply defaults; effective constraints are checked after explicit input is merged.
+/// Still reject malformed modeled types and unknown keys in the stored preset itself.
+fn validate_preset_structure(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+) -> Result<(), CliError> {
+    let issue = op
+        .fields
+        .iter()
+        .filter(|field| field.request_location == registry::RequestLocation::Body)
+        .find_map(|field| {
+            body_value_at_path(body, field.body_path)
+                .and_then(|value| validate_field_kind(field, value))
+        })
+        .or_else(|| unknown_body_fields_issue(op, body));
+    if let Some(issue) = issue {
+        return Err(registry_validation_error(ValidateInputOutcome {
+            valid: serde_json::Value::Bool(false),
+            details: Some(issue),
+            suggested_command: Some(format!("exa-agent {} --help", op.command())),
+            note: None,
+        }));
+    }
+    Ok(())
+}
+
 fn build_typed_spec(
     op: &'static registry::OperationDef,
     flag_values: &[(&str, Option<String>)],
@@ -5937,10 +6011,7 @@ fn build_typed_spec(
     )?;
     if let Some(name) = globals.preset.as_deref() {
         let preset = presets::get_preset(name, &op.command())?;
-        let validation = validate_registry_body(op, &preset.body, false, true);
-        if validation.valid == serde_json::Value::Bool(false) {
-            return Err(registry_validation_error(validation));
-        }
+        validate_preset_structure(op, &preset.body)?;
         let mut body = preset.body;
         request::deep_merge(&mut body, spec.body);
         spec.body = body;
@@ -5969,6 +6040,19 @@ fn validate_content_freshness_conflicts(
             "because `livecrawl` is deprecated; use `maxAgeHours` alone",
         ));
     }
+    let alias_path = format!("{content_prefix}crawledBeforeDate");
+    let snapshot_path = if body_field_present(body, snapshot_path) {
+        if body_field_present(body, &alias_path) {
+            return Err(option_conflict(
+                snapshot_path,
+                &alias_path,
+                "because both select a historical snapshot",
+            ));
+        }
+        snapshot_path
+    } else {
+        alias_path.as_str()
+    };
     if !body_field_present(body, snapshot_path) {
         return Ok(());
     }
@@ -8268,7 +8352,7 @@ fn typed_command_warnings(op: &'static registry::OperationDef) -> Vec<serde_json
     if op.operation_id == "context" {
         return vec![serde_json::json!({
             "code": "undocumented_upstream",
-            "message": "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.",
+            "message": "The upstream route `/context` for `context` is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it is retained for compatibility and may change or disappear.",
         })];
     }
     if !op.deprecated {
@@ -8416,32 +8500,38 @@ fn append_response_warnings(
 }
 
 fn append_agent_budget_warning(data: &serde_json::Value, warnings: &mut Vec<serde_json::Value>) {
-    let count = count_budget_reached(data);
-    if count == 0 {
-        return;
+    for reason in ["budget_reached", "time_limit_reached"] {
+        let count = count_agent_stop_reason(data, reason);
+        if count == 0 {
+            continue;
+        }
+        let warning = serde_json::json!({
+            "code": reason,
+            "message": format!("{count} agent run record(s) stopped because the {} cap was reached", if reason == "budget_reached" { "cost" } else { "time" }),
+            "details": {"stopReason": reason, "count": count},
+        });
+        warnings.push(warning);
     }
-    warnings.push(serde_json::json!({
-        "code": "budget_reached",
-        "message": if count == 1 {
-            "agent run stopped because its budget cap was reached".to_string()
-        } else {
-            format!("{count} agent run records stopped because their budget cap was reached")
-        },
-        "details": {"stopReason": "budget_reached", "count": count},
-    }));
 }
 
-fn count_budget_reached(value: &serde_json::Value) -> u64 {
+fn count_agent_stop_reason(value: &serde_json::Value, reason: &str) -> u64 {
     match value {
         serde_json::Value::Object(fields) => {
             let here = fields
                 .get("stopReason")
                 .or_else(|| fields.get("stop_reason"))
                 .and_then(serde_json::Value::as_str)
-                == Some("budget_reached");
-            u64::from(here) + fields.values().map(count_budget_reached).sum::<u64>()
+                == Some(reason);
+            u64::from(here)
+                + fields
+                    .values()
+                    .map(|value| count_agent_stop_reason(value, reason))
+                    .sum::<u64>()
         }
-        serde_json::Value::Array(items) => items.iter().map(count_budget_reached).sum(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|value| count_agent_stop_reason(value, reason))
+            .sum(),
         _ => 0,
     }
 }
@@ -8497,7 +8587,7 @@ fn append_contents_content_warnings(
             ),
             "pdf_unextracted" => (
                 "upstream returned a PDF without extracted text; no trustworthy raw PDF bytes were available for local pdftotext recovery",
-                parallel_extract_command(target),
+                if !uses_ids && is_government_source(target) { firecrawl_scrape_command(target) } else { parallel_extract_command(target) },
             ),
             _ => (
                 "upstream returned an empty content row instead of usable text",
@@ -8515,7 +8605,7 @@ fn append_contents_content_warnings(
 
 fn contents_content_fallback(target: &str, uses_ids: bool) -> String {
     if !uses_ids && is_government_source(target) {
-        parallel_extract_command(target)
+        firecrawl_scrape_command(target)
     } else {
         format!(
             "exa-agent contents {}{} --fresh --text full --json",
@@ -8523,6 +8613,10 @@ fn contents_content_fallback(target: &str, uses_ids: bool) -> String {
             shell_quote(target)
         )
     }
+}
+
+fn firecrawl_scrape_command(target: &str) -> String {
+    format!("firecrawl scrape {} --max-age 0", shell_quote(target))
 }
 
 fn parallel_extract_command(target: &str) -> String {
@@ -8714,10 +8808,10 @@ fn contents_status_suggested_command(entry: &serde_json::Value, uses_ids: bool) 
         .get("id")
         .or_else(|| entry.get("url"))
         .and_then(serde_json::Value::as_str)?;
-    if !uses_ids
-        && (contents_status_reason(entry) == Some("CRAWL_UNKNOWN_ERROR")
-            || is_government_source(target))
-    {
+    if !uses_ids && is_government_source(target) {
+        return Some(firecrawl_scrape_command(target));
+    }
+    if !uses_ids && contents_status_reason(entry) == Some("CRAWL_UNKNOWN_ERROR") {
         return Some(parallel_extract_command(target));
     }
     if contents_status_reason(entry).is_none() {
@@ -9009,7 +9103,7 @@ fn dispatch_schema(sub: &SchemaCmd, globals: &GlobalArgs, pretty: bool) -> Resul
                 )
             })?;
             let body = read_validate_input_body(globals)?;
-            let validation = validate_registry_body(op, &body, true, true);
+            let validation = validate_registry_body(op, &body, true);
             emit_document(
                 &serde_json::json!({
                     "schema": "exa.cli.schema_validate_input.v1",
@@ -9144,6 +9238,7 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
         "Search",
         &[
             "Set result count with `--num-results`; search is not cursor-paginated.",
+            "Use search `--objective TEXT` for a broader goal independent of search type (maximum 4096 Unicode characters). Search and answer accept `--user-location COUNTRY|JSON`, or paired `--latitude N --longitude N` within -90..90 and -180..180, optionally with a country. Country-only requests retain their string form; coordinates produce a location object.",
             "Use the named rich-input controls: search/answer `--output-schema JSON|@file`, search/answer/agent runs create `--system-prompt TEXT|@file`, and contents `--highlights [QUERY|JSON|@file]`.",
             "Search returns query-aware 800-character highlights by default; use `--no-highlights` for metadata only, or `--text 1500` instead of `--text full` for capped triage text. `--highlights` accepts a character cap or `JSON|@file`; for a shared context budget use `--highlights '{\"dynamic\":true,\"verbosity\":\"medium\"}' --beta dynamic-highlights-2026-08-28`, omitting `maxCharacters` and `numSentences` with `verbosity`.",
             "`search --stream` requests SSE for synthesized output. Without a final non-null `outputSchema`, upstream returns normal JSON and the envelope warns with `stream_ignored`; `--body`/`--set` overrides determine the final request.",
@@ -9158,29 +9253,30 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
         "Contents and freshness",
         &[
             "Content retrieval is cache-first by default. Use `--fresh` for latest or current material, `--cache-only` to forbid live fetching, `--max-age-hours N` for an explicit freshness window, and `--livecrawl-timeout MS` to bound live crawling.",
-            "Retrieve the newest stored page version as of an instant with `--snapshot-as-of YYYY-MM-DD` or an RFC 3339 date-time. Snapshot cannot be combined with live-web, freshness-window, or subpage options.",
-            "Pass URLs positionally or with `--ids`, for example `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; `--text` accepts a bare flag, `full`, or a numeric cap from 1 through 10000.",
+            "Retrieve the newest stored page version as of an instant with `--snapshot-as-of YYYY-MM-DD` or an RFC 3339 date-time. Snapshot cannot be combined with live-web, freshness-window, or subpage options. The deprecated body alias `crawledBeforeDate` follows the same conflicts; prefer `snapshotAsOf`.",
+            "Pass URLs positionally or with `--ids`, for example `exa-agent contents \"https://exa.ai\" \"https://docs.exa.ai\" --text 10000 --json`; `--text` accepts a bare flag, `full`, or a numeric cap from 1 through 1000000.",
             "Use `contents --chunk-size N --jobs J` for 1-16 workers (default 1); an explicit `--jobs` requires `--chunk-size`.",
             "Multi-chunk stream bodies are rejected before sending; admitted results stay in input order, drain after failure, and stop before new rounds. `--output` retains every successful rendering with one confirmation; JSON is a sequence of envelopes, and NDJSON keeps records and summaries.",
             "Contents/fetch and answer/ask live success envelopes add text-aware `outcome` and `contentDiagnostics`. Empty, binary, and unextracted-PDF rows are unusable; zero usable contents rows produce `no_content`, while all-URL crawl failures still exit 10.",
+            "For government pages without usable content, the fallback is `firecrawl scrape URL --max-age 0`; fetch full authoritative text before quoting or editing it.",
             "Use Exa as the fast default; for `no_content` or `partial` sources, follow `warnings` and `nextActions` (their `suggestedCommand` names the exact fallback fetch; copy it rather than improvising) or fetch the URL with another tool. Authority-critical text must come from a crawl that returned it, including for uscode.house.gov, govinfo.gov, eCFR, Congress.gov, and agency sites.",
             "Empty contents error objects use `upstream_reason_unavailable` and suggest retrying or directly fetching the quoted URL.",
-            "The standalone `/context` route works but is undocumented and absent from the official Exa SDKs; it may change or be removed without notice.",
+            "The standalone `/context` route is retained as an undocumented compatibility route absent from the official Exa SDKs; it may change or disappear.",
         ],
     ),
     (
         "Answer",
         &[
-            "Set `answer --model` to `exa`, `exa-pro`, `exa-research`, or `exa-fast`, and pass a country code with `--user-location`; `--body` and `--set` override named flags.",
+            "Set `answer --model` to `exa`, `exa-pro`, `exa-research`, or `exa-fast`, and pass a country code or JSON location with `--user-location`; `--body` and `--set` override named flags.",
             "Use `answer` to identify sources, then `contents` to read exact page text: `exa-agent answer \"<question>\" --json`, followed by `exa-agent contents <url> --text full --json`. Answer summarizes rather than retrieving full page bodies such as changelogs or release notes, so exact wording must come from contents.",
         ],
     ),
     (
         "Agent runs",
         &[
-            "`agent --data-source` accepts `fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`, `particle`, `jinko`, and `polymarket` case-insensitively (max 5) and sends canonical spellings. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; `--body`/`--set` values pass through unchanged.",
-            "`agent --max-cost-dollars` maps `budget.maxCostDollars` and is valid only with omitted, `auto`, or `max` effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; `stopReason` `budget_reached` emits a warning.",
-            "Finish a max-effort run early with its gathered results by running `agent runs stop ID --yes`; the command adds its required beta token. Unlike cancellation, stop returns partial work and charges accrued usage.",
+            "`agent --data-source` accepts `fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`, `particle`, `jinko`, `polymarket`, and `macrobond` case-insensitively (max 5) and sends canonical spellings. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; `--body`/`--set` values pass through unchanged.",
+            "`agent --max-cost-dollars` maps `budget.maxCostDollars` and is valid only with omitted, `auto`, or `ultra` effort. Typed-command CLI safety policy requires an explicit 1..100 dollar cap for ultra; raw remains pass-through. `--max-duration-seconds` is a soft wall-clock limit of 300..10800 seconds, ultra only; upstream stops starting work as the limit approaches. It is separate from the local request timeout. Old max effort returns a migration preview preserving the final request body; no beta is required. Reapply original profile/base URL/header context when `recoveryContextRequired` is set. `budget_reached` and `time_limit_reached` emit success warnings.",
+            "Finish an ultra-effort run early with its gathered results by running `agent runs stop ID --yes`; no beta token is required. Unlike cancellation, stop returns partial work and charges accrued usage.",
         ],
     ),
     (
@@ -9200,6 +9296,7 @@ const GUIDE_SECTIONS: &[(&str, &[&str])] = &[
     (
         "Websets",
         &[
+            "Metadata keys on supported Websets mutations are limited to 250 Unicode characters, including nested enrichment metadata. This limit does not apply to Agent or batch metadata.",
             "Include a Webset's items with `exa-agent websets get WEBSET --expand items`.",
             "Create an import, then use the upload PUT template in its returned `nextActions`; `websets imports create` accepts neither `--csv` nor `--url`.",
         ],
@@ -9262,6 +9359,8 @@ fn dispatch_robot_docs(
                 }).collect::<Vec<_>>(),
                 "errorCodes": error_codes_json(),
                 "warningCodes": [
+                    {"code":"budget_reached", "exit":0, "description":"Agent run returned gathered results after reaching its cost cap; inspect returned data for completeness"},
+                    {"code":"time_limit_reached", "exit":0, "description":"Agent run returned gathered results after approaching its soft duration limit; inspect returned data for completeness"},
                     {
                         "code": "stream_ignored",
                         "exit": 0,
@@ -9408,16 +9507,15 @@ fn validate_registry_input(
     op: &registry::OperationDef,
     body: &serde_json::Value,
 ) -> ValidateInputOutcome {
-    validate_registry_body(op, body, true, false)
+    validate_registry_body(op, body, false)
 }
 
 fn validate_registry_body(
     op: &registry::OperationDef,
     body: &serde_json::Value,
-    require_required: bool,
     check_unknown: bool,
 ) -> ValidateInputOutcome {
-    if op.command() == "batches create" && require_required {
+    if op.command() == "batches create" {
         if let Err(error) = batches::validate_create_body(body) {
             let diag = error.diag();
             let mut details = diag
@@ -9435,6 +9533,14 @@ fn validate_registry_body(
             };
         }
     }
+    if let Some(issue) = request_contract_issue(op, body) {
+        return ValidateInputOutcome {
+            valid: serde_json::Value::Bool(false),
+            details: Some(issue),
+            suggested_command: Some(format!("exa-agent {} --help", op.command())),
+            note: None,
+        };
+    }
     if op.fields.is_empty() {
         return ValidateInputOutcome {
             valid: serde_json::Value::Null,
@@ -9447,23 +9553,44 @@ fn validate_registry_body(
         };
     }
 
-    if require_required {
-        for field in op.fields {
-            if field.request_location == registry::RequestLocation::Body
-                && field.required
-                && !body_field_present(body, field.body_path)
-            {
-                return ValidateInputOutcome {
-                    valid: serde_json::Value::Bool(false),
-                    details: Some(serde_json::json!({
-                        "issue": "missing_required_field",
-                        "field": field.body_path,
-                        "flag": field.flag,
-                    })),
-                    suggested_command: Some(suggested_validate_input_command(op, body, field)),
-                    note: None,
-                };
-            }
+    for field in op.fields {
+        if field.request_location == registry::RequestLocation::Body
+            && field.required
+            && !body_field_present(body, field.body_path)
+        {
+            return ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(serde_json::json!({
+                    "issue": "missing_required_field",
+                    "field": field.body_path,
+                    "flag": field.flag,
+                })),
+                suggested_command: Some(suggested_validate_input_command(op, body, field)),
+                note: None,
+            };
+        }
+    }
+
+    if op.command() == "agent runs create" {
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("your query");
+        if let Err(error) = validate_agent_run_budget(body, query) {
+            let diag = error.diag();
+            let mut details = diag
+                .details
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"field":"budget"}));
+            details["issue"] = serde_json::json!(diag.code);
+            details["message"] = serde_json::json!(diag.message);
+            return ValidateInputOutcome {
+                valid: serde_json::Value::Bool(false),
+                details: Some(details),
+                suggested_command: diag.suggested_command.clone(),
+                note: None,
+            };
         }
     }
 
@@ -9563,6 +9690,22 @@ fn validate_registry_body(
         }
     }
 
+    if let Err(error) = validate_content_freshness_conflicts(op, body) {
+        let diag = error.diag();
+        let mut details = diag
+            .details
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        details["issue"] = serde_json::json!(diag.code);
+        details["message"] = serde_json::json!(diag.message);
+        return ValidateInputOutcome {
+            valid: serde_json::Value::Bool(false),
+            details: Some(details),
+            suggested_command: diag.suggested_command.clone(),
+            note: None,
+        };
+    }
     if check_unknown {
         if let Some(issue) = unknown_body_fields_issue(op, body) {
             return ValidateInputOutcome {
@@ -9696,10 +9839,132 @@ fn is_known_body_path(path: &str, concrete: &[&str], free: &[&str]) -> bool {
         || is_free_body_path(path, free)
 }
 
+fn request_contract_issue(
+    op: &registry::OperationDef,
+    body: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let issue = |field: &str, message: &str| serde_json::json!({"issue":"invalid_value", "field":field, "message":message});
+    if op.command() == "search" {
+        if let Some(objective) = body.get("objective").filter(|value| !value.is_null()) {
+            if !objective
+                .as_str()
+                .is_some_and(|value| value.chars().count() <= 4096)
+            {
+                return Some(issue(
+                    "objective",
+                    "objective must be a string of at most 4096 characters or null",
+                ));
+            }
+        }
+    }
+    if matches!(op.command().as_str(), "search" | "answer") {
+        if let Some(location) = body
+            .get("userLocation")
+            .filter(|value| !value.is_null() && !value.is_string())
+        {
+            let Some(object) = location.as_object() else {
+                return Some(issue(
+                    "userLocation",
+                    "userLocation must be a country string or location object",
+                ));
+            };
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "country" | "latitude" | "longitude"))
+            {
+                return Some(issue(
+                    "userLocation",
+                    "userLocation allows only country, latitude, and longitude",
+                ));
+            }
+            if object
+                .get("country")
+                .is_some_and(|value| !value.is_string())
+            {
+                return Some(issue("userLocation.country", "country must be a string"));
+            }
+            let latitude = object.get("latitude");
+            let longitude = object.get("longitude");
+            if latitude.is_some() || longitude.is_some() {
+                if !latitude
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|value| value.is_finite() && (-90.0..=90.0).contains(&value))
+                    || !longitude
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|value| value.is_finite() && (-180.0..=180.0).contains(&value))
+                {
+                    return Some(issue("userLocation", "latitude and longitude must be supplied together as finite numbers in -90..90 and -180..180"));
+                }
+            } else if !object.contains_key("country") {
+                return Some(issue(
+                    "userLocation",
+                    "userLocation requires country or paired latitude and longitude",
+                ));
+            }
+        }
+    }
+    // Only these Websets mutation schemas carry the metadata propertyNames constraint.
+    if matches!(
+        op.operation_id,
+        "imports-create"
+            | "webhooks-create"
+            | "webhooks-update"
+            | "websets-create"
+            | "websets-update"
+            | "websets-enrichments-create"
+            | "websets-enrichments-update"
+            | "websets-searches-create"
+    ) {
+        let mut metadata = vec![("metadata".to_string(), body.get("metadata"))];
+        if op.operation_id == "websets-create" {
+            if let Some(enrichments) = body
+                .get("enrichments")
+                .and_then(serde_json::Value::as_array)
+            {
+                for (index, enrichment) in enrichments.iter().enumerate() {
+                    metadata.push((
+                        format!("enrichments[{index}].metadata"),
+                        enrichment.get("metadata"),
+                    ));
+                }
+            }
+        }
+        for (field, value) in metadata {
+            if value
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|object| object.keys().any(|key| key.chars().count() > 250))
+            {
+                return Some(issue(
+                    &field,
+                    "Websets metadata keys must be at most 250 characters",
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn content_option_shape_issue(
     op: &registry::OperationDef,
     body: &serde_json::Value,
 ) -> Option<serde_json::Value> {
+    let context_paths: &[&str] = match op.command().as_str() {
+        "search" => &["context", "contents.context"],
+        "similar" => &["contents.context"],
+        "contents" => &["context"],
+        "monitor create" | "monitor update" => &["search.contents.context"],
+        _ => &[],
+    };
+    for field in context_paths {
+        if let Some(issue) = validate_text_option_shape(
+            body_value_at_path(body, field),
+            field,
+            "set",
+            (1, 1_000_000),
+        ) {
+            return Some(issue);
+        }
+    }
     match op.command().as_str() {
         "search" | "similar" => validate_text_option_shape(
             body_value_at_path(body, "contents.text"),
@@ -9727,11 +9992,19 @@ fn content_option_shape_issue(
                 "highlights",
             )
         }),
-        "monitor create" | "monitor update" => validate_highlights_option_shape(
-            body_value_at_path(body, "search.contents.highlights"),
-            "search.contents.highlights",
-            "highlights",
-        ),
+        "monitor create" | "monitor update" => validate_text_option_shape(
+            body_value_at_path(body, "search.contents.text"),
+            "search.contents.text",
+            "text",
+            (1, 1_000_000),
+        )
+        .or_else(|| {
+            validate_highlights_option_shape(
+                body_value_at_path(body, "search.contents.highlights"),
+                "search.contents.highlights",
+                "highlights",
+            )
+        }),
         _ => None,
     }
 }
@@ -9750,7 +10023,10 @@ fn validate_text_option_shape(
         return Some(content_option_type_issue(
             field,
             flag,
-            "boolean or text options object",
+            &format!(
+                "boolean or {} options object",
+                field.rsplit('.').next().unwrap_or(field)
+            ),
             value,
         ));
     };
@@ -9869,7 +10145,7 @@ fn validate_highlights_option_shape(
         "maxCharacters",
         flag,
         1,
-        Some(10_000),
+        Some(1_000_000),
     )
 }
 
@@ -12452,6 +12728,10 @@ mod tests {
     fn pilot_into_flag_values_match_previous_hand_mappers() {
         assert_eq!(
             SearchArgs {
+                objective: None,
+                user_location: None,
+                latitude: None,
+                longitude: None,
                 query: "rust cli".into(),
                 output_schema: None,
                 stream: false,
@@ -12475,6 +12755,10 @@ mod tests {
             .into_flag_values(),
             vec![
                 ("query", Some("rust cli".to_string())),
+                ("objective", None),
+                ("user-location", None),
+                ("latitude", None),
+                ("longitude", None),
                 ("output-schema", None),
                 ("stream", None),
                 ("system-prompt", None),
@@ -12607,6 +12891,8 @@ mod tests {
                 ("stream", None),
                 ("model", None),
                 ("user-location", None),
+                ("latitude", None),
+                ("longitude", None),
             ]
         );
     }
@@ -12629,6 +12915,10 @@ mod tests {
         assert_eq!(
             flag_keys(
                 &SearchArgs {
+                    objective: None,
+                    user_location: None,
+                    latitude: None,
+                    longitude: None,
                     query: "q".into(),
                     output_schema: None,
                     stream: false,

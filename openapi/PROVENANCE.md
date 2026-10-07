@@ -35,6 +35,7 @@ the research copy and is identical — there is no newer published version; "sta
 |---|---|---|
 | `POST /context` (Exa Code) | **overlay-defined** typed command (`exa-agent context`) | `overlay.toml` → `[operations."context"]` |
 | `POST /chat/completions`, `POST /responses` (OpenAI-compat) | **raw-only** in v1 (D16) | `exa-agent raw POST /chat/completions --body @…` |
+| `/agent/monitors` and related entities, changes, and backtest routes | **omitted from the typed surface**: SDK-only beta, absent from the public spec and reference index as of 2026-10-07 | Raw access requires an independently verified request contract and beta context; stable monitors and Websets remain typed |
 
 ## Payment access modes
 

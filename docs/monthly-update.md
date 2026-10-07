@@ -11,12 +11,16 @@ live.
   `openapi/team-management.json` (Team Management API); provenance and
   source hashes in `openapi/provenance.toml`, narrative in
   `openapi/PROVENANCE.md`; typed-surface overrides in `openapi/overlay.toml`.
-- Re-vendor: `cargo xtask vendor-spec --check` (compare only), then
-  `cargo xtask vendor-spec` (write). Rust-only since 0.7.0; no Ruby needed.
-- Withdrawn or added routes show up in the Exa docs (docs.exa.ai changelog
-  and API reference) and the official SDKs (`exa-js`, `exa-py` on GitHub),
-  not in the spec diff. Read those every cycle; `/context` and the retired
-  Websets routes were caught this way in 2026-09.
+- Offline identity/provenance check: `cargo xtask vendor-spec --check` checks
+  committed specs, hashes, and overlay; it does not fetch or detect upstream
+  drift. Audit fresh copies from `https://exa.ai/docs/exa-spec.json` and
+  `https://exa.ai/docs/team-management-spec.yaml` before re-vendoring with
+  `cargo xtask vendor-spec` (live fetch and tracked writes). Rust-only since
+  0.7.0; no Ruby needed.
+- Read `exa.ai/docs/changelog`, the API reference, and official SDKs (`exa-js`,
+  `exa-py` on GitHub) every cycle. Added or withdrawn routes may precede or be
+  absent from the public spec diff; `/context` and retired Websets routes were
+  caught this way in 2026-09.
 - Papercut search: `papercuts list --all --status open --format md
   --limit 300`, then filter text for `exa-agent`, `exa`, `EXA_API_KEY`;
   tags in use are `exa-agent`, `research`, `research-tools`.
@@ -24,7 +28,8 @@ live.
 ## Build and gate
 
 - Full gate: `EXA_AGENT_NO_NETWORK=1 cargo xtask ci` (fmt, clippy `-D
-  warnings`, tests; 672 tests across 29 suites after `exa-wl1`).
+  warnings`, tests). The coordinator runs it once on the integrated candidate;
+  worker lanes stop at targeted checks through `testrun`.
 - On the devbox cell, build output must live in this repo's managed cache
   directory: `export CARGO_TARGET_DIR="$(estate-build-cache path)"` (a
   per-repo path under `~/.cache/cargo-targets/managed-v1/`; the `rustc-gate`

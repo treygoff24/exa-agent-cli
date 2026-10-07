@@ -376,17 +376,16 @@ fn repeated_beta_headers_collapse_into_one_deduplicated_header() {
     assert_eq!(wire_headers(&request)["exa-beta"], "alpha,bravo,charlie");
 }
 
-/// The `effort: max` gate reads the same two sources the wire header is built from, so opting in
-/// through `--header` is accepted without also passing `--beta`.
+/// Caller beta headers are preserved on stable ultra requests.
 #[test]
-fn effort_max_accepts_the_beta_opt_in_supplied_through_a_header() {
+fn effort_ultra_preserves_caller_beta_header() {
     let preview = command(&[
         "agent",
         "runs",
         "create",
         "map the market",
         "--effort",
-        "max",
+        "ultra",
         "--max-cost-dollars",
         "5",
         "--header",

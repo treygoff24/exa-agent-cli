@@ -1,7 +1,7 @@
 # v2 Commands & Flags
 
 Date: 2026-06-29
-Status: design reference for the `exa-agent` command tree and flag taxonomy. Carries [`work/research/lane-e-cli-taxonomy.md`](../../work/research/lane-e-cli-taxonomy.md) forward under the v2 decisions. Output shape, exit codes, envelopes, pagination, batch, and streaming are owned by [`contracts.md`](contracts.md) and are referenced, not restated. Locked product decisions live in [`decisions.md`](decisions.md) (D1–D22) and win on any conflict.
+Status: design reference for the `exa-agent` command tree and flag taxonomy. Output shape, exit codes, envelopes, pagination, batch, and streaming are owned by [`contracts.md`](contracts.md) and are referenced, not restated. Locked product decisions live in [`decisions.md`](decisions.md) and win on any conflict.
 
 Binary/command name is `exa-agent` everywhere (D2). Crate is `exa-agent-cli`. Default output is **auto** (D3): JSON envelope when stdout is not a TTY, human when it is — so the agent-shaped examples below omit `--json` and still get parseable output.
 
@@ -126,7 +126,7 @@ exa-agent
 
 Macros `ask` and `fetch` are top-level (§6); `describe` is a documented alias of `capabilities`. The configurable preset/macro registry (`preset show`, `macro show`) is **deferred** post-v1 (D12).
 
-Approximate size: ~20 top-level namespaces, ~100 leaf commands.
+Current registry: 71 commands; use `exa-agent capabilities --json` for the exact running surface.
 
 ### Why this shape (unchanged from lane-e)
 
@@ -274,7 +274,7 @@ Default with no flag is **auto** (D3): JSON when piped, human in a TTY. Preceden
 Normalization happens at the parse boundary and in post-parse coercion so the rest of the program sees canonical values (design-principle "Input forgiveness"; architecture §6):
 
 - **Enums are case-insensitive.** `ValueEnum` flags (`--type`, `--format`, `--effort`, `--livecrawl`, `--input-format`, enrichments `--enrichment-format`, admin `--group-by`, …) set `ignore_case = true`, so `--type Fast`, `--format JSON`, and `--effort Medium` all resolve; an invalid choice lists the valid values. The permissive `--category` parser accepts multi-word and legacy spellings, then post-parse coercion sends the canonical value (`research paper` → `publication`) on typed flags. `--body`/`--set` pass category values through unchanged.
-- **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..10000`; `--highlights[=N]` accepts a positive character cap.
+- **Content flags are forgiving.** `--text[=N|full]` accepts bare, `full`, or a character cap `1..1000000`; `--highlights[=N]` accepts a character cap `1..1000000`.
 - **Placeholders are caught, not forwarded.** A positional that looks like a literal placeholder (`<id>`, `$VAR`, `YOUR_KEY`, `…`) fails at the parse boundary with `placeholder_argument` (exit 1) naming the discovery step (`exa-agent … list`), rather than sending the literal to the API for a confusing 400/404.
 - **IDs are opaque** — Exa ids carry no CLI-strippable prefix, so no prefix coercion is applied (documented so its absence isn't read as an oversight).
 
@@ -300,11 +300,10 @@ exa-agent search QUERY
   --exclude-domain DOMAIN        # repeatable; excludeDomains[]
   --start-published-date ISO     # alias --published-after
   --end-published-date ISO       # alias --published-before
-  --start-crawl-date ISO         # alias --crawled-after
-  --end-crawl-date ISO           # alias --crawled-before
-  --include-text PHRASE          # includeText[]; single phrase only
-  --exclude-text PHRASE          # excludeText[]; single phrase only
-  --user-location CC             # 2-letter ISO country
+  --objective TEXT              # broader goal; max 4096 characters, independent of QUERY
+  --user-location COUNTRY|JSON   # country hint or JSON location object
+  --latitude FLOAT              # -90..90; requires --longitude
+  --longitude FLOAT             # -180..180; requires --latitude
   --moderation / --no-moderation # default off
   --compliance hipaa             # enterprise-only
   --additional-query QUERY       # repeatable; deep-* variants only
@@ -319,7 +318,7 @@ exa-agent search QUERY
   --include-html-tags
   --highlights[=N]               # search default: query-aware, capped at 800 chars/result; N overrides the cap
   --no-highlights                # metadata-only search results
-  --highlight-query TEXT         --highlight-max-characters N   # max 10000
+  --highlight-query TEXT         --highlight-max-characters N   # max 1000000
   --summary[=QUERY]              --summary-query TEXT  --summary-schema JSON|@file
   --extras-links N               --extras-image-links N
   --extras-rich-links N          --extras-rich-image-links N    --extras-code-blocks N
@@ -331,7 +330,7 @@ exa-agent search QUERY
   --livecrawl-timeout MS         # 0<x<=90000; default 10000
   --livecrawl never|always|fallback|preferred   # DEPRECATED → use --max-age-hours/--fresh/--cache-only
   --context[=true|false]         # DEPRECATED → use --highlights/--text
-  --context-max-characters N     # DEPRECATED
+  --context-max-characters N     # DEPRECATED; 1..1000000
 ```
 
 Guards:
@@ -341,8 +340,9 @@ Guards:
 - `--livecrawl` + `--max-age-hours` → exit 1 (upstream forbids sending both).
 - `--category company` with `--start/end-published-date` or `--exclude-domain` → exit 1 (unsupported; upstream may 400).
 - `--category people` with `--start/end-published-date` or `--exclude-domain` → exit 1; `--include-domain` accepts LinkedIn domains only.
-- More than one `--include-text` / `--exclude-text` → exit 1 (single-phrase arrays only).
+- Deprecated `includeText`/`excludeText` remain available through `--body`/`--set`, with approximate word matching; they have no typed flags. `startCrawlDate`/`endCrawlDate` are deprecated and ignored upstream; use publication dates for publication filtering.
 - `--offset` / `--page` are not defined (search has no offset pagination).
+- `--objective` above 4096 characters or unpaired/out-of-range coordinates → exit 1. Without coordinates `--user-location` preserves the country string; paired coordinates produce a location object with optional `country`.
 - `--stream` without a final non-null `outputSchema` → `warnings[]` code `stream_ignored`: upstream ignores streaming and falls back to a single JSON envelope. Explicit `--body`/`--set` overrides determine the final value.
 - Deprecated knobs (`--livecrawl`, `--context*`) used → non-fatal `warnings[]` with replacement.
 
@@ -377,7 +377,7 @@ Guards:
 - `--livecrawl` + `--max-age-hours` → exit 1.
 - Per-URL upstream failures arrive in `data.statuses[]` under HTTP 200; a batch with mixed outcomes exits 0 with `url_failed` warnings and `outcome: "partial"`, while a batch where every item fails exits 10 (contracts §11). Codes: `CRAWL_NOT_FOUND`, `CRAWL_TIMEOUT`, `CRAWL_LIVECRAWL_TIMEOUT`, `SOURCE_NOT_AVAILABLE`, `UNSUPPORTED_URL`, `CRAWL_UNKNOWN_ERROR`.
 - `outcome` is text-aware: empty, whitespace-only, gzip/PDF-signature, or control-heavy rows do not count as usable. `contentDiagnostics[]` summarizes the exact status/error/HTTP fields Exa returned and labels empty/binary/PDF rows; `warnings[]` and `nextActions[]` always provide a fallback when outcome is not `full`.
-- Government/primary-source fallback: Exa is the fast default, but its crawler can return `no_content`/`partial` for `uscode.house.gov`, `govinfo.gov`, eCFR, Congress.gov, and agency sites. For authority-critical statutory or regulatory text, follow the emitted action: `parallel-cli extract 'URL' --full-content --json`. This is an upstream crawl boundary, not content the CLI can safely reconstruct. PDFs are reported as `pdf_unextracted` because Exa returns extracted JSON text, not trustworthy raw PDF bytes; the CLI does not direct-download outside the Exa request path.
+- Government/primary-source fallback: Exa is the fast default, but its crawler can return `no_content`/`partial` for `uscode.house.gov`, `govinfo.gov`, eCFR, Congress.gov, and agency sites. For authority-critical statutory or regulatory text, follow the emitted action: `firecrawl scrape 'URL' --max-age 0`. This is an upstream crawl boundary, not content the CLI can safely reconstruct. PDFs are reported as `pdf_unextracted` because Exa returns extracted JSON text, not trustworthy raw PDF bytes; the CLI does not direct-download outside the Exa request path.
 
 ### `similar` — `POST /findSimilar` (deprecated upstream)
 
@@ -386,9 +386,11 @@ exa-agent similar URL
   --exclude-source-domain
   --category 'company|people|publication|news|personal site|financial report' --num-results N # legacy 'research paper' coerces to publication
   --include-domain DOMAIN      --exclude-domain DOMAIN
-  --start/end-published-date   --start/end-crawl-date
+  --start/end-published-date
   # content-extraction + freshness flags from `search` apply
 ```
+
+Deprecated `includeText`/`excludeText` body fields are ignored by `similar` for `company`/`people` entity categories; elsewhere they use approximate word matching. Crawl-date filters are ignored upstream. Prefer search and publication-date filters.
 
 Help banner (stderr): `Deprecated upstream: prefer 'exa-agent search --similar-to URL "..."'. Kept for full API coverage.` Emits a non-fatal `warnings[]` entry on every call.
 
@@ -397,11 +399,18 @@ Help banner (stderr): `Deprecated upstream: prefer 'exa-agent search --similar-t
 ```text
 exa-agent answer QUESTION
   --text / --no-text           # text:true returns full citation text; default off
+  --model exa|exa-pro|exa-research|exa-fast
+  --system-prompt TEXT|@file
+  --user-location COUNTRY|JSON # country hint or JSON location object
+  --latitude FLOAT            # -90..90; requires --longitude
+  --longitude FLOAT           # -180..180; requires --latitude
   --output-schema JSON|@file   # structured answer object instead of string
   --stream                     # SSE
 ```
 
 Returns `data.answer`, `data.citations`, `costDollars`. `--stream --ndjson` emits `exa.cli.event.v1` lines then a terminal `exa.cli.response.v1` (contracts §8).
+
+Search and answer location body objects accept country-only or paired coordinates with optional country. Unknown object fields are rejected.
 
 ### `context` — `POST /context` (Exa Code)
 
@@ -423,9 +432,10 @@ exa-agent agent runs create QUERY
   --input-row JSON             # repeatable convenience → input.data[]
   --exclusion JSON|@file       # input.exclusion
   --previous-run-id ID         # continue a completed run (same team)
-  --effort auto|minimal|low|medium|high|xhigh|max   # default auto; `medium` good single-entity default
-  --max-cost-dollars 1..100    # budget.maxCostDollars for omitted/auto/max effort
-  --data-source PROVIDER       # repeatable; max 5; fiber|financial_datasets|similarweb|baselayer|affiliate|particle|jinko
+  --effort auto|minimal|low|medium|high|xhigh|ultra   # default auto; `medium` good single-entity default
+  --max-cost-dollars 1..100    # budget.maxCostDollars for omitted/auto/ultra effort
+  --max-duration-seconds N    # soft wall-clock limit, 300..10800; ultra only
+  --data-source PROVIDER       # repeatable; max 5; fiber|financial_datasets|similarweb|baselayer|affiliate|particle|jinko|polymarket|macrobond
   --metadata JSON
   --stream                     # SSE via Accept: text/event-stream
   --beta VALUE
@@ -439,7 +449,7 @@ exa-agent agent runs get    ID
 exa-agent agent runs events ID --limit N --cursor TOKEN          # JSON pages
 exa-agent agent runs events ID --stream --last-event-id ID       # SSE replay
 exa-agent agent runs cancel ID --yes                            # discards gathered results
-exa-agent agent runs stop   ID --yes                            # max effort: finish early with accrued results
+exa-agent agent runs stop   ID --yes                            # ultra effort: finish early with accrued results
 exa-agent agent runs delete ID --yes
 ```
 
@@ -447,8 +457,10 @@ Guards / notes:
 - Un-keyed `create` is never auto-retried; an ambiguous create failure writes a pending-run record and `suggestedCommand` points at `agent runs list --limit 10` (D7, contracts §7).
 - `--data-source` count > 5 → exit 1.
 - Typed `--data-source` values are case-insensitive and sent with canonical spelling; invalid values exit 1 with the accepted set. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; explicit `--body`/`--set` values pass through unchanged.
-- `--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. `effort max` requires both an explicit budget cap and `--beta agent-max-effort-2026-07-27` (comma-separated beta tokens are accepted; the CLI never invents the beta header).
-- Surface `stopReason` in output; `budget_reached` emits a `budget_reached` warning so agents do not silently treat the run as fully complete.
+- `--max-cost-dollars` may be used with omitted/`auto` effort; fixed efforts reject budget. Ultra requires an explicit $1..$100 cap as CLI safety policy, even though upstream accepts a time-only budget. `--max-duration-seconds` is an optional soft wall-clock limit for Ultra, in 300..10800 seconds. Upstream stops starting work as the limit approaches; this is separate from the local request timeout. Ultra and `stop` require no beta header. Legacy `max` fails locally with an exact Ultra migration command.
+- Surface `stopReason` in output; `budget_reached` and `time_limit_reached` emit matching warnings so agents can inspect incomplete runs.
+
+The SDK-only beta `/agent/monitors` family (nine operations) is deliberately not exposed as typed commands: it has no public documented spec or contract. This is separate from the documented top-level `monitor` and `websets monitors` families.
 
 ### `research` — `/research/v1` (retired upstream)
 
@@ -479,6 +491,8 @@ exa-agent monitor runs get  ID RUN_ID
 Guard: `monitor create` with `--webhook-url` but no `--secret-output` and a non-TTY → `warnings[]`: the `webhookSecret` is returned once and will be lost unless captured.
 
 ### `websets` — `/websets/v0/websets`
+
+Websets mutation metadata keys are at most 250 characters after body/set overrides. Agent and Batch metadata are not subject to this Websets constraint.
 
 ```text
 exa-agent websets create   --query TEXT --count N
@@ -618,6 +632,10 @@ Kept for breadth where upstream still exists; deprecated surfaces warn on stderr
 | `similar` / `POST /findSimilar` | Deprecated upstream | `search --similar-to URL` |
 | `--livecrawl never\|always\|fallback\|preferred` | Deprecated | `--max-age-hours N` / `--fresh` / `--cache-only` |
 | `--context` / `--context-max-characters` | Deprecated | `--highlights` / `--text` |
+| `crawledBeforeDate` body field | Deprecated Snapshot alias | `--snapshot-as-of`; same historical conflicts |
+| `startCrawlDate` / `endCrawlDate` body fields | Deprecated, ignored upstream | Publication dates where appropriate |
+| `includeText` / `excludeText` body fields | Deprecated, approximate matching; ignored by similar company/people | Query and domain filters; no typed expansion |
+| `--effort max` | Replaced upstream, rejected locally | `--effort ultra` with explicit cost cap |
 | `research` / `/research/v1` | Retired | `search --type deep-reasoning` |
 | `useAutoprompt` | Removed from schema | not exposed; not a flag |
 | legacy highlight count/sentence sizing | Deprecated | `--highlights N` / `--highlight-max-characters` |

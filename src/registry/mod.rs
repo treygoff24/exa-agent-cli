@@ -18,6 +18,7 @@ pub const AGENT_DATA_SOURCE_PROVIDERS: &[&str] = &[
     "particle",
     "jinko",
     "polymarket",
+    "macrobond",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +187,7 @@ pub fn field_input_help(command: &str, flag: &str) -> Option<String> {
     }
     if command == "agent runs create" && flag == "max-cost-dollars" {
         return Some(
-            "Set `budget.maxCostDollars` (1..=100); valid only with omitted, auto, or max effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`."
+            "Set `budget.maxCostDollars` (1..=100); valid only with omitted, auto, or ultra effort. Ultra requires an explicit cap as a CLI safety policy."
                 .to_string(),
         );
     }

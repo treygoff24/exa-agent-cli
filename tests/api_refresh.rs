@@ -142,7 +142,7 @@ fn answer_rejects_unknown_models_from_flags_and_body() {
 }
 
 #[test]
-fn answer_location_accepts_null_but_rejects_non_string_values() {
+fn answer_location_accepts_null_but_rejects_non_location_values() {
     let response = ok(&[
         "answer",
         "q",
@@ -165,7 +165,7 @@ fn answer_location_accepts_null_but_rejects_non_string_values() {
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(error["error"]["code"], "invalid_field_type");
+        assert_eq!(error["error"]["code"], "invalid_value");
         assert!(
             error["error"]["message"]
                 .as_str()

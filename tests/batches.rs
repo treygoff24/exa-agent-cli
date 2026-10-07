@@ -10,7 +10,6 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BATCH_BETA: &str = "batches-2026-06-06";
-const AGENT_STOP_BETA: &str = "agent-max-effort-2026-07-27";
 const VALID_REQUESTS: &str =
     r#"[{"customId":"row-1","method":"POST","url":"/search","body":{"query":"AI"}}]"#;
 
@@ -309,10 +308,7 @@ fn typed_previews_auto_merge_required_beta_tokens() {
         "--dry-run",
         "--compact",
     ]));
-    assert_eq!(
-        stop["data"]["request"]["headers"],
-        serde_json::json!([{"name":"Exa-Beta","value":AGENT_STOP_BETA}])
-    );
+    assert!(stop["data"]["request"].get("headers").is_none());
 }
 
 #[test]
@@ -349,7 +345,7 @@ fn live_create_sends_merged_beta_and_adds_poll_action() {
 }
 
 #[test]
-fn live_agent_stop_uses_distinct_route_confirmation_and_merged_beta() {
+fn live_agent_stop_uses_distinct_route_confirmation_and_caller_beta() {
     let (base_url, server) = local_json_server(
         |request| {
             assert!(
@@ -357,10 +353,7 @@ fn live_agent_stop_uses_distinct_route_confirmation_and_merged_beta() {
                 "{request}"
             );
             assert!(!request.starts_with("POST /agent/runs/agent_run_stop/cancel "));
-            assert_beta_header(
-                &request,
-                &format!("Exa-Beta: caller-token,{AGENT_STOP_BETA}"),
-            );
+            assert_beta_header(&request, "Exa-Beta: caller-token");
         },
         r#"{"id":"agent_run_stop","status":"completed","stopReason":"stopped"}"#,
     );

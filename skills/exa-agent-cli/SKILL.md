@@ -35,6 +35,7 @@ Structured successes are JSON envelopes with `ok`, `data`, `warnings`, and `next
 
 ## Search
 - Set result count with `--num-results`; search is not cursor-paginated.
+- Use search `--objective TEXT` for a broader goal independent of search type (maximum 4096 Unicode characters). Search and answer accept `--user-location COUNTRY|JSON`, or paired `--latitude N --longitude N` within -90..90 and -180..180, optionally with a country. Country-only requests retain their string form; coordinates produce a location object.
 - Use the named rich-input controls: search/answer `--output-schema JSON|@file`, search/answer/agent runs create `--system-prompt TEXT|@file`, and contents `--highlights [QUERY|JSON|@file]`.
 - Search returns query-aware 800-character highlights by default; use `--no-highlights` for metadata only, or `--text 1500` instead of `--text full` for capped triage text. `--highlights` accepts a character cap or `JSON|@file`; for a shared context budget use `--highlights '{"dynamic":true,"verbosity":"medium"}' --beta dynamic-highlights-2026-08-28`, omitting `maxCharacters` and `numSentences` with `verbosity`.
 - `search --stream` requests SSE for synthesized output. Without a final non-null `outputSchema`, upstream returns normal JSON and the envelope warns with `stream_ignored`; `--body`/`--set` overrides determine the final request.
@@ -46,23 +47,24 @@ Structured successes are JSON envelopes with `ok`, `data`, `warnings`, and `next
 
 ## Contents and freshness
 - Content retrieval is cache-first by default. Use `--fresh` for latest or current material, `--cache-only` to forbid live fetching, `--max-age-hours N` for an explicit freshness window, and `--livecrawl-timeout MS` to bound live crawling.
-- Retrieve the newest stored page version as of an instant with `--snapshot-as-of YYYY-MM-DD` or an RFC 3339 date-time. Snapshot cannot be combined with live-web, freshness-window, or subpage options.
-- Pass URLs positionally or with `--ids`, for example `exa-agent contents "https://exa.ai" "https://docs.exa.ai" --text 10000 --json`; `--text` accepts a bare flag, `full`, or a numeric cap from 1 through 10000.
+- Retrieve the newest stored page version as of an instant with `--snapshot-as-of YYYY-MM-DD` or an RFC 3339 date-time. Snapshot cannot be combined with live-web, freshness-window, or subpage options. The deprecated body alias `crawledBeforeDate` follows the same conflicts; prefer `snapshotAsOf`.
+- Pass URLs positionally or with `--ids`, for example `exa-agent contents "https://exa.ai" "https://docs.exa.ai" --text 10000 --json`; `--text` accepts a bare flag, `full`, or a numeric cap from 1 through 1000000.
 - Use `contents --chunk-size N --jobs J` for 1-16 workers (default 1); an explicit `--jobs` requires `--chunk-size`.
 - Multi-chunk stream bodies are rejected before sending; admitted results stay in input order, drain after failure, and stop before new rounds. `--output` retains every successful rendering with one confirmation; JSON is a sequence of envelopes, and NDJSON keeps records and summaries.
 - Contents/fetch and answer/ask live success envelopes add text-aware `outcome` and `contentDiagnostics`. Empty, binary, and unextracted-PDF rows are unusable; zero usable contents rows produce `no_content`, while all-URL crawl failures still exit 10.
+- For government pages without usable content, the fallback is `firecrawl scrape URL --max-age 0`; fetch full authoritative text before quoting or editing it.
 - Use Exa as the fast default; for `no_content` or `partial` sources, follow `warnings` and `nextActions` (their `suggestedCommand` names the exact fallback fetch; copy it rather than improvising) or fetch the URL with another tool. Authority-critical text must come from a crawl that returned it, including for uscode.house.gov, govinfo.gov, eCFR, Congress.gov, and agency sites.
 - Empty contents error objects use `upstream_reason_unavailable` and suggest retrying or directly fetching the quoted URL.
-- The standalone `/context` route works but is undocumented and absent from the official Exa SDKs; it may change or be removed without notice.
+- The standalone `/context` route is retained as an undocumented compatibility route absent from the official Exa SDKs; it may change or disappear.
 
 ## Answer
-- Set `answer --model` to `exa`, `exa-pro`, `exa-research`, or `exa-fast`, and pass a country code with `--user-location`; `--body` and `--set` override named flags.
+- Set `answer --model` to `exa`, `exa-pro`, `exa-research`, or `exa-fast`, and pass a country code or JSON location with `--user-location`; `--body` and `--set` override named flags.
 - Use `answer` to identify sources, then `contents` to read exact page text: `exa-agent answer "<question>" --json`, followed by `exa-agent contents <url> --text full --json`. Answer summarizes rather than retrieving full page bodies such as changelogs or release notes, so exact wording must come from contents.
 
 ## Agent runs
-- `agent --data-source` accepts `fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`, `particle`, `jinko`, and `polymarket` case-insensitively (max 5) and sends canonical spellings. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; `--body`/`--set` values pass through unchanged.
-- `agent --max-cost-dollars` maps `budget.maxCostDollars` and is valid only with omitted, `auto`, or `max` effort. `--effort max` also requires `--beta agent-max-effort-2026-07-27`; `stopReason` `budget_reached` emits a warning.
-- Finish a max-effort run early with its gathered results by running `agent runs stop ID --yes`; the command adds its required beta token. Unlike cancellation, stop returns partial work and charges accrued usage.
+- `agent --data-source` accepts `fiber`, `financial_datasets`, `similarweb`, `baselayer`, `affiliate`, `particle`, `jinko`, `polymarket`, and `macrobond` case-insensitively (max 5) and sends canonical spellings. Legacy `fiber_ai` and `particle_news` remain accepted with `legacy_value_coerced`; `--body`/`--set` values pass through unchanged.
+- `agent --max-cost-dollars` maps `budget.maxCostDollars` and is valid only with omitted, `auto`, or `ultra` effort. Typed-command CLI safety policy requires an explicit 1..100 dollar cap for ultra; raw remains pass-through. `--max-duration-seconds` is a soft wall-clock limit of 300..10800 seconds, ultra only; upstream stops starting work as the limit approaches. It is separate from the local request timeout. Old max effort returns a migration preview preserving the final request body; no beta is required. Reapply original profile/base URL/header context when `recoveryContextRequired` is set. `budget_reached` and `time_limit_reached` emit success warnings.
+- Finish an ultra-effort run early with its gathered results by running `agent runs stop ID --yes`; no beta token is required. Unlike cancellation, stop returns partial work and charges accrued usage.
 
 ## Batches
 - Create batches with `--requests JSON|@file` and optional `--metadata JSON|@file`; every request needs a unique `customId`, method `POST`, URL `/search` or `/agent/runs`, and a nonstreaming object body. Batch commands add their required beta token, and cancel/delete require `--yes`.
@@ -73,6 +75,7 @@ Structured successes are JSON envelopes with `ok`, `data`, `warnings`, and `next
 - Pass repeated `--include-domain` and `--exclude-domain` flags to monitor create/update, and use `--set search.contents.highlights` for monitor highlight options.
 
 ## Websets
+- Metadata keys on supported Websets mutations are limited to 250 Unicode characters, including nested enrichment metadata. This limit does not apply to Agent or batch metadata.
 - Include a Webset's items with `exa-agent websets get WEBSET --expand items`.
 - Create an import, then use the upload PUT template in its returned `nextActions`; `websets imports create` accepts neither `--csv` nor `--url`.
 

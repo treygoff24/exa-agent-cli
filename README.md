@@ -1,6 +1,6 @@
 # exa-agent
 
-An agent-first command-line interface over the full [Exa](https://exa.ai) API.
+An agent-first command-line interface over the documented [Exa](https://exa.ai) API.
 
 Unofficial project; not affiliated with, endorsed by, or sponsored by Exa.
 
@@ -123,12 +123,15 @@ exa-agent search "AI policy" --snapshot-as-of 2026-09-01
 exa-agent answer "what changed in the EU AI Act in 2025?"
 exa-agent answer "Recent fusion energy milestones" --model exa-pro --system-prompt "Use primary sources" --user-location US
 
+# Give search a broader objective and a paired location hint
+exa-agent search "fusion energy" --objective "Find recent US demonstration projects" --user-location US --latitude 37.77 --longitude -122.42
+
 # Share a highlights budget across results (beta)
 exa-agent search "fusion energy" --highlights '{"dynamic":true,"verbosity":"medium"}' --beta dynamic-highlights-2026-08-28
 
 # Page contents
 exa-agent contents https://exa.ai https://docs.exa.ai --text
-# Contents accepts positional URLS or `--ids`. Text accepts bare, full, or N (1..10000).
+# Contents accepts positional URLS or `--ids`. Text accepts bare, full, or N (1..1000000).
 # --snapshot-as-of accepts an RFC 3339 date or date-time and cannot be combined with freshness,
 # live-crawl, or subpage options.
 
@@ -190,8 +193,8 @@ commands still work.
 
 ### Command surface
 
-- **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream). The `/context` route is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it currently works but may change or be removed without notice.
-- **Agent runs** — `agent runs create|get|list|events|cancel|stop|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/beta `max` effort.
+- **Core retrieval** — `search`, `contents`, `answer`, `context`, and `similar` (deprecated upstream). The `/context` route is no longer documented and is absent from the official Exa SDKs as of 2026-09-21; it is retained for compatibility and may change or disappear.
+- **Agent runs** — `agent runs create|get|list|events|cancel|stop|delete`; `create` streams and supports metered `--max-cost-dollars` caps for `auto`/`ultra` effort.
 - **Batches** — `batches create|list|get|cancel|delete` (alias `batch`) runs `/search` and `/agent/runs` requests asynchronously. Typed batch commands add the required beta token. Access depends on your team's Batch API entitlement.
 - **Research (retired)** — the upstream `/research/v1` API was retired (HTTP 410); `research …` remains as a local stub that exits with `research_retired` and points at `search --type deep-reasoning`.
 - **Monitors** — `monitor …`, the top-level recurring search monitors.
@@ -199,6 +202,26 @@ commands still work.
 - **Team and admin** — `team` (bare, or `team info`) calls Exa's `/websets/v0/teams/me` endpoint for quota/concurrency; `admin keys create|list|get|update|delete|usage` against the Team Management API, gated behind a separate `EXA_SERVICE_KEY` and admin host. Whether a call succeeds still depends on your team's own access to that endpoint. To confirm a credential works, use `auth test`.
 - **Escape hatch** — `raw METHOD PATH` calls any Exa endpoint, including ones not yet modeled, while keeping auth, retry, output, and error handling. For payment-annotated Search/Contents calls, raw also supports stdin-only signed payment pass-through (`--x402-payment-stdin`, `--mpp-payment-stdin`) and `--payment-discovery`; wallet custody/signing is intentionally out of scope.
 - **Offline self-description** — `capabilities`, `schema`, `robot-docs`, `doctor`, `auth`, `config`, `preset`, and `macro`.
+
+Search accepts `--objective TEXT` (up to 4,096 characters) independently of the
+query. Search and answer accept `--user-location COUNTRY|JSON` and paired `--latitude` /
+`--longitude` coordinates; latitude is -90..90 and longitude is -180..180.
+
+Ultra runs require an explicit `--max-cost-dollars` cap of $1..$100 as CLI safety
+policy for typed commands; `raw` remains the pass-through escape hatch.
+`--max-duration-seconds` optionally sets a soft Ultra wall-clock limit of
+300..10,800 seconds; upstream stops starting work as the limit approaches.
+Exa reports `time_limit_reached` when that limit stops a run. Legacy `--effort max`
+fails locally with an Ultra migration command instead of changing effort silently.
+
+```sh
+exa-agent agent run "Map fusion demonstration projects" --effort ultra --max-cost-dollars 5 --max-duration-seconds 600 --data-source macrobond --dry-run --print-request
+```
+
+The SDK-only beta `/agent/monitors` family is intentionally absent from the typed
+CLI because it has no public documented spec or contract. Use the documented
+`monitor` or `websets monitors` commands for recurring work; `raw` remains available
+when you have an explicit endpoint contract.
 
 ### Asynchronous batches
 
@@ -219,11 +242,11 @@ Batch creation is never automatically retried, even with `--idempotency-key`:
 Exa does not document deduplication for this beta. An ambiguous failure records
 the request and points to a scoped batch listing instead of risking a duplicate.
 
-`agent runs stop ID --yes` completes a max-effort run early with the results it
+`agent runs stop ID --yes` completes an Ultra run early with the results it
 has gathered and still incurs accrued usage. `agent runs cancel ID --yes`
 terminates the run and discards those results, so both are gated the same way.
-The stop command adds the required beta token automatically, and neither command
-repeats a token you already supplied through `--beta` or `--header Exa-Beta:`.
+Ultra creation and early stop require no beta header. Batch commands still add
+their required beta token.
 
 ### Presets and macros
 

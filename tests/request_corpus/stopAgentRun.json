@@ -20,17 +20,11 @@
       "method": "POST",
       "path": "/agent/runs/run_abc123/stop",
       "query": [],
-      "body": {},
-      "headers": [
-        {
-          "name": "Exa-Beta",
-          "value": "agent-max-effort-2026-07-27"
-        }
-      ]
+      "body": {}
     },
     "dryRun": true
   },
-  "dataHash": "sha256:bb9985b0fb66a7bf200d9eea0e8aa5e69a77d4db64eac49d5870abaa070c9507",
+  "dataHash": "sha256:b943f9bc577eed948f76b584c0f5d4338c7b75575f60206f919992a5a22d3aa3",
   "costDollars": {
     "total": 0.0
   },

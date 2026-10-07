@@ -214,18 +214,17 @@ fn agent_effort_and_budget_match_current_openapi() {
         .iter()
         .map(|value| value.as_str().expect("enum string").to_string())
         .collect();
-    assert_eq!(
-        effort,
-        BTreeSet::from([
-            "auto".to_string(),
-            "high".to_string(),
-            "low".to_string(),
-            "max".to_string(),
-            "medium".to_string(),
-            "minimal".to_string(),
-            "xhigh".to_string(),
-        ])
-    );
+    let op = registry::lookup_by_command("agent runs create").unwrap();
+    let effort_field = op
+        .fields
+        .iter()
+        .find(|field| field.flag == "effort")
+        .unwrap();
+    let cli_effort = registry::field_enum_values(op, effort_field)
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+    assert_eq!(effort, cli_effort);
     let create_props = schemas["CreateAgentRunRequest"]["properties"]
         .as_object()
         .expect("CreateAgentRunRequest properties");

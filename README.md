@@ -13,8 +13,10 @@ crate is `exa-agent-cli`.
 brew install treygoff24/tap/exa-agent
 ```
 
-Version **0.8.0** adds Ultra agent runs, search objectives, location hints, and
-larger content limits. Check `exa-agent --version` after installing or upgrading.
+Version **0.8.1** raises the minimum Rust version to 1.88 and updates the TLS
+trust-store dependencies (RUSTSEC-2026-0346..0349, 0381..0383) and `time`
+(RUSTSEC-2026-0009). Version 0.8.0 added Ultra agent runs, search objectives,
+location hints, and larger content limits. Check `exa-agent --version` after installing or upgrading.
 
 ## Quick example
 

@@ -75,6 +75,13 @@ that skill leaves abstract. Networked commands are marked below; publication is 
 
 ## Latest published cycle
 
+- 2026-10-22: 0.8.1 security-maintenance release. MSRV 1.85 -> 1.88; rustls
+  0.23.46, rustls-webpki 0.103.16, webpki-roots 1.0.10 (RUSTSEC-2026-0346..0349,
+  0381..0383, eMudhra CA incident); time 0.3.47 (RUSTSEC-2026-0009). No API
+  surface changes. Details in [CHANGELOG.md](../CHANGELOG.md).
+
+### Previous: 0.8.0 cycle
+
 - 2026-10-07: 0.8.0 release preparation and local verification. The full gate passed 690 tests,
   `cargo publish --locked --dry-run` passed, and installed provenance and package
   identity were checked. Live search accepted objective, location, and larger

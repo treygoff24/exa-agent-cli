@@ -4,6 +4,23 @@ Notable changes, newest first.
 
 ## Unreleased
 
+## 0.8.1 — 2026-10-22
+
+### Changed
+
+- Minimum supported Rust version is now 1.88 (was 1.85). Building from source
+  or `cargo install` needs Rust 1.88 or newer; prebuilt archives and the
+  Homebrew formula are unaffected.
+
+### Security
+
+- TLS trust-store dependencies updated: rustls 0.23.46, rustls-webpki 0.103.16,
+  and webpki-roots 1.0.10. This picks up the fixes for RUSTSEC-2026-0346,
+  RUSTSEC-2026-0347, RUSTSEC-2026-0348, RUSTSEC-2026-0349, RUSTSEC-2026-0381,
+  RUSTSEC-2026-0382, and RUSTSEC-2026-0383, and the updated trust anchors that
+  follow the eMudhra CA incident.
+- `time` updated to 0.3.47 for RUSTSEC-2026-0009.
+
 ## 0.8.0 — 2026-10-07
 
 ### Added

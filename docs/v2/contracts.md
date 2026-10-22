@@ -11,7 +11,7 @@ the [README](../../README.md).
 
 Date: 2026-06-29
 Status: maintained contract reference. Schema IDs, field names, exit codes, and
-validation rules describe the local 0.8.0 candidate. Installed `capabilities`,
+validation rules describe the 0.8.1 release. Installed `capabilities`,
 `--help`, and `robot-docs guide` expose the running contract.
 
 Output, errors, retry rules, streaming, pagination, and bulk contents behavior
@@ -402,9 +402,9 @@ Offline, no network. Describes the CLI contract, not account state. `describe` i
   "ok": true,
   "binary": "exa-agent",
   "build": {
-    "version": "0.8.0",
+    "version": "0.8.1",
     "gitSha": "abc1234",
-    "buildDate": "2026-10-07",
+    "buildDate": "2026-10-22",
     "target": "aarch64-apple-darwin"
   },
   "spec": {

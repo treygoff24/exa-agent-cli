@@ -17,7 +17,7 @@ shipped. Current usage and publication status are in the
   request fields are modeled.
 - D40 export support was removed under D41. `/context` remains with an
   undocumented-upstream warning; offline checks do not prove live support.
-- D42 is implemented in the local 0.8.0 candidate. Metadata-key limits apply
+- D42 is implemented as of 0.8.0. Metadata-key limits apply
   only to supported Websets mutations and nested enrichment metadata on Webset
   creation. Agent/Batch metadata is outside this Websets rule; nested
   `search.metadata` is not defined by the upstream Webset creation schema.

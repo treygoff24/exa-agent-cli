@@ -1,11 +1,10 @@
 # Commands and flags: design and current notes
 
-Original design: 2026-06-29. Current behavior notes updated for the local 0.8.0 candidate.
+Original design: 2026-06-29. Current behavior notes updated for 0.8.1.
 
 The command tree and per-command blocks retain design targets. They are not a
 complete help transcript. Some flags below remain body/set-only or unimplemented;
-use installed `--help` and `capabilities --json` before invoking them. Public
-0.8.0 publication is pending.
+use installed `--help` and `capabilities --json` before invoking them.
 
 Status: design reference for the `exa-agent` command tree and flag taxonomy. Output shape, exit codes, envelopes, pagination, batch, and streaming are owned by [`contracts.md`](contracts.md) and are referenced, not restated. Historical product decisions live in [`decisions.md`](decisions.md); current credential storage and release status are documented in the [README](../../README.md).
 

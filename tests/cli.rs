@@ -17,7 +17,7 @@ fn parses(args: &[&str]) -> Cli {
         .chain(args.iter().copied())
         .map(String::from)
         .collect();
-    Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("failed to parse {:?}: {e}", args))
+    Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"))
 }
 
 fn parse_err(args: &[&str]) -> clap::Error {

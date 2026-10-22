@@ -140,8 +140,7 @@ fn modeled_registry_fields_match_openapi_request_bodies() {
     let unexpected_skips: Vec<_> = skipped_ids.difference(&known_skips).copied().collect();
     assert!(
         unexpected_skips.is_empty(),
-        "unexpected OpenAPI parity skip(s): {:?}; this modeled op no longer resolves an OpenAPI requestBody; either fix its schema resolution or justify it in known_skips()",
-        unexpected_skips
+        "unexpected OpenAPI parity skip(s): {unexpected_skips:?}; this modeled op no longer resolves an OpenAPI requestBody; either fix its schema resolution or justify it in known_skips()",
     );
     assert!(
         failures.is_empty(),

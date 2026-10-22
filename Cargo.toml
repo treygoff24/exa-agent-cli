@@ -2,7 +2,7 @@
 name = "exa-agent-cli"
 version = "0.8.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Agent-first CLI over the full Exa API surface (single static binary)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/treygoff24/exa-agent-cli"
@@ -46,8 +46,8 @@ clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
-# Keep the lockfile below the 1.85 MSRV; newer 0.3 releases require Rust 1.88.
-time = { version = "=0.3.45", features = ["parsing"] }
+# time 0.3.47+ fixes RUSTSEC-2026-0009 and needs Rust 1.88, which is the MSRV.
+time = { version = "0.3.47", features = ["parsing"] }
 toml = "0.8"
 toml_edit = "0.22"
 # gzip: flate2 with its default pure-Rust `rust_backend` (miniz_oxide) — no zlib C shim, so musl
@@ -57,7 +57,7 @@ sha2 = "0.10"
 ctrlc = "3"
 
 # Unix-only: safe wrappers over the syscalls the state layer needs (flock-style locking, O_NOFOLLOW
-# opens, fchmod on a held fd). rust-version 1.63, well under our 1.85 MSRV, and already in the tree
+# opens, fchmod on a held fd). rust-version 1.63, well under our 1.88 MSRV, and already in the tree
 # transitively, so this adds no new third-party code to audit.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["fs"] }

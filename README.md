@@ -97,14 +97,14 @@ cargo build --release
 cargo run --bin exa-agent -- search "rust async runtimes" --num-results 5
 ```
 
-The minimum supported Rust version is 1.85. Run the local MSRV gate before
+The minimum supported Rust version is 1.88. Run the local MSRV gate before
 opening a Rust change:
 
 ```sh
-cargo +1.85 clippy --all-features --all-targets
+cargo +1.88 clippy --all-features --all-targets
 ```
 
-After installing Rust 1.85, CI confirms the stricter
+After installing Rust 1.88, CI confirms the stricter
 `cargo clippy --locked --all-features --all-targets -- -D warnings` variant.
 
 ### Development builds
